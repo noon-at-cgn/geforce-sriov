@@ -151,7 +151,7 @@ A card that was rescanned keeps using the revealed capability until it is remove
 | Path | What it is | License |
 |---|---|---|
 | `geforce-sriov` (`src/`) | CLI: inspection, install, preparation, VF bring-up, uninstall | MIT |
-| `kernel/geforce_sriov.c` | Livepatch module (DKMS `geforce-sriov/0.2.1`) | GPL-2.0-only OR MIT |
+| `kernel/geforce_sriov.c` | Livepatch module (DKMS `geforce-sriov/0.2.2`) | GPL-2.0-only OR MIT |
 | `hook/libgeforce_sriov.so` | `LD_PRELOAD` identity hook for `nvidia-vgpud` only | MIT |
 | `driver/geforce-sriov-patch` | Patcher for the user's own `nv-kernel.o_binary` | MIT |
 | `systemd/` | `geforce-sriov-prepare.service`, `geforce-sriov-activate.service` and an `nvidia-vgpud` drop-in | MIT |
@@ -234,7 +234,7 @@ The step-by-step sequence is in [What prepare does](#what-prepare-does).
 
 ## Install details
 
-A live install copies the binaries to `--prefix` (default `/usr/local`), the hook to `$PREFIX/lib/geforce-sriov/` and the module source to `/usr/src/geforce-sriov-0.2.1/`, then runs `dkms add/build/install` and installs the boot units.
+A live install copies the binaries to `--prefix` (default `/usr/local`), the hook to `$PREFIX/lib/geforce-sriov/` and the module source to `/usr/src/geforce-sriov-0.2.2/`, then runs `dkms add/build/install` and installs the boot units.
 If DKMS has other `geforce-sriov` versions, `install` builds this version as a trial before removing them from DKMS.
 After installing this version, it removes each old source tree under `/usr/src` only if it installed every file in that tree.
 After a successful cleanup, only this version remains registered.
@@ -267,8 +267,8 @@ Unless `--driver=skip` is given, a live install then runs the driver step
   Otherwise it refuses (exit 3), asks you to reinstall the stock module first, and names `--driver=skip`, which keeps the installed module as it is.
 - A rerun on a host already prepared for this kernel changes nothing when the patched plugin copy is
   in place, and otherwise replaces the plugin copy and points `libnvidia-vgpu.so` at it.
-- When the installed module is NVIDIA's open flavour (licence `Dual MIT/GPL`), the step prints a
-  warning and continues: the module it builds is the proprietary flavour and replaces it.
+- When the installed module is NVIDIA's open flavour (licence `Dual MIT/GPL`), the step refuses before writing.
+  Remove NVIDIA's driver, for example with `nvidia-uninstall`, install the vGPU host package again with `--kernel-module-type=proprietary`, then run `install` again.
 - A failure after the first write restores what it replaced.
   `geforce-sriov-driver --dry-run` prints the planned commands, including the `.text` comparison, and builds nothing.
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.2] - 2026-11-10
+
+### Added
+
+- The driver step refuses an installed NVIDIA open-flavour module and explains how to install the proprietary flavour.
+  In 0.2.1 it warned and continued to a module `.text` size-mismatch refusal.
+
+### Changed
+
+- With `--driver-file`, NVIDIA's installer receives `--kernel-module-type=proprietary`; the printed and manual commands include it too (thanks to @Neko-0v0, PR #3).
+
 ## [0.2.1] - 2026-11-08
 
 ### Added
