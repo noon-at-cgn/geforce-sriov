@@ -5,7 +5,7 @@
 #   driver/geforce-sriov-patch     driver patcher      (driver/)
 #   kernel/geforce_sriov.ko        livepatch module    (kernel/Makefile, `make module`)
 
-VERSION := 0.2.1
+VERSION := 0.2.2
 
 CC ?= cc
 CFLAGS ?= -O2 -g

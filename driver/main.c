@@ -26,7 +26,7 @@ int main(int argc,char **argv)
 {
  unsigned char *p=NULL,*stock=NULL;size_t n=0,sn=0,i;struct gs_patch_info info;const struct gs_ada_revision *r;char err[512]={0};int rc=1,w,created=0,st;
  if(argc==2&&(!strcmp(argv[1],"--help")||!strcmp(argv[1],"-h"))){usage(stdout);rc=0;goto end;}
- if(argc==2&&!strcmp(argv[1],"--version")){puts("geforce-sriov-patch 0.2.1");rc=0;goto end;}
+ if(argc==2&&!strcmp(argv[1],"--version")){puts("geforce-sriov-patch 0.2.2");rc=0;goto end;}
  if(argc>=2&&!strcmp(argv[1],"ada")){
   if(!((argc==3&&!strcmp(argv[2],"list"))||(argc==4&&!strcmp(argv[2],"inspect"))||(argc==5&&(!strcmp(argv[2],"apply")||!strcmp(argv[2],"revert"))))){usage(stderr);return 2;}
   if(!strcmp(argv[2],"list")){

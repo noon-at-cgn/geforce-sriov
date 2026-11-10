@@ -28,8 +28,8 @@ jobs:
           make CC=${{ matrix.cc }} install DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr DEVICES=0000:01:00.0
           find "$RUNNER_TEMP/stage" -type f | sort
           test -x "$RUNNER_TEMP/stage/usr/bin/geforce-sriov"
-          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.2.1/dkms.conf"
-          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.2.1/include/gs_devices.h"
+          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.2.2/dkms.conf"
+          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.2.2/include/gs_devices.h"
           grep -qx 'bdfs=0000:01:00.0' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           grep -qx 'identity=on' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           grep -qx 'identity_force_host=on' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
