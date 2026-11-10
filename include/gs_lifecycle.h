@@ -548,10 +548,10 @@ int gs_nvidia_package_version(const char *name, char *out, size_t len);
  * the first 16 hex digits of its SHA-256>/, reusing an earlier extraction of the same file. When
  * root (live: "") already has that version's libnvidia-vgpu.so, nothing is installed. Otherwise,
  * with accept_license and nouveau not loaded, run NVIDIA's installer (`sh file --silent --dkms
- * --skip-module-load`) after the licence notice; without it, refuse: the driver step needs the
- * userspace. Writes the extracted root to dir. GS_EXIT_* with the reason printed; a refusal after
- * this call extracted the package is GS_EXIT_FAIL, because something was written. *changed: 1 once it
- * extracted the package or started NVIDIA's installer, else 0.
+ * --skip-module-load --kernel-module-type=proprietary`) after the licence notice; without it, refuse:
+ * the driver step needs the userspace. Writes the extracted root to dir. GS_EXIT_* with the reason
+ * printed; a refusal after this call extracted the package is GS_EXIT_FAIL, because something was
+ * written. *changed: 1 once it extracted the package or started NVIDIA's installer, else 0.
  */
 int gs_nvidia_package(const char *file, const char *base, const char *root, int accept_license, char *dir, size_t len,
 		      int *changed);

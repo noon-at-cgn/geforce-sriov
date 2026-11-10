@@ -6115,7 +6115,8 @@ static void test_driver_file(void)
 	CHECK(rc == GS_EXIT_FAIL && contains(out, "extracted only") && contains(out, "changed=1\n") &&
 	      contains(out, "NVIDIA's vGPU userspace\n(nvidia-vgpud, nvidia-vgpu-mgr, libnvidia-vgpu.so and sriov-manage), "
 			    "which is not installed") &&
-	      contains(out, "--accept-nvidia-license") && !contains(out, "NVIDIA's licence") && gs_exists(p),
+	      contains(out, "--accept-nvidia-license") && !contains(out, "NVIDIA's licence") && gs_exists(p) &&
+	      contains(out, " --dkms --skip-module-load --kernel-module-type=proprietary`), or rerun with\n"),
 	      "extract only: %d\n%s", rc, out);
 	free(out);
 	text = slurp(log);
@@ -6141,12 +6142,13 @@ static void test_driver_file(void)
 	/* With it: the earlier extraction is reused, the licence notice printed, the installer run without loading nvidia. */
 	rc = run_package(pkg, base, root, 1, &out);
 	CHECK(rc == 0 && contains(out, "reusing") && contains(out, "NVIDIA's licence") && contains(out, "/580.159.01/LICENSE") &&
-	      contains(out, "--silent --dkms --skip-module-load") && !contains(out, "extracted only"),
+	      contains(out, " --silent --dkms --skip-module-load --kernel-module-type=proprietary\n") &&
+	      !contains(out, "extracted only"),
 	      "licence accepted: %d\n%s", rc, out);
 	free(out);
 	text = slurp(log);
-	CHECK(contains(text, "--silent --dkms --skip-module-load\n"), "the installer ran with --silent --dkms --skip-module-load:\n%s",
-	      text);
+	CHECK(contains(text, "\n--silent --dkms --skip-module-load --kernel-module-type=proprietary\n"),
+	      "the installer ran with --silent --dkms --skip-module-load --kernel-module-type=proprietary last:\n%s", text);
 	free(text);
 
 	/* That version's userspace installed: a rerun runs no installer, and extract-only goes on. */
@@ -6179,8 +6181,8 @@ static void test_driver_file(void)
 	/* Its version is unknown, so with the licence accepted the installer runs. */
 	rc = run_package(plain, base, root, 1, &out);
 	text = slurp(log);
-	CHECK(rc == 0 && contains(text, "--silent --dkms --skip-module-load\n"), "unversioned package: installer runs: %d\n%s",
-	      rc, out);
+	CHECK(rc == 0 && contains(text, "\n--silent --dkms --skip-module-load --kernel-module-type=proprietary\n"),
+	      "unversioned package: installer runs: %d\n%s", rc, out);
 	free(text);
 	free(out);
 

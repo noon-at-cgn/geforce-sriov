@@ -357,7 +357,7 @@ static int ask_driver(const struct gs_setup_host *s, struct gs_install_opts *a)
 static int ask_license(const struct gs_setup_host *s, struct gs_install_opts *a)
 {
 	int r = ask_yes_no(s, "Accept NVIDIA's licence and run NVIDIA's installer from this package? [y/n]",
-			   "yes runs `sh PACKAGE --silent --dkms --skip-module-load`; no only extracts it",
+			   "yes runs `sh PACKAGE --silent --dkms --skip-module-load --kernel-module-type=proprietary`; no only extracts it",
 			   "--accept-nvidia-license");
 
 	if (r < 0)
