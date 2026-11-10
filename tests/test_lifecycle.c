@@ -7258,7 +7258,7 @@ static int drv_run(const char *dir, const char *const extra[], char **out)
 
 /*
  * A module already this build with nothing recorded: refused, naming --driver=skip, nothing
- * written. The open flavour: a warning, and the run goes on.
+ * written. The open flavour is refused before writes.
  */
 static void test_driver_step(void)
 {
@@ -7281,19 +7281,40 @@ static void test_driver_step(void)
 	      "already this build, unrecorded: refused naming --driver=skip, nothing written: %d\n%s", rc, out);
 	free(out);
 
-	/* The open flavour: one warning, then the usual install with a backup. */
+	/* An open module with a different-sized .text is refused before the comparison or writes. */
 	gs_pathf(dir, sizeof(dir), "%s/drv-open", tmp);
 	drv_fixture(dir, "BBBB", "Dual MIT/GPL");
+	gs_pathf(want, sizeof(want), "%s/BBBB.text", dir);
+	writef(want, "open text of a different size\n");
+	gs_pathf(module, sizeof(module), "%s/root/lib/modules/" DRV_KERNEL "/updates/dkms/nvidia.ko", dir);
+	gs_pathf(backup, sizeof(backup), "%s/root/var/lib/geforce-sriov/stock/" DRV_KERNEL "/nvidia.ko", dir);
+	gs_pathf(record, sizeof(record), "%s/root/var/lib/geforce-sriov/driver-build", dir);
+	gs_pathf(config, sizeof(config), "%s/root/etc/modprobe.d/geforce-sriov-nvidia.conf", dir);
+	gs_pathf(build, sizeof(build), "%s/root/var/lib/geforce-sriov/build/" DRV_KERNEL, dir);
+	rc = drv_run(dir, (const char *const[]){ "--dry-run", NULL }, &out);
+	CHECK(rc == 0 && contains(out, "-F license nvidia # refuse NVIDIA's open flavour\n"),
+	      "open flavour: dry-run describes the check: %d\n%s", rc, out);
+	free(out);
+	rc = drv_run(dir, (const char *const[]){ NULL }, &out);
+	snprintf(want, sizeof(want), "geforce-sriov-driver: refused: %s is NVIDIA's open flavour (licence Dual MIT/GPL). "
+		 "This stack needs the proprietary one. Remove NVIDIA's driver (for example with nvidia-uninstall), "
+		 "install the vGPU host package again with --kernel-module-type=proprietary, then run install again\n", module);
+	text = slurp(module);
+	CHECK(rc == GS_EXIT_REFUSED && contains(out, want) && !contains(out, "module .text sizes differ") &&
+	      !gs_exists(backup) && !gs_exists(record) && !gs_exists(config) && !gs_exists(build) &&
+	      text && strcmp(text, "text=BBBB\nid=installed-id\n") == 0,
+	      "open flavour: refused before writes: %d\n%s", rc, out);
+	free(text);
+	free(out);
+
+	/* A proprietary stock module follows the ordinary install path. */
+	gs_pathf(dir, sizeof(dir), "%s/drv-proprietary", tmp);
+	drv_fixture(dir, "BBBB", "NVIDIA");
 	gs_pathf(module, sizeof(module), "%s/root/lib/modules/" DRV_KERNEL "/updates/dkms/nvidia.ko", dir);
 	gs_pathf(backup, sizeof(backup), "%s/root/var/lib/geforce-sriov/stock/" DRV_KERNEL "/nvidia.ko", dir);
 	gs_pathf(record, sizeof(record), "%s/root/var/lib/geforce-sriov/driver-build", dir);
 	rc = drv_run(dir, (const char *const[]){ NULL }, &out);
-	snprintf(want, sizeof(want), "geforce-sriov-driver: warning: %s is NVIDIA's open flavour (licence Dual MIT/GPL). This "
-		 "stack needs the proprietary one: the module built here replaces it, and `uninstall` puts the open one "
-		 "back\n", module);
-	CHECK(rc == 0 && count_of(out, "open flavour") == 1 && contains(out, want) &&
-	      contains(out, DRV_DONE),
-	      "open flavour: warned, continued: %d\n%s", rc, out);
+	CHECK(rc == 0 && contains(out, DRV_DONE), "proprietary module: installed: %d\n%s", rc, out);
 	/* The plugin copy: plugin-mixed on the stock plugin, then plugin-div4 on its result. */
 	CHECK(pos_of(out, "' 'ada' 'apply' '") >= 0 && pos_of(out, "libnvidia-vgpu.so.580.159.01' '") >= 0 &&
 	      pos_of(out, "libnvidia-vgpu.so.580.159.01' '") < pos_of(out, "/patched-plugin.mixed' '"),
@@ -7305,10 +7326,10 @@ static void test_driver_step(void)
 	      "the patched plugin copy named with its digest, before the last line:\n%s", out);
 	free(out);
 	text = slurp(backup);
-	CHECK(text && strcmp(text, "text=BBBB\nid=installed-id\n") == 0, "open flavour: the open module is the backup");
+	CHECK(text && strcmp(text, "text=BBBB\nid=installed-id\n") == 0, "proprietary module: the stock module is the backup");
 	free(text);
 	text = slurp(record);
-	CHECK(contains(text, "module_build_id=built-id\n"), "open flavour: the record names the build:\n%s", text);
+	CHECK(contains(text, "module_build_id=built-id\n"), "proprietary module: the record names the build:\n%s", text);
 	free(text);
 	{
 		char msg[3 * GS_PATH_MAX + 256], target[GS_PATH_MAX];
@@ -7401,6 +7422,7 @@ static void test_driver_dry_run(void)
 	rc = drv_run(dir, (const char *const[]){ "--dry-run", NULL }, &out);
 	snprintf(want, sizeof(want),
 		 "+ test -f '%s/root/lib/modules/" DRV_KERNEL "/updates/dkms/nvidia.ko'\n"
+		 "+ modinfo -k '" DRV_KERNEL "' -F license nvidia # refuse NVIDIA's open flavour\n"
 		 "+ test -x ", dir);
 	CHECK(rc == 0 && contains(out, want) && !contains(out, "''"), "dry run: the module path from modinfo: %d\n%s", rc, out);
 	snprintf(want, sizeof(want), "+ cp -p '%s/root/lib/modules/" DRV_KERNEL "/updates/dkms/nvidia.ko' '%s/root/var/lib/"

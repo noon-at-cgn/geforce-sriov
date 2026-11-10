@@ -199,6 +199,7 @@ if [ "$dry" -eq 1 ] && [ "$restore" -eq 0 ]; then
 + sha256sum '$src/nvidia/nv-kernel.o_binary' # require $stock_object
 + test -f '$headers/Makefile'
 + test -f '$module'
++ modinfo -k '$kernel' -F license nvidia # refuse NVIDIA's open flavour
 + test -x '${0%/*}/geforce-sriov-patch' || command -v geforce-sriov-patch
 + sha256sum '<plugin directory>/libnvidia-vgpu.so.580.159.01' # require the stock digest, that of plugin-mixed's output or that of the patched plugin copy
 + check $root/etc/modprobe.d/*.conf for NVreg_EnableGpuFirmware # another file that sets 0 is kept; any other value refuses
@@ -261,7 +262,7 @@ module=$(modinfo -k "$kernel" -n nvidia 2>/dev/null || true)
 # NVIDIA's open flavour carries this licence; this stack builds the proprietary one from nv-kernel.o_binary.
 case $(modinfo -k "$kernel" -F license nvidia 2>/dev/null || true) in
     *'Dual MIT/GPL'*)
-        printf 'geforce-sriov-driver: warning: %s is NVIDIA'\''s open flavour (licence Dual MIT/GPL). This stack needs the proprietary one: the module built here replaces it, and `uninstall` puts the open one back\n' "$module" ;;
+        refuse "$module is NVIDIA's open flavour (licence Dual MIT/GPL). This stack needs the proprietary one. Remove NVIDIA's driver (for example with nvidia-uninstall), install the vGPU host package again with --kernel-module-type=proprietary, then run install again" ;;
 esac
 # The stock plugin: the one regular libnvidia-vgpu.so.580.159.01 in the library directories, with the stock
 # digest, or a digest this step's patches lead to. Sets plugin, plugin_hash, and copy and link beside it.
