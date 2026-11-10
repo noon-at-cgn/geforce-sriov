@@ -753,7 +753,7 @@ int gs_nvidia_package(const char *file, const char *base, const char *root, int 
 	if (!accept_license) {
 		fprintf(stderr, "geforce-sriov: refused: extracted only. The driver step needs NVIDIA's vGPU userspace\n"
 			"(nvidia-vgpud, nvidia-vgpu-mgr, libnvidia-vgpu.so and sriov-manage), which is not installed.\n"
-			"Run NVIDIA's installer yourself (`sh %s --dkms --skip-module-load`), or rerun with\n"
+			"Run NVIDIA's installer yourself (`sh %s --dkms --skip-module-load --kernel-module-type=proprietary`), or rerun with\n"
 			"--accept-nvidia-license to have install run it. Nothing else changed.\n", real);
 		return extracted ? GS_EXIT_FAIL : GS_EXIT_REFUSED;
 	}
@@ -766,13 +766,14 @@ int gs_nvidia_package(const char *file, const char *base, const char *root, int 
 	}
 	{
 		/* --skip-module-load: nothing may load nvidia before the boot unit prepares the cards.
-		 * --kernel-module-type=proprietary: install proprietary driver by default*/
-		const char *inst_argv[] = { "sh", real, "--silent", "--dkms", "--skip-module-load", "--kernel-module-type=proprietary", NULL };
+		 * --kernel-module-type=proprietary: the installer otherwise selects the type from the attached GPUs. */
+		const char *inst_argv[] = { "sh", real, "--silent", "--dkms", "--skip-module-load",
+					    "--kernel-module-type=proprietary", NULL };
 
 		gs_pathf(p, sizeof(p), "%s/LICENSE", dir);
 		printf("NVIDIA's licence: --accept-nvidia-license accepts the licence agreement of this package for you\n"
 		       "(%s). NVIDIA's installer runs with --silent and asks nothing.\n"
-		       "sh %s --silent --dkms --skip-module-load\n",
+		       "sh %s --silent --dkms --skip-module-load --kernel-module-type=proprietary\n",
 		       gs_exists(p) ? p : "NVIDIA's installer shows it when run without --silent", real);
 		fflush(stdout);
 		*changed = 1;
