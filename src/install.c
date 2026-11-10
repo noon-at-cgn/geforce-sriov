@@ -765,8 +765,9 @@ int gs_nvidia_package(const char *file, const char *base, const char *root, int 
 		return extracted ? GS_EXIT_FAIL : GS_EXIT_REFUSED;
 	}
 	{
-		/* --skip-module-load: nothing may load nvidia before the boot unit prepares the cards. */
-		const char *inst_argv[] = { "sh", real, "--silent", "--dkms", "--skip-module-load", NULL };
+		/* --skip-module-load: nothing may load nvidia before the boot unit prepares the cards.
+		 * --kernel-module-type=proprietary: install proprietary driver by default*/
+		const char *inst_argv[] = { "sh", real, "--silent", "--dkms", "--skip-module-load", "--kernel-module-type=proprietary", NULL };
 
 		gs_pathf(p, sizeof(p), "%s/LICENSE", dir);
 		printf("NVIDIA's licence: --accept-nvidia-license accepts the licence agreement of this package for you\n"
