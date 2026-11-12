@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* geforce-sriov: command-line entry point. */
 #include <stdarg.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,97 +14,29 @@ static void usage(FILE *f)
 {
 	fprintf(f,
 		"Usage: geforce-sriov COMMAND [OPTIONS]\n"
-		"\n"
-		"Read-only:\n"
-		"  devices\n"
-		"      List the device table.\n"
-		"  doctor [--device BDF]... [--boot-display-release BDF]... [--hold-nvidia]\n"
-		"         [--sysfs-root PATH] [--config FILE]\n"
-		"         [--nvidia-source DIR] [--driver-file PATH] [--disable-d3cold]\n"
-		"      Check the host and show what prepare would do. --nvidia-source,\n"
-		"      --driver-file, --boot-display-release, --hold-nvidia and\n"
-		"      --disable-d3cold judge the host as install will leave it.\n"
-		"  status [--device BDF]... [--sysfs-root PATH] [--config FILE]\n"
-		"      Show the module, guard and SR-IOV state of each selected GPU and the\n"
-		"      next step. Exit 0 only when each one was prepared this boot and passes\n"
-		"      the SR-IOV and BAR checks; exit 1 is normal before the first prepared\n"
-		"      boot.\n"
-		"  check [--device BDF]... [--type N]\n"
-		"      Run before every VM start. Each VF of every selected GPU must be on\n"
-		"      nvidia with power/control on, runtime_status active and its vGPU type:\n"
-		"      type_ada= or type_ampere= in the config, else %u on Ada and %u on\n"
-		"      Ampere. --type N expects N on every selected GPU, so use it with one\n"
-		"      generation. Exit 0 ready, 1 not ready, 3 refused. It reads the state\n"
-		"      once: a later re-probe or daemon restart can change it.\n"
-		"\n"
-		"Changing the system (root, live /sys only):\n"
-		"  setup [--device BDF]... [--boot-display-release BDF]... [--vfs N]\n"
-		"        [--driver=skip] [--hold-nvidia] [--disable-d3cold]\n"
-		"        [--interactive | --no-prompt]\n"
-		"        [--nvidia-source DIR] [--driver-file PATH] [--accept-nvidia-license]\n"
-		"      The guided path from a clean host to a ready VF: it runs the next steps\n"
-		"      for the host's state, tells you when to power the machine off and on,\n"
-		"      and names the guest drivers. It creates no VM. On a terminal or with\n"
-		"      --interactive, it asks for what the options did not give and prints\n"
-		"      the command that repeats the run; --no-prompt never asks. A single\n"
-		"      eligible GPU that is not the boot display is selected by itself. Run\n"
-		"      the same command again after the boot; first-install options are then\n"
-		"      ignored.\n"
-		"  install [--prefix PATH] [--destdir PATH] [--source DIR] [--vfs N]\n"
-		"          [--device BDF]... [--boot-display-release BDF]...\n"
-		"          [--ari=on|off] [--msix=on|off] [--driver=skip] [--hold-nvidia]\n"
-		"          [--nvidia-source DIR] [--driver-file PATH] [--accept-nvidia-license]\n"
-		"          [--disable-d3cold]\n"
-		"      Install the built tree. With DESTDIR (environment or --destdir), only\n"
-		"      stage the files below it.\n"
-		"  prepare [--ari=on|off] [--msix=on|off] [--release-console=BDF]... [--boot]\n"
-		"      Load the geforce_sriov livepatch and remove and rescan the selected\n"
-		"      GPUs before NVIDIA binds them. --release-console=BDF consents, by hand\n"
-		"      after the boot, to a console release the config grants (name every\n"
-		"      granted GPU). --boot is the boot unit's mode: with a grant it defers\n"
-		"      and changes nothing.\n"
-		"  prepare --clear-guard\n"
-		"      Clear the guard of an unfinished attempt. Power the machine off and on\n"
-		"      first.\n"
-		"  activate [--type N] [--dry-run] [--boot]\n"
-		"      Bring up the VFs of every selected GPU, set their vGPU type as check\n"
-		"      expects it, then print what check prints. It refuses while any vGPU\n"
-		"      exists, or when nvidia.ko is not the build install recorded (a kernel\n"
-		"      update brings back the stock one). Run it only while your hypervisor\n"
-		"      starts no VM. --boot (the boot unit) first waits up to 30 s for each\n"
-		"      GPU to bind to nvidia; --dry-run checks and prints the steps.\n"
+		"  devices | doctor | status\n"
+		"  check [--device BDF]... [--type N] [--daemon-ready]\n"
+		"  activate [--type N] [--dry-run] [--boot] [--clear-lock]\n"
+		"           [--stop-display-manager]\n"
+		"  livepatch --boot [--load-driver] [--config FILE]\n"
+		"      Load the livepatch (the early boot unit): no removal, no rescan.\n"
+		"      --load-driver  after the livepatch is enabled, load nvidia too (the boot unit's mode)\n"
+		"  setup [--device BDF]... [--vfs N] [--interactive | --no-prompt]\n"
+		"        [--allow-unsupported-driver] [feature and package options]\n"
+		"  install [--device BDF]... [--vfs N] [--prefix PATH] [--destdir PATH]\n"
+		"          [--source DIR] [--ari=on|off] [--msix=on|off] [feature and package options]\n"
+		"  rebuild [--kernel RELEASE]\n"
+		"      After a kernel update: build NVIDIA's modules again, from the inputs install kept.\n"
 		"  uninstall [--unload]\n"
-		"      Remove only the files geforce-sriov installed. --unload also unloads\n"
-		"      the module when no VF is active and no GPU was prepared.\n"
-		"  help, --help, -h; version, --version\n"
-		"\n"
-		"Options of setup and install\n"
-		"(details: docs/installation.md#one-command-from-a-clean-host):\n"
-		"  --device BDF               a GPU to use (physical function dddd:bb:ss.0)\n"
-		"  --boot-display-release BDF grant a console release to the boot display GPU\n"
-		"  --hold-nvidia              prevent nvidia from loading at boot for the boot display GPU\n"
-		"  --disable-d3cold           keep a laptop GPU powered when idle (D3cold off)\n"
-		"  --vfs N                    VFs per GPU (default %u; doctor shows the maximum)\n"
-		"  --driver=skip              leave NVIDIA's files untouched\n"
-		"  --nvidia-source DIR        kernel tree, default " GS_NVIDIA_SRC "\n"
-		"  --driver-file PATH         NVIDIA's vGPU host .run package to install from\n"
-		"  --accept-nvidia-license    accept NVIDIA's licence and run its installer\n"
-		"\n"
-		"Exit status: 0 ok, 1 failed (status: a selected GPU does not pass), 2 usage,\n"
-		"3 refused, nothing changed (doctor: prepare would refuse), 4 locked, 5 guard\n"
-		"set: power the machine off and on first.\n"
-		"Config: " GS_CONFIG_PATH ". doctor, status, check, prepare, activate\n"
-		"and uninstall read $" GS_CONFIG_ENV " instead when it is set; install\n"
-		"always uses " GS_CONFIG_PATH ". setup reads $" GS_CONFIG_ENV " to\n"
-		"tell whether the host is installed, and refuses it when it names an existing\n"
-		"file other than " GS_CONFIG_PATH ".\n"
-		"Supported: Ampere and Ada GPUs, NVIDIA host driver " GS_NVIDIA_VERSION " (other versions\n"
-		"are not supported). Reference: docs/configuration.md#commands\n"
-		"\n"
-		"Example, from a clean host without questions (add one --device BDF per GPU\n"
-		"when more than one is eligible, or for the boot display card):\n"
-		"  geforce-sriov setup --driver-file PATH --accept-nvidia-license\n",
-		GS_VGPU_TYPE_ADA, GS_VGPU_TYPE_AMPERE, GS_DEFAULT_VFS);
+		"Feature and package options for install and setup:\n"
+		"  --display | --no-display      select display build\n"
+		"  --host-cuda | --no-host-cuda  select host CUDA\n"
+		"  --companion-file PATH | --companion-source DIR\n"
+		"  --nvkms-source PATH           public NVKMS source directory or tarball\n"
+		"  --driver-file PATH | --nvidia-source DIR | --driver=skip\n"
+		"  --accept-nvidia-license --disable-d3cold\n"
+		"  --allow-unsupported-driver    setup consent; ignored by install\n"
+		"Exit status: 0 ok, 1 failed, 2 usage, 3 refused, 4 locked, 5 activation lock.\n");
 }
 
 static int bad(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -136,6 +69,9 @@ static int is_vf_count_opt(const char *a)
 /* a is not an option of this command; say where the VF count is set when that was the intent. */
 static int unknown_opt(const char *a, int install)
 {
+	if (!strncmp(a, "--release-console", 17) || !strncmp(a, "--boot-display-release", 22) ||
+	    !strcmp(a, "--hold-nvidia") || !strcmp(a, "--hold-note-shown"))
+		return bad("%s is no longer supported; use activate and display=auto|on|off", a);
 	/* --experimental-vfs is not a VF count. */
 	if (strncmp(a, "--experimental", 14) == 0 || !is_vf_count_opt(a))
 		return bad("unknown option '%s'", a);
@@ -180,17 +116,6 @@ static int parse_device(const char *opt, const char *v, struct gs_addr *list, un
 	return 0;
 }
 
-/* A physical-function address for a console-release option. */
-static int parse_release(const char *opt, const char *v, struct gs_addr *list, unsigned int *n)
-{
-	int r = parse_device(opt, v, list, n);
-
-	if (r)
-		return r;
-	if (list[*n - 1].func != 0)
-		return bad("%s %s: name the physical function .0", opt, v);
-	return 0;
-}
 
 /* --driver-file PATH: an existing regular file, resolved once so every step reads the same one. */
 static int parse_driver_file(const char *v, const char **out)
@@ -206,64 +131,62 @@ static int parse_driver_file(const char *v, const char **out)
 	return 0;
 }
 
-/* --driver-file, --accept-nvidia-license, --hold-nvidia and --disable-d3cold of install and setup. */
 static int parse_package_opt(int argc, char **argv, int *i, struct gs_install_opts *o, int *matched)
 {
-	const char *v;
+	const char *a = argv[*i], *v;
+	const char **path = NULL;
 
 	*matched = 1;
 	if ((v = opt_value(argc, argv, i, "--driver-file")))
 		return parse_driver_file(v, &o->driver_file);
-	if (strcmp(argv[*i], "--accept-nvidia-license") == 0) {
+	if ((v = opt_value(argc, argv, i, "--companion-file")))
+		path = &o->companion_file;
+	else if ((v = opt_value(argc, argv, i, "--companion-source")))
+		path = &o->companion_source;
+	else if ((v = opt_value(argc, argv, i, "--nvkms-source")))
+		path = &o->nvkms_source;
+	if (path) {
+		if (*path)
+			return bad("%s given twice", a);
+		if (gs_validate_abs_path(v))
+			return bad("%s requires a normalized absolute path", a);
+		*path = v;
+		return 0;
+	}
+	if (!strcmp(a, "--display") || !strcmp(a, "--no-display")) {
+		if (o->display_set)
+			return bad("--display and --no-display may be given only once");
+		o->display_set = 1;
+		o->display = !strcmp(a, "--display") ? GS_DISPLAY_ON : GS_DISPLAY_OFF;
+	} else if (!strcmp(a, "--host-cuda") || !strcmp(a, "--no-host-cuda")) {
+		if (o->host_cuda_set)
+			return bad("--host-cuda and --no-host-cuda may be given only once");
+		o->host_cuda_set = 1;
+		o->host_cuda = !strcmp(a, "--host-cuda");
+	} else if (!strcmp(a, "--allow-unsupported-driver")) {
+		o->allow_unsupported_driver = 1;
+	} else if (!strcmp(a, "--accept-nvidia-license")) {
 		o->accept_nvidia_license = 1;
-		return 0;
-	}
-	if (strcmp(argv[*i], "--hold-nvidia") == 0) {
-		o->hold_nvidia = 1;
-		return 0;
-	}
-	if (strcmp(argv[*i], "--disable-d3cold") == 0) {
+	} else if (!strcmp(a, "--disable-d3cold")) {
 		o->disable_d3cold = 1;
-		return 0;
-	}
-	*matched = 0;
-	return 0;
-}
-
-/* Each --boot-display-release BDF of install, setup and doctor must also be given as --device BDF. */
-static int check_release(const struct gs_addr *devices, unsigned int ndevices, const struct gs_addr *release,
-			 unsigned int nrelease)
-{
-	for (unsigned int k = 0; k < nrelease; k++) {
-		unsigned int d;
-
-		for (d = 0; d < ndevices && strcmp(devices[d].str, release[k].str); d++)
-			;
-		if (d == ndevices)
-			return bad("--boot-display-release %s must also be given as --device %s", release[k].str,
-				   release[k].str);
+	} else {
+		*matched = 0;
 	}
 	return 0;
 }
+
 
 /* What install and setup check once every option is read. */
 static int check_install_opts(const struct gs_install_opts *o)
 {
-	int r = check_release(o->devices, o->ndevices, o->release, o->nrelease);
-
-	if (r)
-		return r;
+	if (o->companion_file && o->companion_source)
+		return bad("--companion-file and --companion-source both name the companion package; give one");
 	if (o->driver_file && o->nvidia_source)
-		return bad("--driver-file and --nvidia-source both name NVIDIA's kernel tree (--driver-file extracts it\n"
-			   "from the package); give one");
+		return bad("--driver-file and --nvidia-source both name NVIDIA's kernel tree; give one");
 	if (o->driver_file && o->skip_driver)
-		return bad("--driver-file installs NVIDIA's files and --driver=skip leaves them untouched; give one");
+		return bad("--driver-file and --driver=skip cannot be combined");
 	if (o->accept_nvidia_license && !o->driver_file)
-		return bad("--accept-nvidia-license needs --driver-file PATH, NVIDIA's vGPU host .run package");
-	/* --device replaces the selection and its grants, so a hold then needs a grant given with it. */
-	if (o->hold_nvidia && o->ndevices && !o->nrelease)
-		return bad("--hold-nvidia requires --boot-display-release BDF for a boot display GPU\n"
-			   "with a console-release grant.");
+		return bad("--accept-nvidia-license needs --driver-file PATH");
 	return 0;
 }
 
@@ -312,10 +235,52 @@ static int parse_vgpu_opts(int argc, char **argv, struct gs_activate_opts *o, in
 			o->dry_run = 1;
 		} else if (activate && strcmp(argv[i], "--boot") == 0) {
 			o->boot = 1;
+		} else if (activate && strcmp(argv[i], "--clear-lock") == 0) {
+			o->clear_guard = 1;
+		} else if (strcmp(argv[i], "--clear-guard") == 0) {
+			/* The name the option had up to 0.2.x. An old name is refused with the new one, never taken silently. */
+			return bad("--clear-guard was renamed to --clear-lock in 0.3.0; run `geforce-sriov activate --clear-lock`");
+		} else if (activate && strcmp(argv[i], "--stop-display-manager") == 0) {
+			o->stop_display_manager = 1;
+		} else if (!activate && strcmp(argv[i], "--daemon-ready") == 0) {
+			o->daemon_ready = 1;
 		} else {
 			return unknown_opt(argv[i], 0);
 		}
 	}
+	if (o->clear_guard && argc != 3)
+		return bad("--clear-lock takes no other option");
+	return 0;
+}
+
+/* livepatch --boot [--load-driver] [--config FILE]: loads the module, then optionally nvidia. */
+static int parse_livepatch_opts(int argc, char **argv, struct gs_livepatch_opts *o)
+{
+	struct stat st;
+	int i;
+
+	memset(o, 0, sizeof(*o));
+	for (i = 2; i < argc; i++) {
+		const char *v;
+
+		if (strcmp(argv[i], "--boot") == 0) {
+			o->boot = 1;
+		} else if (strcmp(argv[i], "--load-driver") == 0) {
+			o->load_driver = 1;
+		} else if ((v = opt_value(argc, argv, &i, "--config"))) {
+			if (v[0] == '\0')
+				return bad("%s needs a file", "--config");
+			o->config_path = v;
+		} else if ((v = opt_value(argc, argv, &i, "--sysfs-root"))) {
+			if (gs_validate_abs_path(v) || stat(v, &st) || !S_ISDIR(st.st_mode))
+				return bad("--sysfs-root '%s' must be an existing normalized absolute directory", v);
+			o->sysroot = v;
+		} else {
+			return unknown_opt(argv[i], 0);
+		}
+	}
+	if (!o->boot)
+		return bad("livepatch needs --boot: it is the early boot unit's mode and changes nothing else");
 	return 0;
 }
 
@@ -332,9 +297,6 @@ static int diag_main(int argc, char **argv, int status)
 		if ((v = opt_value(argc, argv, &i, "--device"))) {
 			if ((r = parse_device("--device", v, o.devices, &o.ndevices)))
 				return r;
-		} else if (!status && (v = opt_value(argc, argv, &i, "--boot-display-release"))) {
-			if ((r = parse_release("--boot-display-release", v, o.release, &o.nrelease)))
-				return r;
 		} else if ((v = opt_value(argc, argv, &i, "--sysfs-root"))) {
 			if (gs_validate_abs_path(v) || stat(v, &st) || !S_ISDIR(st.st_mode))
 				return bad("--sysfs-root '%s' must be an existing normalized absolute directory", v);
@@ -350,16 +312,34 @@ static int diag_main(int argc, char **argv, int status)
 		} else if (!status && (v = opt_value(argc, argv, &i, "--driver-file"))) {
 			if ((r = parse_driver_file(v, &o.driver_file)))
 				return r;
-		} else if (!status && strcmp(argv[i], "--hold-nvidia") == 0) {
-			o.hold_nvidia = 1;
 		} else if (!status && strcmp(argv[i], "--disable-d3cold") == 0) {
 			o.disable_d3cold = 1;
+		} else if (!status && (strcmp(argv[i], "--display") == 0 || strcmp(argv[i], "--no-display") == 0)) {
+			o.display_set = 1;
+			o.display = strcmp(argv[i], "--display") == 0 ? GS_DISPLAY_ON : GS_DISPLAY_OFF;
+		} else if (!status && (strcmp(argv[i], "--host-cuda") == 0 || strcmp(argv[i], "--no-host-cuda") == 0)) {
+			o.host_cuda_set = 1;
+			o.host_cuda = strcmp(argv[i], "--host-cuda") == 0;
+		} else if (!status && (v = opt_value(argc, argv, &i, "--driver"))) {
+			if (strcmp(v, "skip") != 0)
+				return bad("--driver takes only the value skip");
+			o.skip_driver = 1;
+		} else if (!status && (v = opt_value(argc, argv, &i, "--companion-file"))) {
+			if (gs_validate_abs_path(v))
+				return bad("--companion-file '%s' must be a normalized absolute path", v);
+			o.companion_file = v;
+		} else if (!status && (v = opt_value(argc, argv, &i, "--companion-source"))) {
+			if (gs_validate_abs_path(v))
+				return bad("--companion-source '%s' must be a normalized absolute path", v);
+			o.companion_source = v;
+		} else if (!status && (v = opt_value(argc, argv, &i, "--nvkms-source"))) {
+			if (gs_validate_abs_path(v))
+				return bad("--nvkms-source '%s' must be a normalized absolute path", v);
+			o.nvkms_source = v;
 		} else {
 			return unknown_opt(argv[i], 0);
 		}
 	}
-	if (!status && (r = check_release(o.devices, o.ndevices, o.release, o.nrelease)))
-		return r;
 	return status ? gs_cmd_status(&o) : gs_cmd_doctor(&o);
 }
 
@@ -390,6 +370,12 @@ int main(int argc, char **argv)
 {
 	const char *cmd;
 	int i, r, matched;
+
+	/*
+	 * The CLI waits for its own children. A caller that ignores SIGCHLD passes that on through exec,
+	 * and the kernel would then reap each child before the CLI could read its exit status.
+	 */
+	signal(SIGCHLD, SIG_DFL);
 
 	if (argc < 2) {
 		usage(stderr);
@@ -426,6 +412,13 @@ int main(int argc, char **argv)
 			return r;
 		return gs_cmd_check(&o);
 	}
+	if (strcmp(cmd, "livepatch") == 0) {
+		struct gs_livepatch_opts o;
+
+		if ((r = parse_livepatch_opts(argc, argv, &o)))
+			return r;
+		return gs_cmd_livepatch(&o);
+	}
 
 	if ((r = reject_diag_opts(argc, argv)))
 		return r;
@@ -448,20 +441,14 @@ int main(int argc, char **argv)
 				return r;
 			if (matched)
 				continue;
-			if (strcmp(argv[i], "--release-note-shown") == 0) {
-				/* setup passes it after its console-release question, which explained the grant */
-				o.release_note_shown = 1;
-			} else if (strcmp(argv[i], "--hold-note-shown") == 0) {
-				/* setup passes it when it prints the hold notice itself after install */
-				o.hold_note_shown = 1;
-			} else if ((v = opt_value(argc, argv, &i, "--device"))) {
+			if ((v = opt_value(argc, argv, &i, "--device"))) {
 				if ((r = parse_device("--device", v, o.devices, &o.ndevices)))
 					return r;
 				if (o.devices[o.ndevices - 1].func != 0)
 					return bad("--device %s: select the physical function .0", v);
-			} else if ((v = opt_value(argc, argv, &i, "--boot-display-release"))) {
-				if ((r = parse_release("--boot-display-release", v, o.release, &o.nrelease)))
-					return r;
+			} else if (strcmp(argv[i], "--from-setup") == 0) {
+				/* setup's own mark on the install it runs; not a user option, so not in the usage text. */
+				o.from_setup = 1;
 			} else if ((v = opt_value(argc, argv, &i, "--prefix"))) {
 				o.prefix = v;
 			} else if ((v = opt_value(argc, argv, &i, "--destdir"))) {
@@ -492,38 +479,14 @@ int main(int argc, char **argv)
 		}
 		if ((r = check_install_opts(&o)))
 			return r;
+		if (o.allow_unsupported_driver) {
+			fprintf(stderr, "geforce-sriov: --allow-unsupported-driver is ignored by install\n");
+			o.allow_unsupported_driver = 0;
+		}
 		return gs_cmd_install(&o);
 	}
-	if (strcmp(cmd, "prepare") == 0) {
-		struct gs_overrides ov = { GS_SW_UNSET, GS_SW_UNSET };
-		struct gs_prepare_opts po;
-		int clear = 0;
-
-		memset(&po, 0, sizeof(po));
-		for (i = 2; i < argc; i++) {
-			const char *v;
-
-			if ((r = parse_switch_opt(argc, argv, &i, &ov, &matched)))
-				return r;
-			if (matched)
-				continue;
-			if (strcmp(argv[i], "--clear-guard") == 0) {
-				clear = 1;
-			} else if (strcmp(argv[i], "--boot") == 0) {
-				po.boot = 1;
-			} else if ((v = opt_value(argc, argv, &i, "--release-console"))) {
-				if ((r = parse_release("--release-console", v, po.release, &po.nrelease)))
-					return r;
-			} else {
-				return unknown_opt(argv[i], 0);
-			}
-		}
-		if (clear && (ov.ari != GS_SW_UNSET || ov.msix != GS_SW_UNSET || po.boot || po.nrelease))
-			return bad("%s takes no other option", "--clear-guard");
-		if (po.boot && po.nrelease)
-			return bad("--boot is the boot unit's mode and does not release a console; run --release-console by hand, without --boot");
-		return gs_cmd_prepare(&ov, &po, clear);
-	}
+	if (strcmp(cmd, "prepare") == 0)
+		return bad("prepare is no longer supported; use activate");
 	if (strcmp(cmd, "activate") == 0) {
 		struct gs_activate_opts o;
 
@@ -549,9 +512,6 @@ int main(int argc, char **argv)
 					return r;
 				if (o.devices[o.ndevices - 1].func != 0)
 					return bad("--device %s: select the physical function .0", v);
-			} else if ((v = opt_value(argc, argv, &i, "--boot-display-release"))) {
-				if ((r = parse_release("--boot-display-release", v, o.release, &o.nrelease)))
-					return r;
 			} else if ((v = opt_value(argc, argv, &i, "--vfs"))) {
 				if (o.vfs)
 					return bad("%s given twice", "--vfs");
@@ -579,6 +539,22 @@ int main(int argc, char **argv)
 		if ((r = check_install_opts(&o)))
 			return r;
 		return gs_cmd_setup(&o, prompt);
+	}
+	if (strcmp(cmd, "rebuild") == 0) {
+		const char *release = NULL;
+
+		for (i = 2; i < argc; i++) {
+			const char *v = opt_value(argc, argv, &i, "--kernel");
+
+			if (!v)
+				return unknown_opt(argv[i], 0);
+			if (release)
+				return bad("%s given twice", "--kernel");
+			if (!v[0] || strchr(v, '/') || !strcmp(v, ".") || !strcmp(v, ".."))
+				return bad("--kernel '%s': give a kernel release as /lib/modules names it", v);
+			release = v;
+		}
+		return gs_cmd_rebuild(release);
 	}
 	if (strcmp(cmd, "uninstall") == 0) {
 		int unload = 0;

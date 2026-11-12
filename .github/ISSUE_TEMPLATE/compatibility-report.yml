@@ -128,7 +128,7 @@ body:
     attributes:
       label: geforce-sriov version or commit
       description: "`geforce-sriov --version`, and `git rev-parse --short HEAD` if you built from a checkout."
-      placeholder: "0.2.2, commit <short hash>"
+      placeholder: "0.3.0, commit <short hash>"
     validations:
       required: true
   - type: input

@@ -50,8 +50,8 @@ int main(void)
  struct gs_patch_info i;char err[512]={0},hash[65],dir[]="/tmp/gs-patch-test-XXXXXX",path[256];unsigned char original[4096];FILE *f;unsigned char check[4096]={0};
  fixture();memcpy(original,buf,sizeof(buf));CHECK(gs_patch_structure(buf,sizeof(buf),"580.159.01",&i,err,sizeof(err))==0&&i.offset==552&&!i.patched,"stock fixture: %s",err);
  buf[552]=buf[553]=0x90;CHECK(!gs_patch_structure(buf,sizeof(buf),"580.159.01",&i,err,sizeof(err))&&i.patched,"patched fixture: %s",err);
- CHECK(gs_patch_inspect(buf,sizeof(buf),&i,err,sizeof(err))<0,"hash pin"); /* hash pin cannot be bypassed by a fabricated ELF */
- CHECK(gs_patch_revert_check(buf,sizeof(buf),original,sizeof(original),err,sizeof(err))<0,"revert check refuses unpinned pair");
+ CHECK(!gs_patch_inspect(buf,sizeof(buf),&i,err,sizeof(err))&&!i.digest,"synthetic anchor is unconfirmed");
+ CHECK(!gs_patch_revert_check(buf,sizeof(buf),original,sizeof(original),err,sizeof(err)),"anchor pair");
  CHECK(!gs_patch_exact_pair(buf,sizeof(buf),original,sizeof(original),552,err,sizeof(err)),"exact pair: %s",err);
  buf[100]^=1;CHECK(gs_patch_exact_pair(buf,sizeof(buf),original,sizeof(original),552,err,sizeof(err))<0,"pair differs outside patch");buf[100]^=1;
  CHECK(gs_patch_exact_pair(buf,sizeof(buf)-1,original,sizeof(original),552,err,sizeof(err))<0,"pair size mismatch");

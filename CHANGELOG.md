@@ -1,5 +1,114 @@
 # Changelog
 
+## [0.3.0] - 2026-11-12
+
+### Added
+
+- The boot display GPU can now serve VFs while its console stays on.
+  `activate` hands the firmware framebuffer to NVIDIA's display modules, so you need no console release and no manual step after boot.
+  Display output goes only to the boot display GPU, even with `display=on`, and `display=on` builds the display modules only when a selected GPU is the boot display.
+  The display modules (`nvidia-modeset`, `nvidia-drm`) are built from a second NVIDIA driver package (the 580.159.03 vGPU Linux guest `.run`, or the GeForce 580.159.03 package) and NVIDIA's public kernel module source at tag 580.159.03 ([Boot display card](docs/installation.md#boot-display-card)).
+
+- Config keys `display` (`auto`, `on`, `off`) and `host_cuda` (`on`, `off`), with `install` and `setup` options `--display`, `--no-display`, `--host-cuda` and `--no-host-cuda`.
+  `--companion-file PATH` or `--companion-source DIR` name the second driver package, and `--nvkms-source PATH` names the kernel module source.
+  `doctor` takes the same options to judge the build.
+  `setup` asks you for the second driver package and the kernel module source when a selected GPU is the boot display, and asks whether to enable host CUDA.
+
+- Host CUDA: with `host_cuda=on`, `install` builds `nvidia-uvm`, installs NVIDIA's CUDA library (`libcuda`) and the libraries it loads from the second driver package, and writes `geforce-sriov-uvm.conf`, so CUDA programs can run on the host ([Host CUDA](docs/installation.md#host-cuda)).
+  The libraries go into `<prefix>/lib/geforce-sriov/cuda/`, which `install` adds to the library search path; a CUDA library from another package is left as it is.
+  Host CUDA with the display build on 580.159.01 is a confirmed combination.
+
+- Ada: a stopped VM keeps its video memory.
+  On an Ada card each VF uses a fixed range of the card's VRAM, its framebuffer slot. Until now a host program, for example a host CUDA job, could take the slot of a stopped VM, and that VM then failed to start.
+  `install` now builds a small piece of code into your copy of `nvidia.ko` that holds the slot of every VF from activation on and hands it to NVIDIA's vGPU manager when the VM starts.
+  `status`, `doctor` and `check` show a `framebuffer slots` line for each Ada card, and the new config key `fb_slots` (`auto`, `on`, `off`) turns it off ([Host programs and VM memory](docs/ada.md#host-programs-and-vm-memory)).
+  The slots stay reserved for the VFs while their VMs are stopped, so host programs on that card get only the memory outside them.
+
+- An early livepatch unit, `geforce-sriov-livepatch.service`, loads the livepatch module `geforce_sriov` and then NVIDIA's driver (`nvidia`) before udev, using the new `livepatch --boot --load-driver` command.
+  `geforce-sriov-autoload.conf` keeps udev from loading the driver by itself, and `install` writes it exactly when a GPU is selected ([Modprobe files](docs/installation.md#modprobe-files)).
+
+- `activate --stop-display-manager` lets `activate` stop a running display manager and start it again afterwards.
+  `setup` asks first, and the boot unit never stops it.
+
+- `activate --clear-lock` clears the activation lock after a cold power cycle.
+
+- `rebuild [--kernel RELEASE]` builds NVIDIA's patched module (`nvidia.ko`) and plugin again after a kernel update, for the running kernel or for one that is installed and not running yet.
+  `install` keeps the second NVIDIA driver package and NVIDIA's public kernel module source it was given, so `rebuild` needs no options, and `uninstall` removes them and restores NVIDIA's `nvidia.ko` for every kernel it built for.
+  `install` run from the installed copy stops and names `rebuild` ([After a kernel update](docs/installation.md#after-a-kernel-update)).
+  `rebuild` also makes sure the livepatch module `geforce_sriov` is installed for that kernel and builds it with DKMS when it is not, so it also prepares a kernel that was installed before geforce-sriov.
+
+- `check --daemon-ready`, run by the `nvidia-vgpud` drop-in, starts the daemon only when the selected VFs are enabled and bound.
+  Drop-ins for `libvirt-guests.service` and `pve-guests.service` order guest autostart after activation and run `check` first.
+
+- Other host driver versions can be tried on a best-effort basis, on the plain build as well as the display build.
+  `install` names the version and carries on only if its patches still apply to it.
+  `setup` asks first (the default is no), and `--allow-unsupported-driver` answers yes without asking.
+  Host driver 580.159.01 is the version confirmed to work.
+
+### Changed
+
+- `activate` is now the one command that brings the GPUs up.
+  It loads the livepatch when needed, hands off the boot display's console, removes and rescans the empty bus of a card that needs it, creates the VFs, restarts NVIDIA's daemons, re-probes each GPU and sets the types.
+  The activation lock file keeps its name, `/var/lib/geforce-sriov/prepare-attempt`.
+
+- With `geforce_sriov.skip` on the kernel command line, both boot units are skipped and no NVIDIA driver loads that boot.
+  Run `modprobe nvidia` if you need it.
+
+- `uninstall` also removes the three modprobe files and the guest-autostart drop-ins, and disables the 0.2.x prepare unit if one remains.
+  A 0.2.x hold file is removed by `install` when unchanged.
+
+- `status` exits 0 only when every selected VF is ready, the activation lock is clear and the installed build matches `display` and `host_cuda`.
+
+- `activate` refuses a selected laptop GPU unless the config records D3cold consent (`d3cold=off`), before it writes anything ([Consent](docs/laptops.md#consent)).
+
+- `activate` takes NVIDIA's `unbindLock` before it removes a card that is bound to `nvidia`, and refuses if a program still holds the GPU.
+  `geforce-sriov-activate.service` is ordered before `nvidia-persistenced.service`.
+
+- `setup` exits 0 after an install that finished but needs a power cycle, and it tells you so.
+
+- `install` checks the SHA-256 of an NVIDIA `.run` package that is named as the recorded version before it runs the package, and if a commit of the driver build (the rebuilt `nvidia.ko` and the files that go with it) gets cut off, the next run can finish it.
+
+### Removed
+
+- `prepare`, replaced by `activate`; `prepare --clear-guard` is now `activate --clear-lock`.
+- `--release-console`, `--boot-display-release`, `--hold-nvidia` and the `boot_display_release` key, which a config can no longer contain.
+  `install` removes the line from a config it wrote.
+- The prepare unit `geforce-sriov-prepare.service` and the deferral file `/run/geforce-sriov/deferred`.
+
+### Breaking changes and how to migrate
+
+0.3.0 is a beta release, so some 0.2.x names are gone.
+Each old name either stops with a message that names its replacement, or is migrated by the next `install`.
+
+- `activate --clear-guard` (in 0.2.x, `prepare --clear-guard`) is now `activate --clear-lock`.
+  The old name exits 2 and prints the new one. The file itself is still `/var/lib/geforce-sriov/prepare-attempt`.
+- `geforce-sriov prepare` is replaced by `activate`.
+  `prepare` exits 2 with `prepare is no longer supported; use activate`.
+  `install` replaces the 0.2.x boot units.
+- `--boot-display-release`, `--release-console`, `--hold-nvidia` and `--hold-note-shown` are gone.
+  Each exits 2 with `<option> is no longer supported; use activate and display=auto|on|off`.
+  Drop the option and use `--display` or `--no-display` to choose the display build.
+- The config key `boot_display_release=` is gone.
+  The next `install` removes the line from a config that `install` wrote and says so.
+  For a config you edited, `install` stops and names the line, and the other commands name it too.
+  Run `install` once, or delete the line.
+- `geforce-sriov-prepare.service`, `/etc/modprobe.d/nvidia-manual-load.conf` and `/run/geforce-sriov/deferred` are gone.
+  The next `install` removes each one that you did not change and prints `removed obsolete <file>`.
+  A changed file is kept, and a changed unit is disabled, with a line that says so. Run `install` once.
+- After a kernel update, run `sudo geforce-sriov rebuild` instead of `install`.
+  `install` run from the installed copy stops and names `rebuild`.
+- Exit status 5 and the "recovery guard" are now called the activation lock.
+  Only the wording changed, so nothing needs migrating.
+
+### Known limitations
+
+- Blackwell is not expected to work with the current implementation.
+- Host driver versions other than 580.159.01 are not guaranteed to work.
+- The display modules and host CUDA need a second NVIDIA driver package, and this project does not include or download it.
+- On an Ada card, the framebuffer slots of the VFs stay reserved, so host programs on that card can use only the memory outside them: about 4 of 12 GiB on an RTX 4070 SUPER with four VFs of the default type ([Known limits](docs/ada.md#known-limits)).
+- Holding the framebuffer slots is tested with host driver 580.159.01. With another host driver version it is best effort, and `install` builds NVIDIA's module without it when its checks do not pass.
+- On an Ada card, vGPU type 941 (RTX6000-Ada-1Q) does not work: the guest driver does not initialise. Use type 942 or a larger one ([Choosing a vGPU type](docs/ada.md#choosing-a-vgpu-type)).
+
 ## [0.2.2] - 2026-11-10
 
 ### Added
@@ -145,14 +254,14 @@
 
 - `doctor` checks kernel headers, `cc`, `make` and NVIDIA's kernel source tree at `/usr/src/nvidia-<version>`.
   Missing headers, `cc` or `make` are failures before the running kernel's module is installed, and warnings afterwards because only a later `install` needs them.
-  Host driver versions other than 580.159.01, which are not supported, produce a warning.
+  Host driver versions other than 580.159.01, which are not guaranteed to work, produce a warning.
   `doctor` and `status` report whether the installed `nvidia.ko` matches the driver step's recorded build.
   `doctor --driver-file` and `doctor --boot-display-release BDF` check the host as installation will leave it; `setup` passes both through.
 
 #### Ada and multi-GPU support
 
 - [Ada](docs/ada.md) now has the same support tier as [Ampere](docs/ampere.md): four VFs per card, three host-object revisions (scheduler, probe gate and VF count), two plugin revisions, and the `activate` and `check` commands.
-  Other host and guest driver versions are not supported.
+  Other host and guest driver versions are not guaranteed to work.
   Blackwell GPUs are not expected to work.
 
 - The Ada VF-count revision makes NVIDIA's driver report 4 total VFs instead of 1.
@@ -298,7 +407,7 @@
 - Q profiles are listed in [Ada](docs/ada.md#choosing-a-profile) and [Ampere](docs/ampere.md#choosing-a-profile).
   [Choosing a vGPU type](docs/configuration.md#choosing-a-vgpu-type) explains how to change size.
 
-- [Guests](docs/installation.md#guests) documents each card's guest drivers, where to set `RMSetVgpuGspPluginOffloadMode=0` on Linux and Windows, and unsupported pairs: Ada with a 580-series guest driver, or Ampere with 16.9 drivers.
+- [Guests](docs/installation.md#guests) documents each card's guest drivers, where to set `RMSetVgpuGspPluginOffloadMode=0` on Linux and Windows, and pairs that are not guaranteed to work: Ada with a 580-series guest driver, or Ampere with 16.9 drivers.
   [Ada](docs/ada.md#guests-and-vms) and [Ampere](docs/ampere.md#guests-and-vms) link to those instructions.
 
 ### Changed
@@ -363,7 +472,7 @@
   `nvidia is held back at boot by <file>, and no console release is granted. activate will refuse. Remove <file> (docs/installation.md#returning-to-automatic-preparation)`.
   For files other than `nvidia-manual-load.conf`, `doctor` names the two lines to remove instead.
   `uninstall` leaves the hold in place and prints `<file> still holds nvidia back at boot; remove it if nothing else needs it`.
-  [Returning to automatic preparation](docs/installation.md#returning-to-automatic-preparation) and [Uninstall](docs/installation.md#uninstall) explain its removal.
+  [Returning to automatic preparation](https://github.com/noon-at-cgn/geforce-sriov/blob/v0.2.0/docs/installation.md#returning-to-automatic-preparation) and [Uninstall](https://github.com/noon-at-cgn/geforce-sriov/blob/v0.2.0/docs/installation.md#uninstall) in the 0.2.0 guide explain its removal.
 
 - If a release grant exists but NVIDIA's driver is already loaded and a card is unprepared, `setup` stops before `prepare` with exit 3:
   `setup: NVIDIA's driver is loaded, so the console GPU cannot be released in this boot. Create the hold (docs/installation.md#boot-display-card), power the machine off and on, then run setup again.`
@@ -416,7 +525,7 @@
 - VF-count guidance in usage, `devices`, the config warning and the module parameter now explains that above 4 VFs, the module refuses to load if the card's VF layout check fails.
   Without a config file, `doctor --device BDF` prints `[INFO] config: /etc/geforce-sriov/config absent; the selected devices come from --device` instead of saying no card is selected.
 
-- The README and supported stack state the driver-version rule: `install` accepts only host driver 580.159.01, and other host and guest driver versions are not supported.
+- The README and supported stack state the driver-version rule: `install` accepts only host driver 580.159.01, and other host and guest driver versions are not guaranteed to work.
   The closing `Guest drivers:` block in `setup` ends with:
   - `Every guest driver needs RMSetVgpuGspPluginOffloadMode=0.`
   - `Use these versions; other versions are not supported.`

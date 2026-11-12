@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: MIT
+# geforce-sriov @VERSION@: load the SR-IOV livepatch before udev and before any
+# NVIDIA module, so the hidden SR-IOV, ARI and MSI-X capabilities are visible to
+# the kernel's first enumeration of each selected physical function.
+# It loads the livepatch and then NVIDIA's nvidia.ko, before udev can bind a
+# selected physical function: removing and rescanning cards, loading the rest of
+# NVIDIA's modules and enabling VFs belong to geforce-sriov-activate.service,
+# which runs the whole transaction once per boot.
+# Runs before systemd-udevd starts (the kernel's uevents wait in
+# systemd-udevd-kernel.socket) and before any NVIDIA service, so no modalias
+# load can bind a selected physical function first. nvidia is loaded only after
+# the livepatch reads back enabled with its transition complete.
+# `geforce-sriov livepatch --boot --load-driver` refuses when the module has other
+# parameters, no GPU is selected, or the guard is from this boot or has an unknown
+# boot ID. A previous-boot guard remains set but does not block this early load.
+#
+# One-boot escape hatch: add `geforce_sriov.skip` to the kernel command line. Nothing here loads
+# a module then, and because the package maps the NVIDIA PCI aliases away, udev will not load
+# nvidia either; run `modprobe nvidia` by hand if the driver is needed on that boot.
+# The unit is enabled by `geforce-sriov install --device BDF` only; installing
+# never starts it.
+[Unit]
+Description=geforce-sriov: load the SR-IOV livepatch before udev
+DefaultDependencies=no
+After=systemd-remount-fs.service systemd-journald.socket
+Before=systemd-udevd.service systemd-udev-trigger.service systemd-modules-load.service sysinit.target shutdown.target
+Before=nvidia-persistenced.service nvidia-vgpud.service nvidia-vgpu-mgr.service
+Conflicts=shutdown.target
+# /var/lib and the binary's directory should be on the root filesystem or a volume the
+# initramfs activates: this unit runs before udevd, so it cannot wait for devices udev has
+# not yet processed.
+RequiresMountsFor=/var/lib/geforce-sriov @BINDIR@
+ConditionPathExists=/etc/geforce-sriov/config
+ConditionKernelCommandLine=!geforce_sriov.skip
+
+[Service]
+Type=oneshot
+ExecStart=@BINDIR@/geforce-sriov livepatch --boot --load-driver
+RemainAfterExit=yes
+# 300 s covers two bounded module loads (60 s each) and the 10 s livepatch wait, with room for a
+# delayed root filesystem;
+# nothing here removes or rescans a card.
+TimeoutStartSec=300
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target

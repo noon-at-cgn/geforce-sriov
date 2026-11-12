@@ -94,13 +94,6 @@ void gs_addr_list_str(const struct gs_addr *list, unsigned int n, char *buf, siz
 	}
 }
 
-int gs_config_grants_release(const struct gs_config *cfg, const char *pf)
-{
-	for (unsigned int i = 0; i < cfg->nrelease; i++)
-		if (strcmp(cfg->boot_display_release[i].str, pf) == 0)
-			return 1;
-	return 0;
-}
 
 void gs_config_defaults(struct gs_config *cfg)
 {
@@ -157,7 +150,7 @@ int gs_vfs_check(const struct gs_device *e, const struct gs_config *cfg, char *w
 		return -1;
 	}
 	if ((vfs < ceiling ? vfs : ceiling) > GS_DEFAULT_VFS) {
-		snprintf(why, len, "vfs=%u is above the default of %u: ARI decoding in the GPU does not work, so above %u VFs the module refuses to load when the card's VF layout check fails",
+		snprintf(why, len, "vfs=%u is above the default of %u: ARI decoding in the GPU does not work, so above %u VFs the livepatch module geforce_sriov refuses to load when the card's VF layout check fails",
 			 vfs, GS_DEFAULT_VFS, GS_DEFAULT_VFS);
 		return 1;
 	}
@@ -191,18 +184,18 @@ static int valid_key(const char *k, size_t n)
 	return 1;
 }
 
-enum { K_BDFS, K_RELEASE, K_ARI, K_MSIX, K_VFS, K_IDENTITY, K_FORCE_HOST, K_SRIOV_MANAGE, K_TYPE_ADA, K_TYPE_AMPERE,
-       K_D3COLD, K_COUNT };
+enum { K_BDFS, K_DISPLAY, K_HOST_CUDA, K_ARI, K_MSIX, K_VFS, K_IDENTITY, K_FORCE_HOST, K_SRIOV_MANAGE,
+       K_TYPE_ADA, K_TYPE_AMPERE, K_D3COLD, K_FB_SLOTS, K_COUNT };
 static const char *const keys[K_COUNT] = {
-	"bdfs", "boot_display_release", "ari", "msix", "vfs", "identity", "identity_force_host", "sriov_manage",
-	"type_ada", "type_ampere", "d3cold",
+	"bdfs", "display", "host_cuda", "ari", "msix", "vfs", "identity", "identity_force_host",
+	"sriov_manage", "type_ada", "type_ampere", "d3cold", "fb_slots",
 };
 
 int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *err, size_t errlen)
 {
 	int seen[K_COUNT] = { 0 };
 	size_t pos = 0;
-	unsigned int lineno = 0, release_line = 0;
+	unsigned int lineno = 0;
 
 	gs_config_defaults(cfg);
 	if (len > GS_CONFIG_MAX_BYTES) {
@@ -244,6 +237,12 @@ int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *e
 			snprintf(err, errlen, "line %u: key must match [a-z0-9_]+", lineno);
 			return -1;
 		}
+		if (klen == sizeof("boot_display_release") - 1 &&
+		    memcmp(line, "boot_display_release", klen) == 0) {
+			snprintf(err, errlen, "line %u: %.*s: boot_display_release is obsolete; delete this line; use display=auto|on|off",
+				 lineno, (int)n, line);
+			return -1;
+		}
 		if (vlen == 0 || vlen >= sizeof(value)) {
 			snprintf(err, errlen, "line %u: empty or overlong value", lineno);
 			return -1;
@@ -271,27 +270,46 @@ int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *e
 			return -1;
 		}
 		switch (k) {
-		case K_BDFS:
-		case K_RELEASE: {
+		case K_BDFS: {
 			char sub[512];
-			int r = k == K_BDFS ?
-				gs_parse_addr_list(keys[k], value, cfg->bdfs, &cfg->nbdfs, sub, sizeof(sub)) :
-				gs_parse_addr_list(keys[k], value, cfg->boot_display_release, &cfg->nrelease, sub,
-						   sizeof(sub));
 
-			if (r) {
+			if (gs_parse_addr_list(keys[k], value, cfg->bdfs, &cfg->nbdfs, sub, sizeof(sub))) {
 				snprintf(err, errlen, "line %u: %s", lineno, sub);
 				return -1;
 			}
-			if (k == K_RELEASE)
-				release_line = lineno;
 			break;
 		}
+		case K_DISPLAY:
+			if (strcmp(value, "auto") == 0)
+				cfg->display = GS_DISPLAY_AUTO;
+			else if (strcmp(value, "on") == 0)
+				cfg->display = GS_DISPLAY_ON;
+			else if (strcmp(value, "off") == 0)
+				cfg->display = GS_DISPLAY_OFF;
+			else {
+				snprintf(err, errlen, "line %u: display must be auto, on or off", lineno);
+				return -1;
+			}
+			break;
+		case K_FB_SLOTS:
+			if (strcmp(value, "auto") == 0)
+				cfg->fb_slots = GS_FB_SLOTS_AUTO;
+			else if (strcmp(value, "on") == 0)
+				cfg->fb_slots = GS_FB_SLOTS_ON;
+			else if (strcmp(value, "off") == 0)
+				cfg->fb_slots = GS_FB_SLOTS_OFF;
+			else {
+				snprintf(err, errlen, "line %u: fb_slots must be auto, on or off", lineno);
+				return -1;
+			}
+			break;
 		case K_ARI:
 		case K_MSIX:
+		case K_HOST_CUDA:
 		case K_IDENTITY:
 		case K_FORCE_HOST: {
 			int *dst = k == K_ARI ? &cfg->ari : k == K_MSIX ? &cfg->msix :
+				   k == K_HOST_CUDA ? &cfg->host_cuda :
 				   k == K_IDENTITY ? &cfg->identity : &cfg->identity_force_host;
 
 			if (gs_parse_switch(value, dst)) {
@@ -330,18 +348,6 @@ int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *e
 			}
 			cfg->d3cold_off = 1;
 			break;
-		}
-	}
-	/* A console release is granted only for a selected GPU. */
-	for (unsigned int i = 0; i < cfg->nrelease; i++) {
-		unsigned int j;
-
-		for (j = 0; j < cfg->nbdfs && strcmp(cfg->bdfs[j].str, cfg->boot_display_release[i].str); j++)
-			;
-		if (j == cfg->nbdfs) {
-			snprintf(err, errlen, "line %u: boot_display_release: %s is not listed in bdfs", release_line,
-				 cfg->boot_display_release[i].str);
-			return -1;
 		}
 	}
 	cfg->present = 1;
@@ -397,28 +403,26 @@ int gs_config_render(const struct gs_config *cfg, char *buf, size_t len)
 	} while (0)
 
 	EMIT("# geforce-sriov configuration: key=value, no spaces; see docs.\n");
-	EMIT("# bdfs: the GPUs (physical function .0) that prepare/activate may act on.\n");
+	EMIT("# bdfs: the GPUs (physical function .0) that the boot units and activate act on.\n");
 	if (cfg->nbdfs) {
 		EMIT("bdfs=");
 		for (i = 0; i < cfg->nbdfs; i++)
 			EMIT("%s%s", i ? "," : "", cfg->bdfs[i].str);
 		EMIT("\n");
 	} else {
-		EMIT("# no device selected: boot-time preparation does nothing\n");
-	}
-	if (cfg->nrelease) {
-		EMIT("# boot_display_release: boot display GPUs whose console `prepare --release-console` may release;\n"
-		     "# the boot unit then prepares nothing and prepare is run by hand after boot.\n");
-		EMIT("boot_display_release=");
-		for (i = 0; i < cfg->nrelease; i++)
-			EMIT("%s%s", i ? "," : "", cfg->boot_display_release[i].str);
-		EMIT("\n");
+		EMIT("# no device selected: the boot units do nothing\n");
 	}
 	if (cfg->d3cold_off)
-		EMIT("# d3cold=off: consent to keep a laptop GPU powered when idle (prepare sets its\n"
+		EMIT("# d3cold=off: consent to keep a laptop GPU powered when idle (activate sets its\n"
 		     "# d3cold_allowed to 0); `install --disable-d3cold` writes it.\n"
 		     "d3cold=off\n");
 	EMIT("ari=%s\n", cfg->ari == GS_SW_OFF ? "off" : "on");
+	EMIT("display=%s\n", cfg->display == GS_DISPLAY_ON ? "on" :
+	     cfg->display == GS_DISPLAY_OFF ? "off" : "auto");
+	EMIT("host_cuda=%s\n", cfg->host_cuda == GS_SW_ON ? "on" : "off");
+	/* Written only when it was set: auto is what an absent key means. */
+	if (cfg->fb_slots != GS_FB_SLOTS_AUTO)
+		EMIT("fb_slots=%s\n", cfg->fb_slots == GS_FB_SLOTS_ON ? "on" : "off");
 	EMIT("msix=%s\n", cfg->msix == GS_SW_OFF ? "off" : "on");
 	if (cfg->vfs)
 		EMIT("vfs=%u\n", cfg->vfs);
@@ -438,4 +442,109 @@ int gs_config_render(const struct gs_config *cfg, char *buf, size_t len)
 		EMIT("#type_ampere=%u\n", GS_VGPU_TYPE_AMPERE);
 #undef EMIT
 	return (int)off;
+}
+
+/*
+ * The confirmed versions: the blocks of scripts/gs-driver-versions.tbl, as the build writes them.
+ * A release that confirms another host driver adds a block there.
+ */
+static const struct gs_confirmed_version confirmed_builtin[] = {
+#include "gs_versions.inc"
+};
+static const struct gs_confirmed_version *confirmed_rows = confirmed_builtin;
+static size_t confirmed_count = sizeof(confirmed_builtin) / sizeof(confirmed_builtin[0]);
+
+const struct gs_confirmed_version *gs_confirmed_versions(size_t *count)
+{
+	*count = confirmed_count;
+	return confirmed_rows;
+}
+
+void gs_confirmed_versions_set(const struct gs_confirmed_version *rows, size_t count)
+{
+	confirmed_rows = rows ? rows : confirmed_builtin;
+	confirmed_count = rows ? count : sizeof(confirmed_builtin) / sizeof(confirmed_builtin[0]);
+}
+
+const char *gs_default_host_version(void)
+{
+	return confirmed_rows[0].host;
+}
+
+const char *gs_nvidia_source_default(void)
+{
+	static char path[GS_PATH_MAX];
+
+	for (size_t i = 0; i < confirmed_count; i++)
+		if (!gs_pathf(path, sizeof(path), "/usr/src/nvidia-%s", confirmed_rows[i].host) && gs_exists(path))
+			return path;
+	gs_pathf(path, sizeof(path), "/usr/src/nvidia-%s", gs_default_host_version());
+	return path;
+}
+
+void gs_confirmed_list(char *buf, size_t len)
+{
+	size_t off = 0;
+
+	if (len)
+		buf[0] = '\0';
+	for (size_t i = 0; i < confirmed_count && off < len; i++) {
+		int n = snprintf(buf + off, len - off, "%s%s", i ? ", " : "", confirmed_rows[i].host);
+
+		if (n < 0 || (size_t)n >= len - off)
+			break;
+		off += (size_t)n;
+	}
+}
+
+int gs_version_confirmed(enum gs_version_package package, const char *version)
+{
+	if (!version || (package != GS_VERSION_HOST && package != GS_VERSION_COMPANION))
+		return 0;
+	for (size_t i = 0; i < confirmed_count; i++) {
+		const char *have = package == GS_VERSION_HOST ? confirmed_rows[i].host : confirmed_rows[i].second;
+
+		/* A row may record no second package. */
+		if (have && !strcmp(version, have))
+			return 1;
+	}
+	return 0;
+}
+
+int gs_version_format(enum gs_version_message message, const char *version, char *buf, size_t len)
+{
+	const char *v = version ? version : "unknown";
+	char list[256];
+	int n;
+
+	gs_confirmed_list(list, sizeof(list));
+	switch (message) {
+	case GS_VERSION_MSG_CONFIRMED:
+		n = snprintf(buf, len, "NVIDIA's driver %s is confirmed to work.", v);
+		break;
+	case GS_VERSION_MSG_PROMPT:
+		n = snprintf(buf, len, "NVIDIA's driver %s is not guaranteed to work. Confirmed versions: %s. Continue? [y/N]", v, list);
+		break;
+	case GS_VERSION_MSG_BEST_EFFORT:
+		n = snprintf(buf, len, "Continuing uses best effort; input and safety checks still apply. Default is no.");
+		break;
+	case GS_VERSION_MSG_SETUP_REFUSAL:
+		n = snprintf(buf, len, "setup: NVIDIA's driver %s is not guaranteed to work. Confirmed versions: %s. Nothing changed. To continue without questions, pass --allow-unsupported-driver.", v, list);
+		break;
+	case GS_VERSION_MSG_INSTALL_NOTICE:
+		n = snprintf(buf, len, "geforce-sriov: NVIDIA's driver %s is not guaranteed to work. Confirmed versions: %s. Continuing uses best effort; input and safety checks still apply.", v, list);
+		break;
+	case GS_VERSION_MSG_DOCTOR_WARNING:
+		n = snprintf(buf, len, "[WARN] NVIDIA's driver %s is not guaranteed to work; confirmed versions: %s.", v, list);
+		break;
+	case GS_VERSION_MSG_STATUS:
+		n = snprintf(buf, len, "NVIDIA's driver %s is not guaranteed to work; confirmed versions: %s.", v, list);
+		break;
+	case GS_VERSION_MSG_OPEN_REFUSAL:
+		n = snprintf(buf, len, "geforce-sriov: refused, nothing changed: NVIDIA's open flavour cannot be used by this build. --allow-unsupported-driver does not override this check.");
+		break;
+	default:
+		return -1;
+	}
+	return n < 0 || (size_t)n >= len ? -1 : n;
 }

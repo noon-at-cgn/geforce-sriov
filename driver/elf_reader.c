@@ -56,7 +56,7 @@ static int check_strtab(const struct gs_elf *e, size_t index, const Elf64_Shdr *
 	return 0;
 }
 
-static int check_sections(struct gs_elf *e, char *err, size_t errlen)
+static int check_sections(struct gs_elf *e, int shared, char *err, size_t errlen)
 {
 	Elf64_Shdr sh;
 	size_t i;
@@ -101,12 +101,14 @@ static int check_sections(struct gs_elf *e, char *err, size_t errlen)
 	for (i = 1; i < e->shnum; i++) {
 		read_shdr(e, i, &sh);
 		if (sh.sh_type == SHT_RELA) {
-			if (!e->symtab || sh.sh_link != e->symtab)
+			/* A shared object's dynamic relocation tables target no section
+			 * (sh_info 0) and reference .dynsym, not the symbol table. */
+			if (!shared && (!e->symtab || sh.sh_link != e->symtab))
 				return fail(err, errlen, -1, "relocation section %zu sh_link %u is not the symbol table",
 					    i, sh.sh_link);
 			if (sh.sh_entsize != sizeof(Elf64_Rela) || sh.sh_size % sizeof(Elf64_Rela))
 				return fail(err, errlen, -1, "relocation section %zu has bad entsize/size", i);
-			if (sh.sh_info == 0 || sh.sh_info >= e->shnum)
+			if (sh.sh_info >= e->shnum || (!shared && sh.sh_info == 0))
 				return fail(err, errlen, -1, "relocation section %zu targets bad section %u", i,
 					    sh.sh_info);
 		} else if (sh.sh_type == SHT_SYMTAB_SHNDX) {
@@ -123,7 +125,8 @@ static int check_sections(struct gs_elf *e, char *err, size_t errlen)
 	return 0;
 }
 
-int gs_elf_open(const unsigned char *data, size_t size, struct gs_elf *out, char *err, size_t errlen)
+static int open_common(const unsigned char *data, size_t size, uint16_t type, const char *kind,
+		       struct gs_elf *out, char *err, size_t errlen)
 {
 	struct gs_elf e = { .data = data, .size = size };
 	Elf64_Ehdr *h = &e.ehdr;
@@ -140,8 +143,8 @@ int gs_elf_open(const unsigned char *data, size_t size, struct gs_elf *out, char
 		return fail(err, errlen, -1, "not little-endian ELF");
 	if (h->e_ident[EI_VERSION] != EV_CURRENT || h->e_version != EV_CURRENT)
 		return fail(err, errlen, -1, "unsupported ELF version");
-	if (h->e_type != ET_REL)
-		return fail(err, errlen, -1, "not a relocatable object (e_type %u)", h->e_type);
+	if (h->e_type != type)
+		return fail(err, errlen, -1, "not a %s (e_type %u)", kind, h->e_type);
 	if (h->e_machine != EM_X86_64)
 		return fail(err, errlen, -1, "not x86_64 (e_machine %u)", h->e_machine);
 	if (h->e_ehsize != sizeof(*h) || h->e_shentsize != sizeof(Elf64_Shdr))
@@ -169,7 +172,7 @@ int gs_elf_open(const unsigned char *data, size_t size, struct gs_elf *out, char
 	if (e.shstrndx == 0 || e.shstrndx >= e.shnum)
 		return fail(err, errlen, -1, "section name string table index %zu out of range", e.shstrndx);
 
-	if (check_sections(&e, err, errlen))
+	if (check_sections(&e, type == ET_DYN, err, errlen))
 		return -1;
 	read_shdr(&e, e.shstrndx, &sh);
 	if (check_strtab(&e, e.shstrndx, &sh, err, errlen))
@@ -183,6 +186,16 @@ int gs_elf_open(const unsigned char *data, size_t size, struct gs_elf *out, char
 	}
 	*out = e;
 	return 0;
+}
+
+int gs_elf_open(const unsigned char *data, size_t size, struct gs_elf *out, char *err, size_t errlen)
+{
+	return open_common(data, size, ET_REL, "relocatable object", out, err, errlen);
+}
+
+int gs_elf_open_shared(const unsigned char *data, size_t size, struct gs_elf *out, char *err, size_t errlen)
+{
+	return open_common(data, size, ET_DYN, "shared object", out, err, errlen);
 }
 
 int gs_elf_section(const struct gs_elf *e, size_t index, Elf64_Shdr *shdr, const char **name,

@@ -1,27 +1,15 @@
 # SPDX-License-Identifier: MIT
-# geforce-sriov @VERSION@: bring the VFs and their vGPU types up once per boot.
-# Runs after the prepare unit and after NVIDIA's two daemons are up, and before
-# VM autostart, so that every selected GPU has its VFs, its vGPU type and
-# power/control=on before any guest starts. `activate --boot` first waits up to
-# 30 s for each selected PF to bind to nvidia, then loads nvidia_vgpu_vfio,
-# restarts nvidia-vgpud and nvidia-vgpu-mgr in order, re-probes each PF, sets the
-# type on every VF and powers it, and prints what `check` prints.
-#
-# It does not run on the boot-display path: with boot_display_release= in the
-# config, prepare --boot defers and writes /run/geforce-sriov/deferred, and
-# ConditionPathExists=! on that file makes systemd skip this unit (activate
-# never starts). The cards are then brought up by hand.
-#
-# One-boot escape hatch: add `geforce_sriov.skip` to the kernel command line.
-# The unit is enabled by `geforce-sriov install --device BDF` only; installing
-# never starts it.
+# geforce-sriov @VERSION@: run the complete activation before display and VM autostart.
+# The transaction starts NVIDIA's daemons itself; it must not be ordered after them.
+# Boot activation never prompts or stops a running display manager.
+# Add geforce_sriov.skip to the kernel command line to skip this boot.
 [Unit]
-Description=geforce-sriov: bring up the VFs and vGPU types of the selected GeForce GPUs
-After=geforce-sriov-prepare.service nvidia-vgpud.service nvidia-vgpu-mgr.service
-# Before VM autostart, named generically so one hypervisor is not assumed.
-Before=libvirt-guests.service pve-guests.service
+Description=geforce-sriov: activate selected GPUs
+After=geforce-sriov-livepatch.service
+Before=display-manager.service libvirt-guests.service pve-guests.service
+# nvidia-persistenced opens every GPU. It must not hold one while the card is removed and rescanned.
+Before=nvidia-persistenced.service
 ConditionPathExists=/etc/geforce-sriov/config
-ConditionPathExists=!/run/geforce-sriov/deferred
 ConditionKernelCommandLine=!geforce_sriov.skip
 RequiresMountsFor=/var/lib/geforce-sriov @BINDIR@
 
@@ -29,9 +17,7 @@ RequiresMountsFor=/var/lib/geforce-sriov @BINDIR@
 Type=oneshot
 ExecStart=@BINDIR@/geforce-sriov activate --boot
 RemainAfterExit=yes
-# 600 s covers the 30 s bind wait of up to eight selected cards (240 s, the
-# most a config lists) and leaves the rest for the bring-up, whose later steps
-# each wait up to 15 s per card or per VF; it is not the sum of every wait.
+# Allows the bounded per-card operations and service startup to complete.
 TimeoutStartSec=600
 StandardOutput=journal+console
 StandardError=journal+console

@@ -44,7 +44,7 @@
 #ifndef GS_DEVICES_H
 #define GS_DEVICES_H
 
-#define GS_VERSION		"0.2.2"
+#define GS_VERSION		"0.3.0"
 #define GS_VENDOR_NVIDIA	0x10deu
 
 /*
@@ -99,6 +99,45 @@
 #define GS_CAP_ID_MSIX		0x11u
 
 enum gs_generation { GS_AMPERE, GS_ADA };
+
+/* Per-VF sizes in bytes, not the aggregate PF resource rows. */
+struct gs_vf_bar_size {
+	unsigned int bar;
+	unsigned long long bytes;
+	int prefetchable;
+	const char *source;
+};
+
+/* Returns 1 for a known layout and 0 for no entry. */
+static inline int gs_vf_bar_size_lookup(unsigned int generation, unsigned int bar,
+					struct gs_vf_bar_size *out)
+{
+	static const unsigned long long sizes[] = { 262144ull, 268435456ull, 33554432ull };
+	unsigned int index;
+	const char *source;
+
+	if (generation == GS_AMPERE)
+		source = "RTX 3080 Arm I PF resource rows";
+	else if (generation == GS_ADA)
+		source = "RTX 4070 SUPER prepared PF resource rows (ada-4070-survey)";
+	else
+		return 0;
+	if (bar == 0)
+		index = 0;
+	else if (bar == 1)
+		index = 1;
+	else if (bar == 3)
+		index = 2;
+	else
+		return 0;
+	if (out) {
+		out->bar = bar;
+		out->bytes = sizes[index];
+		out->prefetchable = bar != 0;
+		out->source = source;
+	}
+	return 1;
+}
 
 struct gs_device {
 	unsigned short device;

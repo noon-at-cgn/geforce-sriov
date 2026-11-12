@@ -60,19 +60,24 @@ int gs_patch_structure(const unsigned char *p,size_t n,const char *version,struc
  }
  if(rc<0)return -1;
  if(!stores)return fail(err,en,"installer does not store the scheduler writer at the expected slot");
- out->offset=(size_t)sh.sh_offset+sig+17;out->patched=p[out->offset]==0x90;out->version=r->version;out->function=r->callback;out->measured=r->measured;return 0;
+ out->offset=(size_t)sh.sh_offset+sig+17;out->function_offset=sig+17-cb.value;out->patched=p[out->offset]==0x90;out->version=r->version;out->function=r->callback;out->measured=r->measured;out->digest=0;return 0;
 }
 int gs_patch_inspect(const unsigned char *p,size_t n,struct gs_patch_info *out,char *err,size_t en)
 {
- struct gs_elf e;char hash[65];size_t i;struct gs_patch_info info;
- if(gs_elf_open(p,n,&e,err,en))return -1;
+ char actual[65],normalized[65],detail[256]="no recipe family matched";size_t i,count=0;struct gs_patch_info info,match;
+ gs_sha256(p,n,SIZE_MAX,actual);
  for(i=0;i<sizeof(recipes)/sizeof(recipes[0]);i++){
-  if(gs_patch_structure(p,n,recipes[i].version,&info,err,en))continue;
-  gs_sha256(p,n,info.offset,hash);
-  if(strcmp(hash,recipes[i].hash))return fail(err,en,"stock-normalized SHA-256 mismatch: unknown version/flavour or other modifications");
-  *out=info;return 0;
+  if(gs_patch_structure(p,n,recipes[i].version,&info,err,en)){
+   if(!strcmp(actual,recipes[i].hash))return fail(err,en,"anchor scheduler.integrity: known digest contradicts structure");
+   if(err&&*err)snprintf(detail,sizeof(detail),"%.240s",err);
+   continue;
+  }
+  gs_sha256(p,n,info.offset,normalized);
+  info.digest=!strcmp(normalized,recipes[i].hash);
+  match=info;count++;
  }
- return fail(err,en,"no driver build matched (accepted: 580.159.01, 595.91.04; open, GSP, guest and unknown objects are refused)");
+ if(count!=1){if(err&&en)snprintf(err,en,"anchor scheduler.family: %s",count?"ambiguous recipe families":detail);return -1;}
+ *out=match;return 0;
 }
 int gs_patch_exact_pair(const unsigned char *patched,size_t pn,const unsigned char *stock,size_t sn,size_t site,char *err,size_t en)
 {

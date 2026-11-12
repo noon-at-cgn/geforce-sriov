@@ -881,7 +881,7 @@ static int __init geforce_sriov_init(void)
 		return -EINVAL;
 	}
 	if (n == 0) {
-		pr_err("bdfs is empty; list the PFs to prepare (no card is changed without being listed)\n");
+		pr_err("bdfs is empty; list the PFs to activate (no card is changed without being listed)\n");
 		return -EINVAL;
 	}
 

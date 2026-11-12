@@ -526,3 +526,167 @@ int gs_lock(void)
 	}
 	return 0; /* fd intentionally kept open: the lock lives as long as the process */
 }
+
+/* ---- bounded operations (activation only) -------------------------------- */
+
+/*
+ * One host operation with a deadline, run in a child so that an operation stuck in the kernel
+ * cannot hold the caller. A timeout returns -ETIMEDOUT: the operation may still take effect, so
+ * activation treats it as uncertain device state (exit 5, guard retained, no second attempt).
+ * These are the struct gs_host deadline callbacks; a fixture host supplies its own to model
+ * the same single operation and to inject a timeout.
+ */
+static long mono_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/*
+ * Wait for pid until deadline, then kill it and give up. group: pid leads its own process group
+ * and the whole group is killed, so the programs a command started do not outlive the timeout.
+ * Returns 1 when it was reaped into st, 0 on timeout, and -1 when it cannot be waited for (the
+ * kernel reaped it already, as it does while SIGCHLD is ignored). In that last case the child is
+ * gone and nothing is signalled: its PID may belong to another process by now.
+ */
+static int reap_bounded(pid_t pid, int *st, long deadline, int group)
+{
+	for (;;) {
+		pid_t r = waitpid(pid, st, WNOHANG);
+
+		if (r == pid)
+			return 1;
+		if (r < 0 && errno != EINTR)
+			return -1;
+		if (mono_ms() >= deadline) {
+			kill(group ? -pid : pid, SIGKILL);
+			/* A child stuck in the kernel cannot be reaped; never block on it. */
+			for (unsigned int i = 0; i < 25 && waitpid(pid, st, WNOHANG) == 0; i++)
+				gs_sleep_ms(20);
+			return 0;
+		}
+		gs_sleep_ms(20);
+	}
+}
+
+static int write_attr_deadline_cb(const struct gs_host *h, const char *path, const char *value, unsigned int ms)
+{
+	long deadline = mono_ms() + (long)(ms ? ms : 1);
+	int fd[2], st, result = -EIO;
+	pid_t pid;
+	ssize_t n;
+
+	if (!h->write_attr)
+		return -ENOSYS;
+	if (pipe(fd))
+		return -errno;
+	fflush(NULL);
+	pid = fork();
+	if (pid < 0) {
+		close(fd[0]);
+		close(fd[1]);
+		return -errno;
+	}
+	if (pid == 0) {
+		int r;
+
+		close(fd[0]);
+		r = h->write_attr(path, value);
+		n = write(fd[1], &r, sizeof(r));
+		(void)n;
+		close(fd[1]);
+		_exit(0);
+	}
+	close(fd[1]);
+	/*
+	 * Wait for the result no longer than the deadline. A plain read here would block for as long
+	 * as the child's write is stuck in the kernel, because the child keeps the pipe open.
+	 */
+	for (;;) {
+		struct pollfd pfd = { .fd = fd[0], .events = POLLIN };
+		long left = deadline - mono_ms();
+		int ready = poll(&pfd, 1, left > 0 ? (int)left : 0);
+
+		if (ready > 0)
+			break;
+		if (ready < 0 && errno == EINTR)
+			continue;
+		close(fd[0]);
+		reap_bounded(pid, &st, 0, 0);
+		return -ETIMEDOUT;
+	}
+	while ((n = read(fd[0], &result, sizeof(result))) < 0 && errno == EINTR)
+		;
+	close(fd[0]);
+	/*
+	 * The child sends its result after the write returned, so a complete result is the write's
+	 * outcome even when the child can no longer be waited for. Without one, the outcome is unknown.
+	 */
+	if (n != (ssize_t)sizeof(result) || reap_bounded(pid, &st, deadline, 0) == 0)
+		return -ETIMEDOUT;
+	return result;
+}
+
+/*
+ * The command runs in a process group of its own, and the live host's program is executed by the
+ * child itself instead of through a second fork. A timeout then kills the program and everything
+ * it started: a helper such as sriov-manage must not keep moving a GPU between drivers after
+ * activation has reported the timeout and gone on to its cleanup.
+ */
+static int run_deadline_cb(const struct gs_host *h, const char *const argv[], unsigned int ms)
+{
+	long deadline = mono_ms() + (long)(ms ? ms : 1);
+	char prog[GS_PATH_MAX] = "";
+	int st, r;
+	pid_t pid;
+
+	if (!h->run)
+		return -ENOSYS;
+	if (h->run == gs_run && (r = gs_find_program(argv[0], prog, sizeof(prog))))
+		return r;
+	fflush(NULL);
+	pid = fork();
+	if (pid < 0)
+		return -errno;
+	if (pid == 0) {
+		/* Without its own group a timeout could not kill what the command starts: do not run it. */
+		if (setpgid(0, 0) && getpgrp() != getpid())
+			_exit(126);
+		if (prog[0]) {
+			execve(prog, (char *const *)argv, run_envp);
+			_exit(127);
+		}
+		_exit(h->run(argv) & 0xff);
+	}
+	/* Both sides set the group, so it exists whichever of them runs first. */
+	setpgid(pid, pid);
+	r = reap_bounded(pid, &st, deadline, 1);
+	if (r == 0)
+		return -ETIMEDOUT;
+	/* The command ended and its status is lost: a failure, not a timeout. */
+	if (r < 0)
+		return -ECHILD;
+	if (WIFEXITED(st))
+		return WEXITSTATUS(st);
+	if (WIFSIGNALED(st))
+		return 128 + WTERMSIG(st);
+	return -ECHILD;
+}
+
+const struct gs_host gs_host_live = {
+	.sys = GS_LIVE_SYSFS,
+	.proc = GS_LIVE_PROC,
+	.state_dir = GS_STATE_DIR,
+	.run_dir = GS_RUN_DIR,
+	.write_attr = gs_write_attr,
+	.run = gs_run,
+	.capture = gs_run_capture,
+	.write_attr_deadline = write_attr_deadline_cb,
+	.run_deadline = run_deadline_cb,
+	.root = "",
+	.build = &gs_build_live,
+	.enable_prereq = gs_enable_prereq,
+	.system = 1,
+};

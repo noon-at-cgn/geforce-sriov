@@ -148,7 +148,7 @@ static void test_constants(void)
 {
 	CHECK(GS_DEFAULT_VFS == 4);
 	CHECK(GS_VFS_MAX == 16);
-	CHECK(strcmp(GS_VERSION, "0.2.2") == 0);
+	CHECK(strcmp(GS_VERSION, "0.3.0") == 0);
 	CHECK(GS_MAX_PFS == 8);
 	CHECK(GS_VENDOR_NVIDIA == 0x10de);
 	CHECK(GS_MSIX_HIDE_BIT == 29);

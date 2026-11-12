@@ -10,35 +10,125 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   userspace:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         cc: [gcc, clang]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      # test_clear_guard runs the CLI as root inside an unprivileged user namespace, which
+      # Ubuntu 24.04 restricts by default. GS_TEST_REQUIRE_NS makes a skip there a failure.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Build
         run: make CC=${{ matrix.cc }}
       - name: Test
         run: make CC=${{ matrix.cc }} test
+        env:
+          GS_TEST_REQUIRE_NS: "1"
       - name: Staged install
         run: |
           make CC=${{ matrix.cc }} install DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr DEVICES=0000:01:00.0
           find "$RUNNER_TEMP/stage" -type f | sort
           test -x "$RUNNER_TEMP/stage/usr/bin/geforce-sriov"
-          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.2.2/dkms.conf"
-          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.2.2/include/gs_devices.h"
+          # The driver step finds its libraries and the table of confirmed versions beside itself.
+          test -x "$RUNNER_TEMP/stage/usr/bin/geforce-sriov-driver"
+          test -f "$RUNNER_TEMP/stage/usr/bin/gs-driver-version.sh"
+          test -f "$RUNNER_TEMP/stage/usr/bin/gs-driver-versions.tbl"
+          # The owner of the Ada framebuffer slots, which the driver step builds into nvidia.ko.
+          test -f "$RUNNER_TEMP/stage/usr/bin/driver-patches/fb-owner/gs-fb-owner.c"
+          test -f "$RUNNER_TEMP/stage/usr/bin/driver-patches/fb-owner/gs-fb-owner.h"
+          test -f "$RUNNER_TEMP/stage/usr/bin/driver-patches/fb-owner/fb-owner.patch"
+          sh "$RUNNER_TEMP/stage/usr/bin/geforce-sriov-driver" --dry-run --kernel ci --source /nonexistent >"$RUNNER_TEMP/plan"
+          grep -q 'version classification: unconfirmed' "$RUNNER_TEMP/plan"
+          # From the installed copy, install names rebuild and never asks for the build tree.
+          "$RUNNER_TEMP/stage/usr/bin/geforce-sriov" install >"$RUNNER_TEMP/again" 2>&1 || true
+          grep -q 'After a kernel update, run `sudo geforce-sriov rebuild`' "$RUNNER_TEMP/again"
+          ! grep -q 'run make first' "$RUNNER_TEMP/again"
+          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.3.0/dkms.conf"
+          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.3.0/include/gs_devices.h"
           grep -qx 'bdfs=0000:01:00.0' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           grep -qx 'identity=on' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           grep -qx 'identity_force_host=on' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           ./geforce-sriov --version
 
+  # The C tests under AddressSanitizer and UndefinedBehaviorSanitizer. The hook library is
+  # built without them: its own tests preload it into other programs.
+  sanitizers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SAN: -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
+      TESTS: >-
+        tests/test_lifecycle tests/test_devices tests/test_contracts tests/test_patch
+        tests/test_patch_ada tests/test_patch_display tests/test_modcheck tests/test_fbowner
+    steps:
+      - uses: actions/checkout@v5
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Build
+        run: |
+          make hook
+          make CFLAGS="$SAN" geforce-sriov driver/geforce-sriov-patch $TESTS
+      - name: Test
+        run: |
+          for t in $TESTS; do
+            echo "== $t"
+            GS_CLI="$PWD/geforce-sriov" GS_SRC="$PWD" "./$t"
+          done
+        env:
+          GS_TEST_REQUIRE_NS: "1"
+          UBSAN_OPTIONS: print_stacktrace=1
+
+  shell:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        # Fail on warnings and errors. Info notes such as SC2015 flag the scripts' deliberate
+        # "[ check ] && [ check ] || refuse" form, where the refusal must run if either check fails.
+        run: shellcheck -x --source-path=SCRIPTDIR -S warning scripts/*.sh tests/fixtures-driver/*.sh
+      - name: POSIX sh syntax
+        run: |
+          for f in scripts/*.sh tests/fixtures-driver/*.sh; do
+            dash -n "$f"
+          done
+
+  # The unit files as systemd reads them: an ordering cycle, an unknown directive or an
+  # ExecStart program that does not exist fails here. The units are copied with ExecStart
+  # pointing into the staging directory, so nothing is installed on the runner.
+  units:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Staged install
+        run: make install DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr DEVICES=0000:01:00.0
+      - name: systemd-analyze verify
+        run: |
+          stage="$RUNNER_TEMP/stage"
+          mkdir "$RUNNER_TEMP/units"
+          for u in "$stage"/etc/systemd/system/geforce-sriov-*.service; do
+            sed "s|/usr/bin/geforce-sriov|$stage/usr/bin/geforce-sriov|g" "$u" >"$RUNNER_TEMP/units/$(basename "$u")"
+          done
+          test -f "$RUNNER_TEMP/units/geforce-sriov-livepatch.service"
+          test -f "$RUNNER_TEMP/units/geforce-sriov-activate.service"
+          systemd-analyze verify "$RUNNER_TEMP"/units/*.service
+
   kernel-module:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Kernel headers
         run: sudo apt-get update && sudo apt-get install -y "linux-headers-$(uname -r)"
       - name: Build module

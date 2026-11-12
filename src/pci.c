@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 /*
- * Read-only PCI inspection through a sysfs root, and the pure decision whether
- * `prepare` may remove and rescan a card. Nothing in this file writes.
+ * Read-only PCI inspection through a sysfs root: the card and bus facts every command reads,
+ * the console scan, the VF BAR sizing and the daemon admission predicate. Nothing here writes
+ * to the host; activation performs the writes through struct gs_host.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -9,6 +10,7 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <sys/file.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -261,99 +263,25 @@ int gs_card_inspect(const char *sysroot, const struct gs_addr *pf, struct gs_car
 	return 0;
 }
 
-#define REFUSE(...) do { \
-		plan->verdict = GS_PLAN_REFUSE; \
-		snprintf(plan->reason, sizeof(plan->reason), __VA_ARGS__); \
-		return; \
-	} while (0)
-
-static int is_display_class(unsigned int class_code)
+/*
+ * Whether activation puts the host console (KMS) on this card. The console follows the boot
+ * display GPU only: display=auto picks a selected boot display GPU, display=off none, and
+ * display=on is limited to the boot display GPU as well. Measured: KMS on a card that is not the
+ * boot display breaks that card's first VF (NVOS status 0x51, "Failed to alloc guest FB memory")
+ * while its other VFs keep working. An unknown boot_vga is not the boot display. Activation,
+ * doctor and status all report from this one rule.
+ */
+int gs_display_kms(const struct gs_config *cfg, const struct gs_card *c)
 {
-	return (class_code >> 16) == 0x03;
+	if (cfg->display == GS_DISPLAY_OFF)
+		return 0;
+	return c->boot_vga == 1;
 }
 
-static int is_audio_fn(const struct gs_fn *fn)
-{
-	return (fn->class_code >> 8) == 0x0403;
-}
-
-void gs_plan_prepare(const struct gs_card *c, const struct gs_display *d, struct gs_plan *plan)
-{
-	unsigned int i;
-
-	memset(plan, 0, sizeof(*plan));
-	plan->verdict = GS_PLAN_READY;
-	if (!c->present)
-		REFUSE("%s: no such PCI function", c->pf.str);
-	if (c->pf.func != 0)
-		REFUSE("%s: not function 0; select the physical function .0", c->pf.str);
-	if (c->is_vf)
-		REFUSE("%s is a virtual function, not a physical function", c->pf.str);
-	if (c->vendor != GS_VENDOR_NVIDIA)
-		REFUSE("%s: vendor 0x%04x is not NVIDIA", c->pf.str, c->vendor);
-	if (!c->entry)
-		REFUSE("%s (10de:%04x) is not in the device table (see `geforce-sriov devices`)",
-		       c->pf.str, c->device);
-	if (!is_display_class(c->class_code))
-		REFUSE("%s: class 0x%06x is not a display controller", c->pf.str, c->class_code);
-	if (c->boot_vga == 1 && !d)
-		REFUSE("%s is the boot display device (boot_vga=1). Preparing it releases its console and needs boot_display_release in the config and `prepare --release-console=%s`",
-		       c->pf.str, c->pf.str);
-	if (d && c->boot_vga != 1)
-		REFUSE("%s: boot_display_release grants it, but it is not the boot display device (boot_vga=%d); remove it from boot_display_release",
-		       c->pf.str, c->boot_vga);
-	if (c->driver[0])
-		REFUSE("%s is bound to driver '%s'; prepare must run before any display driver binds the PF",
-		       c->pf.str, c->driver);
-	if (c->has_sriov && c->numvfs > 0)
-		REFUSE("%s: %u virtual functions are active", c->pf.str, c->numvfs);
-	if (c->nvfs_on_bus > 0)
-		REFUSE("%s: %u virtual functions exist on bus %04x:%02x", c->pf.str, c->nvfs_on_bus,
-		       c->pf.domain, c->pf.bus);
-	if (c->nothers > 0)
-		REFUSE("%s: bus %04x:%02x is shared with %s (%04x:%04x); removing the bus would touch an unrelated device",
-		       c->pf.str, c->pf.domain, c->pf.bus, c->others[0].bdf.str, c->others[0].vendor,
-		       c->others[0].device);
-	for (i = 0; i < c->nfns; i++) {
-		const struct gs_fn *fn = &c->fns[i];
-
-		if (!fn->driver[0])
-			continue;
-		if (is_audio_fn(fn) && fn->vendor == GS_VENDOR_NVIDIA &&
-		    strcmp(fn->driver, "snd_hda_intel") == 0 && plan->nunbind < GS_PLAN_MAX_UNBIND) {
-			plan->unbind[plan->nunbind++] = fn->bdf;
-			continue;
-		}
-		REFUSE("%s: function %s is bound to '%s'; only the card's HDMI audio (snd_hda_intel) is unbound automatically",
-		       c->pf.str, fn->bdf.str, fn->driver);
-	}
-	if (!c->bridge_is_pci)
-		REFUSE("%s sits on a root bus without a PCI bridge, so the bridge-scoped rescan is not possible",
-		       c->pf.str);
-	if (!c->rescan_present)
-		REFUSE("%s: bridge %s has no pci_bus/%04x:%02x/rescan", c->pf.str, c->bridge.str, c->pf.domain,
-		       c->pf.bus);
-	if (!c->bridge_pm[0])
-		REFUSE("%s: bridge %s power/control is unreadable; it cannot be held awake", c->pf.str,
-		       c->bridge.str);
-	if (c->bar0_assigned == 0)
-		REFUSE("%s: BAR0 is not assigned; a rescan cannot place it", c->pf.str);
-	if (c->has_sriov)
-		REFUSE("%s already presents SR-IOV (sriov_totalvfs=%u) from another kernel change (patched kernel or other livepatch); prepare does not stack on it",
-		       c->pf.str, c->totalvfs);
-	if (d) {
-		if (d->refuse[0])
-			REFUSE("%s: boot display: releasing its console is not safe: %s", c->pf.str, d->refuse);
-		if (gs_display_fw_state(d) == GS_FW_BOUND) {
-			gs_copy(plan->release, sizeof(plan->release), d->fw);
-			gs_copy(plan->release_driver, sizeof(plan->release_driver), d->fw_driver);
-		}
-	}
-}
-
-/* Checks for `install --device` on a running system, where the PF may be bound to nvidia. */
+/* Checks for `install --device` and setup's listing: the PF may legitimately be bound to nvidia. */
 int gs_check_selectable(const struct gs_card *c, int release_granted, char *reason, size_t len)
 {
+	(void)release_granted; /* console releases were removed in 0.3.0 */
 	if (!c->present)
 		return snprintf(reason, len, "%s: no such PCI function", c->pf.str), -1;
 	if (c->pf.func != 0 || c->is_vf)
@@ -361,11 +289,11 @@ int gs_check_selectable(const struct gs_card *c, int release_granted, char *reas
 	if (c->vendor != GS_VENDOR_NVIDIA || !c->entry)
 		return snprintf(reason, len, "%s (%04x:%04x) is not in the device table", c->pf.str,
 				c->vendor, c->device), -1;
-	if (!is_display_class(c->class_code))
+	if ((c->class_code >> 16) != 0x03)
 		return snprintf(reason, len, "%s: not a display controller", c->pf.str), -1;
-	if (c->boot_vga == 1 && !release_granted)
-		return snprintf(reason, len, "%s is the boot display device (boot_vga=1); select it only with --boot-display-release %s",
-				c->pf.str, c->pf.str), -1;
+	if (c->driver[0] && strcmp(c->driver, "nvidia") != 0)
+		return snprintf(reason, len, "%s is bound to %s; select it while it is bound to nvidia or to no driver",
+				c->pf.str, c->driver), -1;
 	if (c->nothers > 0)
 		return snprintf(reason, len, "%s: bus shared with %s", c->pf.str, c->others[0].bdf.str), -1;
 	if (!c->bridge_is_pci)
@@ -679,51 +607,6 @@ int gs_consoles_check(const char *consoles, char *why, size_t len)
 	return 0;
 }
 
-/* ---- this boot's preparation record --------------------------------------- */
-
-int gs_prepared_read(const char *run_dir, const struct gs_addr *pf, struct gs_prepared *rec)
-{
-	char p[GS_PATH_MAX], *data, *line, *save = NULL;
-	size_t len;
-
-	memset(rec, 0, sizeof(*rec));
-	rec->msix_linked = -1;
-	if (gs_pathf(p, sizeof(p), "%s/" GS_PREPARED_NAME "/%s", run_dir, pf->str) ||
-	    gs_read_whole(p, &data, &len, 4096))
-		return 0;
-	rec->present = 1;
-	for (line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-		if (strncmp(line, "boot_id=", 8) == 0)
-			gs_copy(rec->boot_id, sizeof(rec->boot_id), line + 8);
-		else if (strncmp(line, "console_release=", 16) == 0)
-			gs_copy(rec->console_release, sizeof(rec->console_release), line + 16);
-		else if (strcmp(line, "msix_linked=1") == 0 || strcmp(line, "msix_linked=0") == 0)
-			rec->msix_linked = line[12] - '0';
-	}
-	free(data);
-	return 0;
-}
-
-int gs_check_enable(const struct gs_card *c, const struct gs_config *cfg, const struct gs_prepared *rec,
-		    const char *boot_id, char *why, size_t len)
-{
-	if (!rec->present || !rec->boot_id[0] || !boot_id || !boot_id[0] || strcmp(rec->boot_id, boot_id) != 0)
-		return snprintf(why, len, "%s was not prepared this boot (run `geforce-sriov prepare` before NVIDIA binds it)",
-				c->pf.str), -1;
-	if (!c->present || !c->entry)
-		return snprintf(why, len, "%s is %s", c->pf.str, !c->present ? "missing" : "not in the device table"), -1;
-	/* boot_vga can read differently after the rescan moved the BARs: the record decides as well. */
-	if (c->boot_vga != 1 && !rec->console_release[0])
-		return 0;
-	if (!gs_config_grants_release(cfg, c->pf.str))
-		return snprintf(why, len, "%s is the boot display device; boot_display_release in the config does not grant its console release",
-				c->pf.str), -1;
-	if (!rec->console_release[0])
-		return snprintf(why, len, "%s is the boot display device and was not prepared with `geforce-sriov prepare --release-console=%s` this boot",
-				c->pf.str, c->pf.str), -1;
-	return 0;
-}
-
 int gs_check_presented(const struct gs_card *c, const struct gs_config *cfg, char *why, size_t len)
 {
 	unsigned int vfs = gs_config_vfs(cfg);
@@ -734,4 +617,319 @@ int gs_check_presented(const struct gs_card *c, const struct gs_config *cfg, cha
 		return snprintf(why, len, "%s presents sriov_totalvfs=%u, outside 1..%u (the configured vfs); a changed vfs takes effect at the next boot",
 				c->pf.str, c->totalvfs, vfs), -1;
 	return 0;
+}
+
+/* ---- VF BAR sizing and the bridge growth assessment (read-only) ----------- */
+
+/* The name of the driver bdf is bound to; "" when unbound. */
+static void pci_driver(const char *sys, const char *bdf, char *out, size_t len)
+{
+	char p[GS_PATH_MAX], target[GS_PATH_MAX];
+	const char *base;
+	ssize_t n;
+
+	out[0] = '\0';
+	if (gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/driver", sys, bdf))
+		return;
+	n = readlink(p, target, sizeof(target) - 1);
+	if (n <= 0)
+		return;
+	target[n] = '\0';
+	base = strrchr(target, '/');
+	gs_copy(out, len, base ? base + 1 : target);
+}
+
+/* virtfn0..numvfs-1 of pf, each confirmed by its own physfn link back to pf. 0, or -1 with why. */
+static int pci_vf_list(const char *sys, const struct gs_addr *pf, unsigned int numvfs, struct gs_addr *out,
+		       char *why, size_t len)
+{
+	char p[GS_PATH_MAX], real[PATH_MAX];
+	const char *base;
+
+	if (numvfs > GS_VFS_MAX)
+		return snprintf(why, len, "%s has %u VFs, more than %u", pf->str, numvfs, GS_VFS_MAX), -1;
+	for (unsigned int i = 0; i < numvfs; i++) {
+		if (gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/virtfn%u", sys, pf->str, i) || !realpath(p, real))
+			return snprintf(why, len, "%s: virtfn%u is missing", pf->str, i), -1;
+		base = strrchr(real, '/');
+		if (gs_addr_parse(base ? base + 1 : real, &out[i]))
+			return snprintf(why, len, "%s: virtfn%u names no PCI address", pf->str, i), -1;
+		if (gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/physfn", sys, out[i].str) || !realpath(p, real) ||
+		    !(base = strrchr(real, '/')) || strcmp(base + 1, pf->str) != 0)
+			return snprintf(why, len, "%s: the physfn link of its virtfn%u %s does not lead back to it", pf->str, i,
+					out[i].str), -1;
+	}
+	return 0;
+}
+
+/*
+ * The per-BAR address space a VF needs, from the device table. The table holds per-VF sizes,
+ * never the aggregate the kernel already assigned (SPEC section 5, owner decision 7).
+ * 1 when every implemented BAR has an entry, 0 when this card's layout is not in the table.
+ */
+static int vf_bar_need(unsigned int generation, unsigned int vfs, unsigned long long *nonprefetch,
+		       unsigned long long *prefetch)
+{
+	unsigned long long np = 0, pf = 0;
+
+	for (unsigned int bar = 0; bar <= 3; bar++) {
+		struct gs_vf_bar_size s;
+
+		if (bar == 2)
+			continue; /* VF BAR2 is part of VF BAR1's 64-bit register pair */
+		if (!gs_vf_bar_size_lookup(generation, bar, &s))
+			return 0;
+		if (s.bytes > 0xffffffffull / vfs)
+			return 0;
+		if (s.prefetchable)
+			pf += s.bytes * vfs;
+		else
+			np += s.bytes * vfs;
+	}
+	*nonprefetch = np;
+	*prefetch = pf;
+	return 1;
+}
+
+/* Bridge windows from <dir>/resource lines: 0xstart 0xend 0xflags. -1 when none could be read. */
+static int bridge_windows(const char *dir, unsigned long long *io, unsigned long long *mem,
+			  unsigned long long *pref, int *have_mem, int *have_pref)
+{
+	char p[GS_PATH_MAX], *data, *line, *save = NULL;
+	size_t len;
+	int any = 0;
+
+	*io = *mem = *pref = 0;
+	*have_mem = *have_pref = 0;
+	if (gs_pathf(p, sizeof(p), "%s/resource", dir) || gs_read_whole(p, &data, &len, 65536))
+		return -1;
+	for (line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+		unsigned long long start, end, flags, size;
+
+		if (sscanf(line, "0x%llx 0x%llx 0x%llx", &start, &end, &flags) != 3)
+			continue;
+		if (end < start || flags == 0)
+			continue;
+		size = end - start + 1;
+		if (flags & 0x100ull) { /* IORESOURCE_IO */
+			*io += size;
+			any = 1;
+		} else if (flags & 0x200ull) { /* IORESOURCE_MEM */
+			if (flags & 0x2000ull) { /* IORESOURCE_PREFETCH */
+				*pref += size;
+				*have_pref = 1;
+			} else {
+				*mem += size;
+				*have_mem = 1;
+			}
+			any = 1;
+		}
+	}
+	free(data);
+	return any ? 0 : -1;
+}
+
+/*
+ * The spare address space above the bridge: the parent bridge's window minus what its children
+ * already decode, which bounds how far a rescan can grow this bridge. -1 when not determinable.
+ */
+static int growth_room(const char *sysroot, const char *bridge_dir, int prefetch, unsigned long long *room)
+{
+	char p[GS_PATH_MAX], parent[PATH_MAX], real[GS_PATH_MAX], child[GS_PATH_MAX], *slash;
+	unsigned long long pio, pmem, ppref, used = 0;
+	struct dirent *de;
+	int hmem, hpref, found = 0;
+	DIR *d;
+
+	if (!realpath(bridge_dir, real) || !(slash = strrchr(real, '/')))
+		return -1;
+	*slash = '\0';
+	gs_copy(parent, sizeof(parent), real);
+	if (bridge_windows(parent, &pio, &pmem, &ppref, &hmem, &hpref) || (prefetch ? !hpref : !hmem))
+		return -1;
+	if (gs_pathf(p, sizeof(p), "%s/bus/pci/devices", sysroot) || !(d = opendir(p)))
+		return -1;
+	while ((de = readdir(d))) {
+		unsigned long long cio, cmem, cpref, *window;
+		char cdir[GS_PATH_MAX], creal[PATH_MAX], *cslash;
+		int chm, chp;
+
+		if (de->d_name[0] == '.' || gs_pathf(cdir, sizeof(cdir), "%s/bus/pci/devices/%s", sysroot, de->d_name) ||
+		    !realpath(cdir, creal) || !(cslash = strrchr(creal, '/')) || gs_pathf(child, sizeof(child), "%s", creal))
+			continue;
+		*cslash = '\0';
+		if (strcmp(creal, parent) != 0)
+			continue;
+		if (bridge_windows(child, &cio, &cmem, &cpref, &chm, &chp))
+			continue;
+		window = prefetch ? &cpref : &cmem;
+		used += *window;
+		found = 1;
+	}
+	closedir(d);
+	if (!found)
+		return -1;
+	*room = (prefetch ? ppref : pmem) > used ? (prefetch ? ppref : pmem) - used : 0;
+	return 0;
+}
+
+int gs_resource_fit_assess(const struct gs_host *h, const struct gs_card *card, unsigned int vfs,
+			   struct gs_resource_fit *fit)
+{
+	unsigned long long np = 0, pf = 0, io, mem, pref;
+	int have_table, have_mem = 0, have_pref = 0;
+
+	memset(fit, 0, sizeof(*fit));
+	fit->vfs = vfs;
+	fit->state = GS_RESOURCE_FIT_UNKNOWN;
+	if (vfs < 1)
+		return -1;
+	have_table = card->entry && vf_bar_need(card->entry->generation, vfs, &np, &pf);
+	fit->nonprefetch_need = np;
+	fit->prefetch_need = pf;
+	if (!card->bridge_dir[0] || !card->bridge_is_pci ||
+	    bridge_windows(card->bridge_dir, &io, &mem, &pref, &have_mem, &have_pref)) {
+		fit->source = "the bridge windows are unreadable";
+	} else {
+		fit->source = "the bridge's current windows";
+		fit->nonprefetch_window = have_mem ? mem : 0;
+		fit->prefetch_window = have_pref ? pref : 0;
+	}
+
+	/* Already placed by the firmware or an earlier rescan: nothing has to fit. */
+	if (card->vf_bars_assigned == 1) {
+		fit->state = GS_RESOURCE_FIT_OK;
+		fit->source = "the VF BARs are assigned on this bus";
+		return 0;
+	}
+	if (!have_table) {
+		/* Owner decision 7: no table entry for this card, proceed with a warning that names it. */
+		fit->source = card->entry ? "no VF BAR size entry for this card's layout" :
+					    "the card is not in the device table";
+		return 0;
+	}
+	if (!have_mem || !have_pref)
+		return 0; /* unknown, and the caller refuses a removal it cannot size */
+
+	if (np <= fit->nonprefetch_window && pf <= fit->prefetch_window) {
+		fit->state = GS_RESOURCE_FIT_OK;
+		return 0;
+	}
+	/* The rescan grows the bridge: judge against the room above it, not only the window. */
+	{
+		unsigned long long npgap = np > fit->nonprefetch_window ? np - fit->nonprefetch_window : 0;
+		unsigned long long pfgap = pf > fit->prefetch_window ? pf - fit->prefetch_window : 0;
+		unsigned long long room;
+
+		if (growth_room(h->sys, card->bridge_dir, pfgap ? 1 : 0, &room)) {
+			/* A root port sits directly under the host bridge, which exposes no window: the
+			 * space the kernel can reclaim is not computable here. Leave the fit UNKNOWN (a
+			 * warning, not a refusal) and let activation judge the rescan's result, which it
+			 * already does by requiring the VF BARs to be assigned before it enables a VF. */
+			fit->state = GS_RESOURCE_FIT_UNKNOWN;
+			fit->room_unknown = 1;
+			fit->source = "the room above the bridge is not determinable (root port); the rescan decides";
+		} else if (npgap <= room && pfgap <= room) {
+			fit->state = GS_RESOURCE_FIT_OK;
+			fit->source = "the bridge grows on rescan; the room above it suffices";
+		} else {
+			fit->state = GS_RESOURCE_FIT_INSUFFICIENT;
+			fit->source = "the need exceeds the bridge windows and the room above them";
+		}
+	}
+	return 0;
+}
+
+/* ---- daemon admission (read-only) ---------------------------------------- */
+
+/*
+ * 1 while a geforce-sriov process holds the lock in h->run_dir, which activation does for its whole
+ * run. The activating record is trusted only then: a record left by a killed run must not make
+ * the guard invisible.
+ */
+static int activation_running(const struct gs_host *h)
+{
+	char p[GS_PATH_MAX];
+	int fd, held;
+
+	if (gs_pathf(p, sizeof(p), "%s/lock", h->run_dir))
+		return 0;
+	fd = open(p, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+	if (fd < 0)
+		return 0;
+	held = flock(fd, LOCK_EX | LOCK_NB) < 0 && errno == EWOULDBLOCK;
+	close(fd);
+	return held;
+}
+
+/*
+ * The predicate vgpud's ExecStartPre runs through `check --daemon-ready`: every selected PF
+ * presents SR-IOV with the configured count, its VF resources are assigned, and its VFs are
+ * enabled with valid parent links and bound to nvidia. It deliberately does not look at the
+ * vGPU types the daemons publish (they do not exist before vgpud runs) and it ignores the
+ * activating marker that activate itself writes.
+ */
+int gs_daemon_ready(const struct gs_host *h, const struct gs_config *cfg, const struct gs_activate_opts *o)
+{
+	char p[GS_PATH_MAX], act[GS_PATH_MAX], why[512];
+	unsigned int bad = 0;
+	int activating;
+
+	(void)o;
+	if (gs_pathf(act, sizeof(act), "%s/" GS_ACTIVATING_NAME, h->run_dir))
+		act[0] = '\0';
+	activating = act[0] && gs_exists(act) && activation_running(h);
+	/*
+	 * The guard of a running activation is not persistent: activation writes it before its first
+	 * change and clears it on success, and `activating` names that run (SPEC: this predicate must
+	 * not reject activation's own marker). Without the marker, or with a marker that no running
+	 * activation stands behind, a guard means an earlier run did not finish, and vgpud must not
+	 * start.
+	 */
+	if (!activating && (!gs_pathf(p, sizeof(p), "%s/" GS_ATTEMPT_NAME, h->state_dir) && gs_exists(p))) {
+		fprintf(stderr, "geforce-sriov: not ready: the activation lock %s is set (an earlier activation did not finish)\n",
+			p);
+		return GS_EXIT_REFUSED;
+	}
+	for (unsigned int i = 0; i < cfg->nbdfs; i++) {
+		struct gs_addr vf[GS_VFS_MAX];
+		struct gs_card c;
+		char drv[64];
+
+		gs_card_inspect(h->sys, &cfg->bdfs[i], &c);
+		if (!c.present) {
+			fprintf(stderr, "geforce-sriov: not ready: %s is missing\n", cfg->bdfs[i].str);
+			bad++;
+			continue;
+		}
+		why[0] = '\0';
+		if (gs_check_presented(&c, cfg, why, sizeof(why))) {
+			fprintf(stderr, "geforce-sriov: not ready: %s\n", why);
+			bad++;
+			continue;
+		}
+		if (c.numvfs < 1 || c.numvfs != c.totalvfs || c.numvfs > GS_VFS_MAX ||
+		    pci_vf_list(h->sys, &c.pf, c.numvfs, vf, why, sizeof(why))) {
+			if (!why[0])
+				snprintf(why, sizeof(why), "%s has %u of %u VFs enabled", c.pf.str, c.numvfs, c.totalvfs);
+			fprintf(stderr, "geforce-sriov: not ready: %s\n", why);
+			bad++;
+			continue;
+		}
+		if (c.bar0_assigned != 1 || c.vf_bars_assigned != 1) {
+			fprintf(stderr, "geforce-sriov: not ready: %s: BAR0 or a VF BAR is unassigned or unreadable\n", c.pf.str);
+			bad++;
+			continue;
+		}
+		for (unsigned int j = 0; j < c.numvfs; j++) {
+			pci_driver(h->sys, vf[j].str, drv, sizeof(drv));
+			if (strcmp(drv, "nvidia") != 0) {
+				fprintf(stderr, "geforce-sriov: not ready: VF %s of %s is bound to %s, not nvidia\n",
+					vf[j].str, c.pf.str, drv[0] ? drv : "nothing");
+				bad++;
+				break;
+			}
+		}
+	}
+	return bad ? GS_EXIT_REFUSED : GS_EXIT_OK;
 }

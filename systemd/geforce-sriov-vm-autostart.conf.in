@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: MIT
+# geforce-sriov @VERSION@: require successful activation before VM autostart.
+[Unit]
+Requires=geforce-sriov-activate.service
+After=geforce-sriov-activate.service
+
+[Service]
+ExecStartPre=@BINDIR@/geforce-sriov check

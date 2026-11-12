@@ -1,0 +1,64 @@
+# Original work written from the behavioural specification, not derived from any
+# other implementation: read-only hexadecimal GPU-ID allowlist. Unset or empty
+# permits every GPU; otherwise the GPU is rejected before DRM allocation and
+# before that DRM client requests an NVKMS device.
+--- a/nvidia-drm/nvidia-drm-drv.c
++++ b/nvidia-drm/nvidia-drm-drv.c
+@@ -82,6 +82,9 @@
+ #include <linux/pci.h>
+ #include <linux/workqueue.h>
+ #include <linux/sort.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/string.h>
+ 
+ /*
+  * Commit fcd70cd36b9b ("drm: Split out drm_probe_helper.h")
+@@ -1962,6 +1965,34 @@
+ 
+ 
+ 
++static char *gs_gpu_allow;
++module_param_named(gpu_allow, gs_gpu_allow, charp, 0444);
++MODULE_PARM_DESC(gpu_allow, "Comma-separated hexadecimal GPU IDs");
++
++static bool gs_gpu_selected(u32 id)
++{
++    char *list, *cursor, *token;
++    bool selected = false;
++
++    if (!gs_gpu_allow || !*gs_gpu_allow)
++        return true;
++
++    list = kstrdup(gs_gpu_allow, GFP_KERNEL);
++    if (!list)
++        return false;
++    cursor = list;
++    while ((token = strsep(&cursor, ",")) != NULL) {
++        u32 value;
++
++        if (!kstrtou32(strim(token), 16, &value) && value == id) {
++            selected = true;
++            break;
++        }
++    }
++    kfree(list);
++    return selected;
++}
++
+ /*
+  * Helper function for allocate/register DRM device for given NVIDIA GPU ID.
+  */
+@@ -1972,6 +2003,12 @@
+     struct device *device = gpu_info->gpuInfo.os_device_ptr;
+     bool bus_is_pci;
+ 
++    if (!gs_gpu_selected(gpu_info->gpuInfo.gpu_id)) {
++        NV_DRM_LOG_INFO("Skipping GPU ID 0x%08x (not in gpu_allow)",
++                        gpu_info->gpuInfo.gpu_id);
++        return;
++    }
++
+     DRM_DEBUG(
+         "Registering device for NVIDIA GPU ID 0x08%x",
+         gpu_info->gpuInfo.gpu_id);

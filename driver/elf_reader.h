@@ -84,6 +84,15 @@ struct gs_elf_rela_iter {
  */
 int gs_elf_open(const unsigned char *data, size_t size, struct gs_elf *out, char *err, size_t errlen);
 
+/*
+ * Same validated view for a shared object (ET_DYN). The relocatable-object
+ * rules that do not hold for a linked image are relaxed: a RELA section may
+ * target no section (sh_info 0) and need not link the symbol table, because
+ * the dynamic tables reference .dynsym. Everything else, including every
+ * bounds check, is identical.
+ */
+int gs_elf_open_shared(const unsigned char *data, size_t size, struct gs_elf *out, char *err, size_t errlen);
+
 /* Section header and name by index. Returns GS_ELF_OK or GS_ELF_ERR. */
 int gs_elf_section(const struct gs_elf *e, size_t index, Elf64_Shdr *shdr, const char **name,
 		   char *err, size_t errlen);

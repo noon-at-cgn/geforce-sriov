@@ -1,6 +1,8 @@
 # Build outputs
 /geforce-sriov
 /driver/geforce-sriov-patch
+/src/gs_versions.inc
+/src/gs_versions.inc.tmp
 /hook/libgeforce_sriov.so
 /hook/build/
 /tests/test_*

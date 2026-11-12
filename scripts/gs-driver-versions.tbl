@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: MIT
+# The confirmed NVIDIA vGPU host driver versions, one block per version. A block starts with its
+# host= line. Each line is key=value; the value runs to the end of the line and is data, never
+# evaluated. Lines that start with # and empty lines are skipped.
+#
+# This file is the one place that holds a version's data. The driver step reads a block with
+# gs_version_row (gs-driver-version.sh). The build turns the blocks into the CLI's rows
+# (src/gs_versions.inc, see the Makefile). The first block is the default: its kernel tree is the
+# one looked for when none is named, and hints that need one version name it.
+#
+# A build is confirmed only when every digest of one block matches (gs_classify). The patch tool
+# (driver/*.c) holds the input and output digest of each revision in its own tables, as evidence
+# for each patched site. A version whose revisions the tool does not admit by digest is never
+# confirmed, whatever this file says, so a new block needs its rows there too.
+#
+#   host                  the host driver version, as the package and its kernel tree declare it
+#   package               SHA-256 of NVIDIA's vGPU host package (.run)
+#   stock_object          SHA-256 of nv-kernel.o_binary, unchanged
+#   scheduler_object      ... after the scheduler revision
+#   gate_object           ... after module-gate
+#   patched_object        ... after vf-count: the plain build's final object
+#   display_object        ... after idx39: the display build's final object
+#   stock_plugin          SHA-256 of libnvidia-vgpu.so.<host>, unchanged
+#   mixed_plugin          ... after plugin-mixed: the input of plugin-div4, and the installed copy
+#                         of earlier releases (it is replaced, never accepted)
+#   patched_plugin        ... after plugin-div4: the only copy that is installed
+#   plain_offsets         the eight .text offsets, zero-based, ascending, as 0x<lowercase hex>, at
+#                         which the plain build's module differs from NVIDIA's
+#   second                the version of the second package (display and host CUDA builds)
+#   second_grid           SHA-256 of that package as the vGPU guest driver (.run)
+#   second_consumer       SHA-256 of that package as the GeForce driver (.run)
+#   public                the version of NVIDIA's public kernel module source (display builds).
+#                         No whole-file digest of that source is recorded, so it is an identity by
+#                         version only
+#   profile_plain         evidence profile of the plain build
+#   profile_display       evidence profile of the display build
+#   profile_display_cuda  evidence profile of the display build with host CUDA
+#   owner_c, owner_h,     SHA-256 of driver-patches/fb-owner/gs-fb-owner.c, gs-fb-owner.h and
+#   owner_patch           fb-owner.patch: the owner of the Ada VFs' framebuffer slots as it was
+#                         reviewed for this version. A confirmed build takes no other files
+#   owner_symbols         the kernel symbols nvidia.ko may import with the owner that it does not
+#                         import without it, separated by spaces; anything else refuses the owner
+#   guest_ampere          the guest drivers for an Ampere card, as setup prints them
+#   guest_ada             the guest drivers for an Ada card, as setup prints them
+#
+# Only host is required. A field that is left out is not recorded, and nothing is confirmed
+# against it. A profile line is a claim that the combination was run on hardware. Leave it out
+# for a combination with no recorded run: that combination is then built as unconfirmed.
+
+# 580.159.01. Input identities from P0-MERGED-RECIPE, P0-HOST-CUDA and the verified idx39 output.
+# display-cuda-580.159.01-idx39 rests on the saved output of one hardware run:
+# evidence-e2e/24-cuda-evidence.txt (SHA-256
+# 4f5d29a9349515705a484055f258bc73304823d615d2cb1fa051a1961016ab8e), boot 69d4b219, with the
+# console on the boot display GPU, four vGPUs, and CUDA tests that passed on the host and in three
+# guests. It is provisional until the same file is captured again on the build that follows the
+# 0.3.0 refactor; remove the line if that run does not reproduce the result. Host CUDA without
+# display has no recorded run and no profile.
+host=580.159.01
+package=8fb252d5eafbb5740c9f623c881334119c532c1960834712956eb5e304e7ec41
+stock_object=4e3abe645b6873ed478adea6a06c6955352ff06186849edeea536c9630596449
+scheduler_object=ce8a485bfaeebca3a9609f9415a6df81c160a0a53509aec093bc3361a6d12701
+gate_object=f5b788cdb3e06aed18860cc6cf950dcc13143bd831d90d8e9c4bf9e744426f12
+patched_object=946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29
+display_object=83ce12abba0441812aa135d4f099636513d709090c3da8999cda9243bd3b67ff
+stock_plugin=7e52b76dc7ca8490e7ffbc1fd724f5db07f3791a3a2ec07f2d595bf05abdcaa7
+mixed_plugin=7ddfad458bbfdb0c4d6902a9e045bd15c84f63aea19314f3d3a60967224b73c6
+patched_plugin=aa4fdeb5288b5e56e7d4972466813d78e10cfb428fcf62fb53b84fec718cf07c
+plain_offsets=0x14a7c4 0x14a7c5 0x14a7c6 0x14a7c7 0xa16708 0xa16709 0xd8966f 0xd89670
+second=580.159.03
+second_grid=8de9c10cfda77a89a8056acec476c13549f8f6dc7c7f9675da38dc9a73208a81
+second_consumer=32c85d99b0f640c9501f61b39ddad208fd0288d015c4fbc5fd0435c07783fa77
+public=580.159.03
+profile_plain=host-580.159.01-plain
+profile_display=display-580.159.01-idx39
+profile_display_cuda=display-cuda-580.159.01-idx39
+owner_c=5c9925ee306cfd089e1c53ec65f30a05e94315e579af8011fa763347005dfedb
+owner_h=4ce1f94cd1ffa1b62d654e213ac03527c5787b53cd8872c4d342a42cc73fe168
+owner_patch=89f335ba20d186f1238ca1831dc3368b00905abdc872205d2d841e8014811790
+owner_symbols=capable _copy_from_user _copy_to_user __check_object_size mutex_lock mutex_unlock sscanf snprintf _printk strcmp memset memcpy jiffies proc_create remove_proc_entry seq_printf seq_read seq_lseek single_open single_release
+guest_ampere=Linux 580.159.03, Windows 582.53
+guest_ada=Linux 535.230.02 (vGPU 16.9), Windows 539.19 (16.9)

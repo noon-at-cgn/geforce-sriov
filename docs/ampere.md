@@ -1,6 +1,20 @@
 # Ampere support
 
+This page covers Ampere GPUs such as the RTX 3080 or RTX 3090.
+geforce-sriov splits a card into virtual functions (VFs), and each VF backs one vGPU, a slice of the GPU that you attach to one VM.
+It presents the card to NVIDIA's vGPU software as a professional RTX A6000.
+
+## What you need to know
+
+- Every Ampere card is presented as the RTX A6000 and gets 4 VFs by default. The default vGPU type is 525 (RTXA6000-2Q, 2 GB).
+- Use host driver 580.159.01, a Linux guest driver 580.159.03 and a Windows guest driver 582.53. Other versions are **not** guaranteed to work.
+- Every guest needs the setting `RMSetVgpuGspPluginOffloadMode=0` ([Guests and VMs](#guests-and-vms)).
+- Pick a vGPU type that fits your card's VRAM ([Choosing a vGPU type](#choosing-a-vgpu-type)).
+- The limits of this generation are in [Known limits](#known-limits).
+
 ## At a glance
+
+Key facts for this generation; the terms in the table are explained below it.
 
 | Item | Value |
 |---|---|
@@ -10,60 +24,64 @@
 | VFs per card | 4 |
 | Host driver | NVIDIA vGPU software 19.5, host driver 580.159.01, vGPU-KVM proprietary build, CPU-side mode with `NVreg_EnableGpuFirmware=0`, GSP not used |
 | vGPU plugin | The patched plugin copy this package makes from the 580.159.01 stock plugin (SHA-256 `aa4fdeb5…`) |
-| Host module | `nvidia.ko` built from the 580.159.01 object with the three revisions |
+| NVIDIA's module | `nvidia.ko` built from the 580.159.01 object with its three byte patches |
 | Linux guest | 580.159.03 |
 | Windows guest | 582.53 |
 | Guest setting | `RMSetVgpuGspPluginOffloadMode=0` |
 | Default vGPU type | 525, RTXA6000-2Q, 2048 MiB |
 | Status | supported |
 
+Terms in the table:
+
+- *Presented as* is the professional card that NVIDIA's vGPU software is told this card is, with its PCI device ID (the model number a card reports on the PCI bus).
+- *vGPU-KVM* is NVIDIA's host package for KVM hypervisors.
+- *CPU-side mode* means the driver does its management work on the host CPU instead of the GPU's on-board firmware processor ([GSP](glossary.md)).
+- *The five byte patches* are small changes to a few bytes of NVIDIA's own files that `install` makes in copies of your files: three in NVIDIA's module and two in the vGPU plugin ([byte patches](driver-patch.md#byte-patches)).
+- *Guest setting* is a driver option you set inside the guest ([Guests and VMs](#guests-and-vms)).
+
+The driver versions above are the recommended, tested ones.
+Other versions are not guaranteed to work ([supported software stack](installation.md#supported-software-stack)).
+
 ## How it works
 
-- NVIDIA's vGPU stack does not list the GeForce cards.
-  The package reveals the card's hidden SR-IOV virtual functions (VFs) and presents it to that stack as the RTX A6000, regardless of its model.
-- Ampere uses the same host stack as Ada: three object revisions and the patched plugin copy ([revisions](driver-patch.md#revisions)).
-  Without the scheduler revision, a PMU-service callback disables the GPU's runlist scheduler and guest work stalls.
-  The VF count revision forces 4 total VFs on every TU/GA/AD card bound to the module, which is the count Ampere uses.
-- The Ada probe-gate revision has no effect on Ampere.
-  It replaces a two-byte conditional jump in an architecture check that rejects an architecture above `0x17`.
-  An Ampere card is architecture `0x17`, so that branch was never taken.
-- The default type, 525 (RTXA6000-2Q), takes 2048 MiB per vGPU.
+The overall mechanism is the same for every card: a livepatch (a kernel module that changes the running kernel, see the [glossary](glossary.md)) reveals the [SR-IOV](glossary.md) feature the card hides, the identity hook presents the card as a professional board, and `activate` creates the VFs and sets their type.
+The README gives the short version ([How it works](../README.md#how-it-works)) and the [technical reference](technical-reference.md#how-it-works) the full one.
+Three things are specific to Ampere:
 
-With the default profile:
+- Identity: Every Ampere card is presented as the RTX A6000, whatever its model, and its default type is 525 (RTXA6000-2Q), which takes 2048 MiB per vGPU.
+- NVIDIA host driver setup: Ampere uses the same three byte patches for NVIDIA's module (`nvidia.ko`) and the same patched plugin copy as Ada ([byte patches](driver-patch.md#byte-patches)).
+  Without the scheduler patch, a callback in the driver disables the GPU's runlist scheduler (the part that schedules work on the GPU) and guest work stalls.
+  The VF-count patch forces a total of 4 VFs (TotalVFs, how many VFs the card says it can have) on every TU/GA/AD card (Turing, Ampere and Ada chips) bound to NVIDIA's module.
+  Ampere cards report 16, and 4 is the count the package presents.
+- Probe gate: The Ada probe-gate patch makes no difference on Ampere, because it only lifts a check that Ampere cards already pass.
+
+With the default vGPU type:
 
 ```mermaid
 flowchart TD
     card["Ampere card"] -->|Presented as| identity["RTX A6000 · 10de:2230"]
-    identity --> host["Patched module and plugin"]
+    identity --> host["Patched NVIDIA module and plugin"]
     host --> vfs["Four VFs · type 525"]
     vfs --> guests["VFIO guests · 2 GiB each"]
 ```
 
 ### With the other generation
 
-A host can hold Ampere and Ada cards together.
-Select each card with its own `--device`; no other setting is needed.
+A host can hold Ampere and Ada cards together: select each card with its own `--device`.
+The shared NVIDIA module (`nvidia.ko`), the one patched plugin, the per-generation types (`type_ampere`, 525 by default) and the host-wide recovery rule are described once in [Combining generations](devices.md#combining-generations).
+For Ampere, the practical effect is that NVIDIA's module forces four VFs on every card bound to it, so an Ampere card beside an Ada card still presents four.
 See [Ada](ada.md#with-the-other-generation) for the Ada side.
 
-- One module and one plugin serve both generations, alone or together, with the same bring-up procedure.
-  Both use the patched plugin copy.
-  On 580.159.01, `activate` refuses any other plugin: the stock one, the earlier Ada-only copy and an earlier copy with only the placement change.
-  On another host driver version, which is not supported, it warns and continues.
-- The module forces four VFs on every card bound to it, so an Ampere card beside an Ada card presents four VFs too.
-- Each generation has its own type: `type_ada` and `type_ampere` in the config, by default 942 on Ada and 525 on Ampere.
-- `--type` is refused on a mixed selection ([commands](configuration.md#commands)).
-  Set the two config keys instead, or narrow `check` to one generation with `--device`.
-- `doctor` warns when a selection mixes Ada with another generation.
-  Apart from `--type`, nothing refuses a mixed host.
-- The recovery rule is host-wide: if any card disappears from `lspci` or the host cannot be reached, cold power cycle the whole machine ([the one rule](recovery.md#the-one-rule)).
+<a name="choosing-a-profile"></a>
 
-### Choosing a profile
+### Choosing a vGPU type
 
-A vGPU type, also called a profile, sets how much of the card's memory each vGPU gets.
+A vGPU type sets how much of the card's VRAM each vGPU gets. NVIDIA also calls a vGPU type a profile.
+The name ends in the size: in `RTXA6000-2Q`, the `2Q` means 2 GB.
 The card offers the RTX A6000 types.
 Its Q types are:
 
-| Type | Profile | Size |
+| Type | Name ends in | Size |
 |---|---|---|
 | 524 | 1Q | 1 GiB |
 | 525 | 2Q | 2 GiB |
@@ -77,58 +95,39 @@ Its Q types are:
 | 533 | 48Q | 48 GiB |
 
 NVS-class types are offered too.
-The list is not filtered by the card's memory.
-Set the type with `type_ampere=` in the config; every VF of the card gets it ([Choosing a vGPU type](configuration.md#choosing-a-vgpu-type)).
+The list is **not** filtered by the card's memory, so pick a vGPU type that fits your VRAM.
+Set the type with `type_ampere=` in the config; every VF of the card gets it.
+How to pick a size, and why a vGPU type that looks like it fits can still fail, is in [Choosing a vGPU type](installation.md#choosing-a-vgpu-type).
 
-> [!IMPORTANT]
-> Choose vGPU profiles that fit your card's physical VRAM.
-> All the vGPUs you run at once must fit in the VRAM together, with some room left over because the host driver uses part of the memory too.
-> For example, four `4Q` vGPUs (16 GB in total) fit a 20 GB card, and four `8Q` vGPUs (32 GB) do not.
+<a name="host-stack"></a>
 
-## Host stack
+## NVIDIA host driver setup
 
-`install` applies the NVIDIA changes to copies of your own files:
+`install` applies the same three byte patches for NVIDIA's module and two plugin byte patches as on Ada ([NVIDIA host driver setup on Ada](ada.md#nvidia-host-driver-setup)), and writes the GSP-off driver parameter `options nvidia NVreg_EnableGpuFirmware=0` to `/etc/modprobe.d/` unless a file there already sets it to 0.
+The build mechanics (digest checks, the comparison with a stock build, the manual path for `--driver=skip`) are in [driver-patch.md](driver-patch.md#what-install-does).
+For other host driver versions, see [Status of every row](devices.md#status-of-every-row).
+To have `install` take NVIDIA's `.run` package as well, see `--driver-file`, `--accept-nvidia-license` and `--nvidia-source` in [Automated setup](installation.md#automated-setup).
 
-- It applies the three object revisions in order to a copy of your own `nv-kernel.o_binary` ([revisions](driver-patch.md#revisions)), then builds and installs `nvidia.ko` from the output of the third revision.
-- It applies the two plugin revisions to a copy of your own `libnvidia-vgpu.so` and points the symlink `libnvidia-vgpu.so` at the plugin copy.
-- It writes the module option.
-
-It accepts only the 580.159.01 files whose SHA-256 it has recorded and checks the result of each step against the recorded digest.
-It refuses any other file.
-After the build, `install` requires the `.text` of the built module to differ from the stock one at exactly the eight recorded offsets; otherwise it refuses the module ([Compare with a stock build](driver-patch.md#compare-with-a-stock-build)).
-With `--driver=skip`, you must perform those steps yourself ([The manual path](driver-patch.md#the-manual-path)).
-
-- Module option: `options nvidia NVreg_EnableGpuFirmware=0`, which `install` writes to
-  `/etc/modprobe.d/` unless a file there already sets it to 0.
-- Plugin: the patched plugin copy, the same one Ada uses ([Ada host stack](ada.md#host-stack)).
-- The host and guest drivers must match the [supported software stack](installation.md#supported-software-stack).
-  `install` accepts only host driver 580.159.01 and refuses any other version.
-  Other guest driver versions are not supported.
-  On the manual path (`--driver=skip`), other host driver versions are not supported either: `doctor`, `check` and `activate` warn and continue.
-- To have `install` take NVIDIA's `.run` package as well, see `--driver-file`,
-  `--accept-nvidia-license` and `--nvidia-source` in
-  [One command from a clean host](installation.md#one-command-from-a-clean-host).
-
-The shared module's revisions have these effects on Ampere:
+The byte patches for the shared NVIDIA module have these effects on Ampere (details in [How it works](#how-it-works)):
 
 ```mermaid
 flowchart LR
-    scheduler["Scheduler revision"] --> runlist["Avoid scheduler shutdown"]
-    probe["Probe gate revision"] --> unchanged["No effect at architecture 0x17"]
-    count["VF count revision"] --> vfs["Force four VFs"]
+    scheduler["Scheduler byte patch"] --> runlist["Avoid scheduler shutdown"]
+    probe["Probe gate patch"] --> unchanged["No effect at architecture 0x17"]
+    count["VF count patch"] --> vfs["Force four VFs"]
 ```
 
 ## Bring-up differences
 
 Ampere follows [Cold boot](installation.md#cold-boot).
-For a boot display card, use the [console-release path](installation.md#boot-display-card).
-After preparation, the same activation and VM-start gates apply:
+If a selected card is the boot display GPU, `activate` also hands its display to NVIDIA's display modules ([Boot display card](installation.md#boot-display-card)).
+After the boot units have loaded the livepatch and NVIDIA's driver, the same `activate` and `check` steps apply as on Ada ([Ada bring-up differences](ada.md#bring-up-differences)):
 
 ```mermaid
 flowchart TD
-    prepared["Cards prepared"] --> activate["activate"]
+    loaded["Livepatch and nvidia loaded"] --> activate["activate"]
     activate --> check["check before each VM start"]
-    check --> ready{"check exits 0?"}
+    check --> ready{"Does check exit 0?"}
     ready -->|Yes| start["Start VM"]
     ready -->|No| stop["Do not start VM"]
 ```
@@ -136,11 +135,11 @@ flowchart TD
 ## Guests and VMs
 
 The package installs nothing in a guest.
-Use the drivers in the [supported stack](installation.md#supported-software-stack) and set `RMSetVgpuGspPluginOffloadMode=0` as [Guests](installation.md#guests) describes: a modprobe option in a Linux guest, a registry DWORD in a Windows guest.
+Use the drivers in the [supported stack](installation.md#supported-software-stack) and set `RMSetVgpuGspPluginOffloadMode=0` as [Guests](installation.md#guests) describes: a modprobe option (a line in `/etc/modprobe.d/`) in a Linux guest, a registry DWORD in a Windows guest.
 
 Each VF backs one vGPU of the default type.
-Attach it as a plain VFIO device ([Create a VM](installation.md#create-a-vm)).
-You must handle licensing separately.
+Attach it as a plain VFIO device, which is how Linux hands a PCI device to a VM ([Create a VM](installation.md#create-a-vm)).
+You need to handle licensing separately.
 
 ## Screenshots
 
@@ -161,13 +160,13 @@ On the right, `nvidia-smi` shows the vGPU as `NVIDIA RTXA6000-4Q` with 4096 MiB 
 
 A Windows 11 guest.
 Settings > About, the NVIDIA Control Panel (version 582.53) and GPU-Z all show the vGPU as `NVIDIA RTXA6000-4Q` with 4 GB.
-GPU-Z reports the device as `10DE 2230 - 10DE 14FF`.
+GPU-Z reports the device as `10DE 2230 - 10DE 14FF`, which is the vendor and device ID, then the subsystem vendor and ID.
 
-The guests see a vGPU profile called `RTXA6000-4Q`, not the GeForce name: geforce-sriov presents the card to NVIDIA's vGPU software as the professional board (RTX A6000) whose profiles it uses.
+The guests see a vGPU type called `RTXA6000-4Q`, not the GeForce name: geforce-sriov presents the card to NVIDIA's vGPU software as the professional board (RTX A6000) whose vGPU types it uses.
 The Windows screenshot was taken in a guest with its own licence setup.
 Licensing is outside this project.
 
-## Performance: vGPU VM vs host
+## Performance
 
 The same PyTorch benchmark ran on one memory-modded RTX 3080 20GB in two places: on the host, using the card's physical GPU directly, and in a VM with one 4 GiB vGPU on the same card.
 Nothing else ran on the card.
@@ -198,5 +197,7 @@ Method:
 
 ## Known limits
 
-- `vfs` accepts values from 1 to the card's ceiling (16 on Ampere and `28b0`, 4 on other Ada cards); NVIDIA's patched driver uses at most 4 VFs per card.
-- The open driver flavour and the GSP route are not supported.
+- `vfs` accepts values from 1 to the card's ceiling, 16 on Ampere.
+  NVIDIA's patched driver uses at most 4 VFs per card.
+  The VFs take functions 4 to 7 of the card's slot, and ARI decoding in the GPU beyond function 7 does **not** work ([Capability positions](devices.md#capability-positions-per-generation)).
+- The open driver flavour and the GSP route are **not** supported ([NVIDIA driver flavour](devices.md#nvidia-driver-flavour)).

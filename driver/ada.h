@@ -14,6 +14,9 @@ struct gs_ada_revision {
 	unsigned char width;       /* number of bytes replaced, 1 to 16 */
 	unsigned char old_bytes[16]; /* read only up to width */
 	unsigned char new_bytes[16]; /* read only up to width */
+	int measured;              /* exact revision and input/output were tested */
+	const char *function;      /* containing symbol for site, NULL when the row has none */
+	size_t function_offset;    /* site relative to that symbol */
 };
 
 size_t gs_ada_revision_count(void);
@@ -51,4 +54,34 @@ int gs_ada_find(const unsigned char *data, size_t size, int mode,
  * Also refuses rows == NULL with count > 0. gs_ada_find is this over the shipped table. */
 int gs_ada_find_in(const struct gs_ada_revision *rows, size_t count, const unsigned char *data, size_t size,
 		   int mode, const struct gs_ada_revision **out, int *state, char *err, size_t errlen);
+
+/* One admitted edit: the table row plus the located site and byte pair. */
+struct gs_ada_found {
+	const struct gs_ada_revision *row;
+	int state;         /* 0 = row input state, 1 = row output state */
+	int admission;     /* GS_ADA_DIGEST or GS_ADA_ANCHOR */
+	size_t site;       /* file offset of the first changed byte */
+	unsigned width;    /* bytes written at site, 1 to 16 */
+	unsigned divisor;  /* plugin-div4: divisor installed by this edit */
+	unsigned char old_bytes[16]; /* read only up to width */
+	unsigned char new_bytes[16]; /* read only up to width */
+	const char *function;        /* containing symbol, NULL when unknown */
+	size_t function_offset;      /* site relative to that symbol */
+};
+enum { GS_ADA_DIGEST = 0, GS_ADA_ANCHOR = 1 };
+
+/* Admits one edit for this file. The digest path is gs_ada_find_in unchanged; when no
+ * digest matches, each row's structural locator is tried and the first applicable row in
+ * table order is used (the table is an ordered chain). A structural admission is always
+ * unconfirmed. Refusals name the anchor: "anchor ada.<revision>: <what was not found>". */
+int gs_ada_admit(const unsigned char *, size_t, int, struct gs_ada_found *, char *, size_t);
+/* Same rules over a caller-supplied table, so refusals can be exercised synthetically. */
+int gs_ada_admit_in(const struct gs_ada_revision *, size_t, const unsigned char *, size_t, int,
+		    struct gs_ada_found *, char *, size_t);
+
+/* Applies (revert 0) or reverts (revert 1) an admitted edit in place and updates the
+ * admitted state. A digest admission re-verifies the recorded digest afterwards and
+ * restores the bytes on mismatch. A structural revert is refused: the replaced stock
+ * bytes are not recoverable from the patched file. */
+int gs_ada_edit(struct gs_ada_found *, unsigned char *, size_t, int, char *, size_t);
 #endif

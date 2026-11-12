@@ -1,0 +1,15 @@
+# Original work written from the behavioural specification, not derived from any
+# other implementation: use the demonstrated 131072-byte allocation threshold
+# for the display build. Whether it is still needed once the display object
+# patch is applied is unknown, so the driver step may leave this patch out.
+--- a/nvidia/os-interface.c
++++ b/nvidia/os-interface.c
+@@ -565,7 +565,7 @@
+  * particularly if hugetlbfs hugepages are being used. Hence, 8K applies
+  * here too.
+  */
+-#define KMALLOC_LIMIT 8192
++#define KMALLOC_LIMIT 131072
+ #else
+ #define KMALLOC_LIMIT 131072
+ #endif

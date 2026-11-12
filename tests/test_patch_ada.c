@@ -1,9 +1,14 @@
 /* SPDX-License-Identifier: MIT */
+#define _POSIX_C_SOURCE 200809L
 #include "ada.h"
+#include "elf_reader.h"
 #include "patch.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 /* The shipped rows are admitted only by digests of measured vendor files, which
  * cannot be reproduced synthetically. Block 1 checks the invariants of the
  * shipped table (shape, width, lowercase-hex digests, no digest repeated on the
@@ -20,7 +25,17 @@
  * runs the chain stock -> mixed -> div4 and back, with its refusals.
  * Not covered here: gs_ada_find accepting a shipped row, and applying a shipped
  * row to its real file, both of which need the measured vendor files. Those are
- * left to the external real-file check. */
+ * left to the external real-file check. Block 4 checks the admission wrapper:
+ * a digest match reports admission 0 and the row, a matching digest with other
+ * site bytes names the revision, and an unknown digest refuses with the exact
+ * anchor message. Block 5 runs the built patcher binary when it exists and
+ * checks the usage exit 2, the refusal exit 3 with its anchor message and no
+ * output file, and the I/O exit 1. Block 6 builds synthetic ET_DYN plugins that
+ * carry the documented instruction shapes and drives both structural locators:
+ * the measured shape must reproduce the recorded row bytes, shifted offsets and
+ * virtual addresses must still be found, and every missing, duplicated or
+ * unmeasured anchor must refuse with its row name. The real vendor digests stay
+ * pinned in the shipped table (Block 1); a synthetic file cannot carry them. */
 static int failures, checks;
 /* Always evaluated, unlike assert(), so the checks also run under -DNDEBUG. */
 #define CHECK(cond, ...) do { \
@@ -92,17 +107,18 @@ static void table_invariants(void)
 		const char *input_sha, *output_sha;
 		size_t site;
 		unsigned char width, old_bytes[16], new_bytes[16];
+		int measured;
 	} measured[] = {
-		{"4e3abe645b6873ed478adea6a06c6955352ff06186849edeea536c9630596449", "ed3efee68582f4fa9f120cf6c28138d8642db93ff0e6ba07ab0d6d7bf1b9823b", 0xd654ef, 2, {0x75, 0x7f}, {0x90, 0x90}},
-		{"ce8a485bfaeebca3a9609f9415a6df81c160a0a53509aec093bc3361a6d12701", "f5b788cdb3e06aed18860cc6cf950dcc13143bd831d90d8e9c4bf9e744426f12", 0xd654ef, 2, {0x75, 0x7f}, {0x90, 0x90}},
-		{"f5b788cdb3e06aed18860cc6cf950dcc13143bd831d90d8e9c4bf9e744426f12", "946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29", 0x126644, 4, {0x0f, 0xb7, 0x45, 0x06}, {0x31, 0xc0, 0xb0, 0x04}},
+		{"4e3abe645b6873ed478adea6a06c6955352ff06186849edeea536c9630596449", "ed3efee68582f4fa9f120cf6c28138d8642db93ff0e6ba07ab0d6d7bf1b9823b", 0xd654ef, 2, {0x75, 0x7f}, {0x90, 0x90}, 0},
+		{"ce8a485bfaeebca3a9609f9415a6df81c160a0a53509aec093bc3361a6d12701", "f5b788cdb3e06aed18860cc6cf950dcc13143bd831d90d8e9c4bf9e744426f12", 0xd654ef, 2, {0x75, 0x7f}, {0x90, 0x90}, 1},
+		{"f5b788cdb3e06aed18860cc6cf950dcc13143bd831d90d8e9c4bf9e744426f12", "946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29", 0x126644, 4, {0x0f, 0xb7, 0x45, 0x06}, {0x31, 0xc0, 0xb0, 0x04}, 1},
 		{"7e52b76dc7ca8490e7ffbc1fd724f5db07f3791a3a2ec07f2d595bf05abdcaa7", "7ddfad458bbfdb0c4d6902a9e045bd15c84f63aea19314f3d3a60967224b73c6", 0x8fc17, 15,
 		 {0x4c, 0x39, 0xc1, 0x0f, 0x84, 0x08, 0x03, 0x00, 0x00, 0x48, 0x8d, 0x05, 0x91, 0x78, 0x2d},
-		 {0x48, 0x8b, 0x93, 0x60, 0x2b, 0x00, 0x00, 0x48, 0x89, 0x4a, 0x08, 0xe9, 0x01, 0x03, 0x00}},
+		 {0x48, 0x8b, 0x93, 0x60, 0x2b, 0x00, 0x00, 0x48, 0x89, 0x4a, 0x08, 0xe9, 0x01, 0x03, 0x00}, 0},
 		{"7ddfad458bbfdb0c4d6902a9e045bd15c84f63aea19314f3d3a60967224b73c6", "aa4fdeb5288b5e56e7d4972466813d78e10cfb428fcf62fb53b84fec718cf07c", 0xa5f28, 6,
-		 {0x8b, 0xbb, 0xd0, 0x29, 0x00, 0x00}, {0xbf, 0x04, 0x00, 0x00, 0x00, 0x90}},
+		 {0x8b, 0xbb, 0xd0, 0x29, 0x00, 0x00}, {0xbf, 0x04, 0x00, 0x00, 0x00, 0x90}, 1},
 	};
-	size_t count = gs_ada_revision_count(), nmeasured = sizeof(measured) / sizeof(measured[0]), i, j, dupes = 0, links = 0;
+	size_t count = gs_ada_revision_count(), nmeasured = sizeof(measured) / sizeof(measured[0]), i, j, dupes = 0, links = 0, confirmed = 0;
 
 	CHECK(count == nmeasured, "expected %zu revisions, got %zu", nmeasured, count);
 	CHECK(gs_ada_revision_at(count) == NULL, "index equal to the count must be NULL");
@@ -123,6 +139,8 @@ static void table_invariants(void)
 		CHECK(x->width >= 1 && x->width <= sizeof(x->old_bytes) && memcmp(x->old_bytes, x->new_bytes, x->width) != 0,
 		      "row %zu old_bytes equal its new_bytes over its width", i);
 		CHECK(x->site != 0, "row %zu site is 0", i);
+		CHECK(x->measured == 0 || x->measured == 1, "row %zu measured flag is %d, not 0 or 1", i, x->measured);
+		confirmed += (size_t)(x->measured != 0);
 		/* Every row must be listed in measured[], so a new unlisted row or a
 		 * wrong input/output pairing fails rather than being skipped. */
 		for (j = 0; j < nmeasured; j++)
@@ -152,6 +170,9 @@ static void table_invariants(void)
 		}
 	CHECK(dupes == 0, "%zu digest pairs repeat on the same side across rows", dupes);
 	CHECK(links == 2, "%zu rows take another row's output as input, expected exactly 2", links);
+	/* The stock gate-only row and plugin-mixed are intermediate states, not the
+	 * tested stack; only the three rows that reproduce a tested file are confirmed. */
+	CHECK(confirmed == 3, "%zu rows are marked measured, expected exactly 3", confirmed);
 
 	for (i = 0; i < nmeasured; i++) {
 		const struct gs_ada_revision *pick = NULL;
@@ -169,6 +190,7 @@ static void table_invariants(void)
 		if (hits != 1)
 			continue;
 		CHECK(pick->site == measured[i].site, "measured row %.12s site is not 0x%zx", measured[i].input_sha, measured[i].site);
+		CHECK(pick->measured == measured[i].measured, "measured row %.12s measured flag is not %d", measured[i].input_sha, measured[i].measured);
 		CHECK(pick->width == measured[i].width && !memcmp(pick->old_bytes, measured[i].old_bytes, measured[i].width) &&
 		      !memcmp(pick->new_bytes, measured[i].new_bytes, measured[i].width),
 		      "measured row %.12s is not width %u with the recorded old and new bytes over that width",
@@ -244,12 +266,12 @@ static void synthetic_row(void)
 
 	/* 4. Apply on an already revised buffer. */
 	memcpy(buf, rev, N);
-	CHECK(refused(gs_ada_apply(&mine, buf, N, fresh(), sizeof(err)), "already revised"), "apply on a revised buffer not refused as already revised: %s", err);
+	CHECK(refused(gs_ada_apply(&mine, buf, N, fresh(), sizeof(err)), "already patched"), "apply on a revised buffer not refused as already revised: %s", err);
 	CHECK(same(buf, rev), "refused apply changed the revised buffer");
 
 	/* 5. Revert on an unrevised buffer. */
 	memcpy(buf, orig, N);
-	CHECK(refused(gs_ada_revert(&mine, buf, N, fresh(), sizeof(err)), "not revised"), "revert on an unrevised buffer not refused as not revised: %s", err);
+	CHECK(refused(gs_ada_revert(&mine, buf, N, fresh(), sizeof(err)), "not patched"), "revert on an unrevised buffer not refused as not revised: %s", err);
 	CHECK(same(buf, orig), "refused revert changed the original buffer");
 
 	/* 6. Result digest mismatch restores the two bytes, in both directions. */
@@ -278,7 +300,7 @@ static void synthetic_row(void)
 	CHECK(misses(&skew, 1, orig, GS_ADA_FORWARD, "recorded original bytes"), "find_in accepted an input digest with other site bytes: %s", err);
 	skew = mine;
 	skew.new_bytes[1] = 0x45;
-	CHECK(refused(gs_ada_state(&skew, rev, N, fresh(), sizeof(err)), "recorded revised bytes"), "state accepted an output digest with other site bytes: %s", err);
+	CHECK(refused(gs_ada_state(&skew, rev, N, fresh(), sizeof(err)), "recorded patched bytes"), "state accepted an output digest with other site bytes: %s", err);
 
 	/* 8. Size bound, with digests that match the buffer so only size can refuse:
 	 * a width-2 row at site n-1 and a width-4 row at site n-3 are each one byte short. */
@@ -391,7 +413,7 @@ static void synthetic_row(void)
 
 	/* 14. The synthetic digests are not in the shipped table, in any mode. */
 	for (i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
-		CHECK(refused(gs_ada_find(orig, N, modes[i], &out, &st, fresh(), sizeof(err)), "no supported revision"),
+		CHECK(refused(gs_ada_find(orig, N, modes[i], &out, &st, fresh(), sizeof(err)), "no supported byte patch"),
 		      "find in mode %d did not refuse an unknown digest: %s", modes[i], err);
 		CHECK(out == &sentinel && st == 42, "refused find in mode %d wrote a result", modes[i]);
 	}
@@ -497,12 +519,12 @@ static void plugin_chain(void)
 	pbuf[0] ^= 0x01;
 	CHECK(refused(gs_ada_apply(&rows[1], pbuf, P, fresh(), sizeof(err)), "neither"),
 	      "plugin-div4 apply on a changed mixed file not refused for its digest: %s", err);
-	CHECK(pmisses(rows, pbuf, GS_ADA_FORWARD, "no supported revision"), "forward on a changed mixed file not refused: %s", err);
+	CHECK(pmisses(rows, pbuf, GS_ADA_FORWARD, "no supported byte patch"), "forward on a changed mixed file not refused: %s", err);
 	memcpy(pbuf, pfinal, P);
-	CHECK(refused(gs_ada_apply(&rows[1], pbuf, P, fresh(), sizeof(err)), "already revised") && !memcmp(pbuf, pfinal, P),
+	CHECK(refused(gs_ada_apply(&rows[1], pbuf, P, fresh(), sizeof(err)), "already patched") && !memcmp(pbuf, pfinal, P),
 	      "plugin-div4 apply on the final file not refused as already revised: %s", err);
 	memcpy(pbuf, pmixed, P);
-	CHECK(refused(gs_ada_revert(&rows[1], pbuf, P, fresh(), sizeof(err)), "not revised") && !memcmp(pbuf, pmixed, P),
+	CHECK(refused(gs_ada_revert(&rows[1], pbuf, P, fresh(), sizeof(err)), "not patched") && !memcmp(pbuf, pmixed, P),
 	      "plugin-div4 revert on the mixed file not refused as not revised: %s", err);
 	/* A file whose digest the row names but whose site holds other bytes. */
 	pbuf[div4->site + 1] ^= 0x01;
@@ -523,11 +545,911 @@ static void plugin_chain(void)
 	      "plugin-div4 apply with a wrong output digest did not restore the six bytes: %s", err);
 }
 
+/* Admission: a digest match reports the digest path and the selected row; a digest
+ * match with other site bytes names the revision; an unknown digest refuses with the
+ * reserved anchor message and writes no result. */
+static void admission(void)
+{
+	static const unsigned char old2[2] = {0x11, 0x22}, new2[2] = {0x33, 0x44};
+	unsigned char orig[N], rev[N], buf[N];
+	char in_sha[65], out_sha[65];
+	struct gs_ada_revision mine, skew;
+	struct gs_ada_found f;
+	size_t i;
+
+	for (i = 0; i < N; i++)
+		orig[i] = (unsigned char)(i * 37u + 0x5au);
+	memcpy(orig + SITE, old2, sizeof(old2));
+	memcpy(rev, orig, N);
+	memcpy(rev + SITE, new2, sizeof(new2));
+	gs_sha256(orig, N, SIZE_MAX, in_sha);
+	gs_sha256(rev, N, SIZE_MAX, out_sha);
+	mine = (struct gs_ada_revision){
+		.name = "synthetic", .artifact = "64-byte test buffer", .version = "none",
+		.input_sha = in_sha, .output_sha = out_sha, .site = SITE, .width = 2,
+		.old_bytes = {0x11, 0x22}, .new_bytes = {0x33, 0x44}, .measured = 1,
+	};
+
+	/* Digest admission reports the path, the row and the located bytes. */
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(&mine, 1, orig, N, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0 &&
+	      f.row == &mine && f.state == 0 && f.admission == GS_ADA_DIGEST && f.site == SITE && f.width == 2 &&
+	      !memcmp(f.new_bytes, new2, 2), "digest admission did not select the row at input state: %s", err);
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(&mine, 1, rev, N, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 &&
+	      f.row == &mine && f.state == 1 && f.admission == GS_ADA_DIGEST,
+	      "digest admission did not select the row at output state: %s", err);
+
+	/* The admitted edit moves the buffer in both directions. */
+	memcpy(buf, rev, N);
+	CHECK(gs_ada_edit(&f, buf, N, 1, fresh(), sizeof(err)) == 0 && !memcmp(buf, orig, N),
+	      "digest revert did not restore the original: %s", err);
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(&mine, 1, orig, N, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0, "re-admit: %s", err);
+	CHECK(gs_ada_edit(&f, buf, N, 0, fresh(), sizeof(err)) == 0 && !memcmp(buf, rev, N),
+	      "digest apply did not write the revision: %s", err);
+	CHECK(refused(gs_ada_edit(&f, buf, N, 0, fresh(), sizeof(err)), "already patched"),
+	      "a second apply was not refused: %s", err);
+
+	/* A matching digest with other bytes at the site names the revision. */
+	skew = mine;
+	skew.old_bytes[0] = 0x99;
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit_in(&skew, 1, orig, N, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.synthetic: input SHA-256 matches but the bytes at the patch site are not the recorded original bytes"),
+	      "admission accepted a digest with other site bytes: %s", err);
+	CHECK(f.row == NULL, "refused admission wrote a result");
+
+	/* An already revised or unrevised file names the revision, not the unknown anchor. */
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit_in(&mine, 1, rev, N, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.synthetic: already at output state"),
+	      "admission of an applied file not refused as already at output: %s", err);
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit_in(&mine, 1, orig, N, GS_ADA_BACKWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.synthetic: not at output state"),
+	      "admission of a stock file for revert not refused as not at output: %s", err);
+
+	/* An unknown digest refuses with the reserved structural-fallback message. */
+	memcpy(buf, orig, N);
+	buf[0] ^= 0x01;
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit_in(&mine, 1, buf, N, GS_ADA_ANY, &f, fresh(), sizeof(err)),
+		      "anchor ada.unknown: no recipe matches this input and no structural locator is implemented for it"),
+	      "admission of an unknown digest did not refuse with the anchor message: %s", err);
+	CHECK(f.row == NULL, "refused admission of an unknown digest wrote a result");
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit(buf, N, GS_ADA_ANY, &f, fresh(), sizeof(err)),
+		      "anchor ada.unknown: no recipe matches this input and no structural locator is implemented for it"),
+	      "shipped admission of an unknown digest did not refuse with the anchor message: %s", err);
+	CHECK(refused(gs_ada_admit_in(NULL, 1, orig, N, GS_ADA_ANY, &f, fresh(), sizeof(err)), "missing data"),
+	      "admission without a table not refused: %s", err);
+
+	/* A structural revert is refused: the replaced bytes are not recoverable. */
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(&mine, 1, rev, N, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0, "admit patched: %s", err);
+	f.admission = GS_ADA_ANCHOR;
+	memcpy(buf, rev, N);
+	CHECK(refused(gs_ada_edit(&f, buf, N, 1, fresh(), sizeof(err)), "structural revert") && !memcmp(buf, rev, N),
+	      "structural revert not refused, or changed the buffer: %s", err);
+}
+
+/* ---------------------------------------------------------------- plugin sites */
+
+enum { IMG = 0x2000, TEXT_SIZE = 0x400 };
+
+/* Synthetic ET_DYN shared object: .text at a chosen file offset and virtual
+ * address, .rodata holding the log string, and one .rela.dyn entry with
+ * sh_info 0. No vendor bytes beyond the instruction shapes documented in
+ * RE-PLUGIN-LOCATORS.md. */
+struct plugin_fixture {
+	size_t text_off;
+	uint64_t text_addr, rodata_addr;
+	int measured_shape, place_patched, div_patched;
+	unsigned divisor;
+	int32_t desc;
+	int32_t stock_disp;
+	unsigned char src_rm, error_high;
+	int with_string, with_type_info, duplicate_div, duplicate_lea;
+};
+static struct plugin_fixture pf;
+static unsigned char img[IMG];
+static size_t img_len, img_site, img_div;
+
+static void put32le(unsigned char *p, uint32_t v)
+{
+	p[0] = (unsigned char)v;
+	p[1] = (unsigned char)(v >> 8);
+	p[2] = (unsigned char)(v >> 16);
+	p[3] = (unsigned char)(v >> 24);
+}
+
+static void plugin_defaults(void)
+{
+	pf = (struct plugin_fixture){
+		.text_off = 0x200, .text_addr = 0x1000, .rodata_addr = 0x2000,
+		.measured_shape = 1, .desc = 0x2b60, .stock_disp = 0x29d0, .src_rm = 1,
+		.with_string = 1, .with_type_info = 1,
+	};
+}
+
+static void build_plugin(void)
+{
+	/* Local to this builder so they cannot be confused with the 64-byte row sites. */
+	enum { SITE = 0x40, TARGET = 0x100, DIV = 0x200 };
+	static const char names[] = "\0.text\0.rodata\0.shstrtab\0.rela.dyn\0";
+	static const char logstr[] = "vmiop_log: (0x%x): placement_fb_length 0x%llx is not equal to allocation_size 0x%llx";
+	Elf64_Ehdr eh = { 0 };
+	Elf64_Shdr sh[5] = { { 0 } };
+	const size_t roff = 0x1000, soff = 0x1200, reloff = 0x1300, shoff = 0x1400;
+	unsigned char *t = img + pf.text_off;
+	const size_t lea = SITE + 0x1e;
+	size_t target;
+
+	memset(img, 0, sizeof(img));
+	memcpy(eh.e_ident, ELFMAG, SELFMAG);
+	eh.e_ident[EI_CLASS] = ELFCLASS64;
+	eh.e_ident[EI_DATA] = ELFDATA2LSB;
+	eh.e_ident[EI_VERSION] = EV_CURRENT;
+	eh.e_type = ET_DYN;
+	eh.e_machine = EM_X86_64;
+	eh.e_version = EV_CURRENT;
+	eh.e_ehsize = sizeof(eh);
+	eh.e_shoff = shoff;
+	eh.e_shentsize = sizeof(sh[0]);
+	eh.e_shnum = 5;
+	eh.e_shstrndx = 3;
+	sh[1].sh_name = 1;
+	sh[1].sh_type = SHT_PROGBITS;
+	sh[1].sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+	sh[1].sh_addr = pf.text_addr;
+	sh[1].sh_offset = pf.text_off;
+	sh[1].sh_size = TEXT_SIZE;
+	sh[1].sh_addralign = 16;
+	sh[2].sh_name = 7;
+	sh[2].sh_type = SHT_PROGBITS;
+	sh[2].sh_flags = SHF_ALLOC;
+	sh[2].sh_addr = pf.rodata_addr;
+	sh[2].sh_offset = roff;
+	sh[2].sh_size = 0x100;
+	sh[2].sh_addralign = 1;
+	sh[3].sh_name = 15;
+	sh[3].sh_type = SHT_STRTAB;
+	sh[3].sh_offset = soff;
+	sh[3].sh_size = sizeof(names);
+	sh[4].sh_name = 25;
+	sh[4].sh_type = SHT_RELA;
+	sh[4].sh_offset = reloff;
+	sh[4].sh_size = sizeof(Elf64_Rela);
+	sh[4].sh_entsize = sizeof(Elf64_Rela);
+	sh[4].sh_link = 1;
+	sh[4].sh_info = 0;
+	sh[4].sh_addralign = 8;
+
+	if (pf.with_string)
+		memcpy(img + roff, logstr, sizeof(logstr));
+	if (pf.measured_shape) {
+		/* The exact 15 site bytes and 16th byte of the recorded 580.159.01 row. */
+		memcpy(t + SITE, "\x4c\x39\xc1\x0f\x84\x08\x03\x00\x00\x48\x8d\x05\x91\x78\x2d\x00", 16);
+		target = SITE + 9 + 0x308;
+	} else {
+		t[SITE] = 0x4c;
+		t[SITE + 1] = 0x39;
+		t[SITE + 2] = (unsigned char)(0xc0 | pf.src_rm);
+		t[SITE + 3] = 0x0f;
+		t[SITE + 4] = 0x84;
+		target = TARGET;
+		put32le(t + SITE + 5, (uint32_t)(int32_t)((int32_t)target - (int32_t)(SITE + 9)));
+		memcpy(t + SITE + 9, "\x48\x8d\x05\x00\x00\x00", 6);
+		t[SITE + 15] = pf.error_high;
+	}
+	t[lea] = 0x48;
+	t[lea + 1] = 0x8d;
+	t[lea + 2] = 0x35;
+	put32le(t + lea + 3, (uint32_t)(int32_t)((int64_t)pf.rodata_addr - (int64_t)(pf.text_addr + lea + 7)));
+	if (pf.duplicate_lea) {
+		const size_t d2 = lea + 0x28;
+
+		t[d2] = 0x48;
+		t[d2 + 1] = 0x8d;
+		t[d2 + 2] = 0x35;
+		put32le(t + d2 + 3, (uint32_t)(int32_t)((int64_t)pf.rodata_addr - (int64_t)(pf.text_addr + d2 + 7)));
+	}
+	memcpy(t + target, "\x48\x8b\x83", 3);
+	put32le(t + target + 3, (uint32_t)pf.desc);
+	memcpy(t + target + 7, "\x83\x48\x10\x02", 4);
+	if (pf.with_type_info)
+		memcpy(t + DIV - 0x40, "\xba\x03\x01\x81\xa0", 5);
+	memcpy(t + DIV - 9, "\x48\x89\xf8\x49\xf7\xf1\x48\x89\xf8", 9);
+	if (pf.div_patched) {
+		t[DIV] = 0xbf;
+		put32le(t + DIV + 1, pf.divisor);
+		t[DIV + 5] = 0x90;
+	} else {
+		t[DIV] = 0x8b;
+		t[DIV + 1] = 0xbb;
+		put32le(t + DIV + 2, (uint32_t)pf.stock_disp);
+	}
+	memcpy(t + DIV + 6, "\x48\x29\xd0\x31\xd2\x48\x89\x83\x70\x05\x00\x00\x48\xf7\xf7", 15);
+	if (pf.duplicate_div)
+		memcpy(t + DIV + 0x80 - 9, t + DIV - 9, 30);
+	if (pf.place_patched) {
+		t[SITE] = 0x48;
+		t[SITE + 1] = 0x8b;
+		t[SITE + 2] = 0x93;
+		put32le(t + SITE + 3, (uint32_t)pf.desc);
+		memcpy(t + SITE + 7, "\x48\x89\x4a\x08\xe9", 5);
+		put32le(t + SITE + 12, (uint32_t)(int32_t)((int64_t)target - (int64_t)(SITE + 16)));
+	}
+	memcpy(img, &eh, sizeof(eh));
+	memcpy(img + shoff, sh, sizeof(sh));
+	memcpy(img + soff, names, sizeof(names));
+	img_len = 0x1600;
+	img_site = pf.text_off + SITE;
+	img_div = pf.text_off + DIV;
+}
+
+static void plugin_locators(void)
+{
+	const struct gs_ada_revision *mixed = shipped("plugin-mixed"), *div4 = shipped("plugin-div4");
+	struct gs_ada_revision one[1];
+	struct gs_ada_found f;
+	unsigned char copy[IMG];
+	char mixed_sha[65], final_sha[65];
+
+	CHECK(mixed && div4, "shipped table lacks plugin-mixed or plugin-div4");
+	if (!mixed || !div4)
+		return;
+
+	/* Stock plugin with the measured site shape: the located bytes are the row's. */
+	plugin_defaults();
+	build_plugin();
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0, "stock plugin not admitted: %s", err);
+	CHECK(f.row == mixed && f.admission == GS_ADA_ANCHOR && f.state == 0 && f.site == img_site && f.width == 16,
+	      "stock plugin admission is not the placement row at the located site");
+	CHECK(!memcmp(f.old_bytes, mixed->old_bytes, 15), "located old bytes differ from the recorded row");
+	CHECK(!memcmp(f.new_bytes, mixed->new_bytes, 15) && f.new_bytes[15] == 0,
+	      "located rewrite differs from the recorded row");
+	memcpy(copy, img, img_len);
+	CHECK(gs_ada_edit(&f, copy, img_len, 0, fresh(), sizeof(err)) == 0, "placement apply failed: %s", err);
+	CHECK(!memcmp(copy + img_site, f.new_bytes, 16), "placement apply did not write the located rewrite");
+	CHECK(!memcmp(copy + img_site + 16, img + img_site + 16, 0x40), "placement apply changed bytes after the site");
+	gs_sha256(copy, img_len, SIZE_MAX, mixed_sha);
+
+	/* The mixed file is plugin-div4's input. */
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(copy, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0, "mixed plugin not admitted: %s", err);
+	CHECK(f.row == div4 && f.admission == GS_ADA_ANCHOR && f.state == 0 && f.site == img_div && f.divisor == 4,
+	      "mixed plugin admission is not the div row at the located site");
+	CHECK(!memcmp(f.old_bytes, div4->old_bytes, 6) && !memcmp(f.new_bytes, div4->new_bytes, 6),
+	      "located div bytes differ from the recorded row");
+	CHECK(gs_ada_edit(&f, copy, img_len, 0, fresh(), sizeof(err)) == 0, "div apply failed: %s", err);
+	CHECK(!memcmp(copy + img_div, div4->new_bytes, 6), "div apply did not write the recorded bytes");
+	gs_sha256(copy, img_len, SIZE_MAX, final_sha);
+	CHECK(strcmp(mixed_sha, final_sha) != 0, "the two chain steps produced the same file");
+
+	/* The final file is at output state for both rows. */
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit(copy, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-mixed: already at output state"), "final plugin not refused: %s", err);
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(copy, img_len, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 && f.row == div4 && f.state == 1 &&
+	      f.divisor == 4, "final plugin inspect did not report plugin-div4 at output state: %s", err);
+	CHECK(refused(gs_ada_admit(copy, img_len, GS_ADA_BACKWARD, &f, fresh(), sizeof(err)), "structural revert"),
+	      "structural revert not refused: %s", err);
+
+	/* Shifted file offset and virtual addresses: the same anchors still resolve. */
+	plugin_defaults();
+	pf.text_off = 0x600;
+	pf.text_addr = 0x9000;
+	pf.rodata_addr = 0x20000;
+	build_plugin();
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0 && f.site == img_site &&
+	      f.site == 0x640, "shifted plugin not found at its file offset: %s", err);
+	CHECK(!memcmp(f.new_bytes, mixed->new_bytes, 15), "shifted plugin rewrite differs from the recorded row");
+	memcpy(copy, img, img_len);
+	CHECK(gs_ada_edit(&f, copy, img_len, 0, fresh(), sizeof(err)) == 0 && !memcmp(copy + 0x640, f.new_bytes, 16),
+	      "shifted plugin apply did not write at the shifted file offset: %s", err);
+
+	/* Already-patched placement is recognised, and apply refuses it. */
+	plugin_defaults();
+	pf.place_patched = 1;
+	build_plugin();
+	one[0] = *mixed;
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(one, 1, img, img_len, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 && f.state == 1 &&
+	      f.admission == GS_ADA_ANCHOR, "patched placement not recognised: %s", err);
+	CHECK(refused(gs_ada_admit_in(one, 1, img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "already at output state"), "patched placement not refused for apply: %s", err);
+
+	/* Patched div: the divisor is re-derived, and only 4 is the recorded value. */
+	plugin_defaults();
+	pf.div_patched = 1;
+	pf.divisor = 4;
+	build_plugin();
+	one[0] = *div4;
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(one, 1, img, img_len, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 && f.state == 1 &&
+	      f.divisor == 4, "patched div4 not recognised: %s", err);
+	CHECK(refused(gs_ada_admit_in(one, 1, img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "already at output state"), "patched div4 not refused for apply: %s", err);
+	plugin_defaults();
+	pf.div_patched = 1;
+	pf.divisor = 2;
+	build_plugin();
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(one, 1, img, img_len, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 && f.divisor == 2,
+	      "patched div2 not recognised: %s", err);
+	CHECK(refused(gs_ada_admit_in(one, 1, img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "installed divisor 2 is not the recorded 4"), "patched div2 not refused with its divisor: %s", err);
+	/* With the full table the placement row is still stock, but a foreign divisor blocks apply. */
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-div4: installed divisor 2 is not the recorded 4"),
+	      "full-table apply on a div2 plugin not refused: %s", err);
+
+	/* Anchor refusals, each naming the row. */
+	plugin_defaults();
+	pf.measured_shape = 0;
+	pf.desc = 0x2b70;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-mixed: memdesc pointer offset 0x2b70 is not a measured value"),
+	      "unmeasured memdesc offset not refused: %s", err);
+	plugin_defaults();
+	pf.measured_shape = 0;
+	pf.src_rm = 6;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-mixed: compared source register is not rcx (rm=6)"),
+	      "wrong compared register not refused: %s", err);
+	plugin_defaults();
+	pf.with_string = 0;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-mixed: 0 copies of the 'is not equal to allocation_size' log string (want 1)"),
+	      "missing log string not refused: %s", err);
+	plugin_defaults();
+	pf.duplicate_lea = 1;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-mixed: 2 lea rsi refs to the log string (want 1)"),
+	      "duplicate log reference not refused: %s", err);
+	plugin_defaults();
+	pf.duplicate_div = 1;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-div4: 2 division sequences (want 1)"),
+	      "duplicate division sequence not refused: %s", err);
+	plugin_defaults();
+	pf.with_type_info = 0;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "0xa0810103 (GET_VGPU_TYPE_INFO) is not within 0x1000 bytes before the site"),
+	      "missing type-info command not refused: %s", err);
+	plugin_defaults();
+	pf.stock_disp = 0x29d8;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-div4: maxVgpus field offset 0x29d8 is not a measured value"),
+	      "unmeasured maxVgpus offset not refused: %s", err);
+	plugin_defaults();
+	pf.div_patched = 1;
+	pf.divisor = 3;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-div4: installed divisor 3 is not a measured value"),
+	      "unmeasured installed divisor not refused: %s", err);
+	plugin_defaults();
+	pf.measured_shape = 0;
+	pf.error_high = 0x7f;
+	build_plugin();
+	CHECK(refused(gs_ada_admit(img, img_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.plugin-mixed: byte at site+15 is 0x7f, the rewrite needs 0x00"),
+	      "site+15 mismatch not refused: %s", err);
+
+	/* Container: the shared-object open accepts ET_DYN with sh_info 0; ET_REL does not. */
+	plugin_defaults();
+	build_plugin();
+	{
+		struct gs_elf e;
+
+		CHECK(gs_elf_open_shared(img, img_len, &e, fresh(), sizeof(err)) == 0, "shared-object open failed: %s", err);
+		CHECK(gs_elf_open(img, img_len, &e, fresh(), sizeof(err)) < 0, "relocatable open accepted an ET_DYN");
+		img[16] = ET_REL;
+		CHECK(refused(gs_elf_open(img, img_len, &e, fresh(), sizeof(err)), "relocation section 4"),
+		      "ET_REL with a dynamic relocation table not refused: %s", err);
+		img[16] = ET_DYN;
+	}
+	CHECK(refused(gs_ada_admit(img, 0x100, GS_ADA_FORWARD, &f, fresh(), sizeof(err)), "anchor ada.plugin-mixed:"),
+	      "truncated shared object not refused with the row name: %s", err);
+}
+
+/* ------------------------------------------------------------- object fixtures */
+
+enum { OBJ_IMG = 0x2000, OBJ_TEXT = 0x400, OBJ_TEXT_OFF = 0x200 };
+
+/* Synthetic ET_REL RM object: .text, .rela.text, .rodata, .symtab/.strtab. It
+ * carries only the instruction shapes documented in RE-GATE-VF-LOCATORS.md. */
+struct obj_fixture {
+	size_t text_off;
+	size_t shift;
+	int patched_gate, patched_vf;
+	int no_string, dup_gate, bad_hdr, bad_store, bad_load, no_thunk, bad_branch, rename_scope;
+};
+static struct obj_fixture of;
+static unsigned char objimg[OBJ_IMG];
+static size_t obj_len, obj_gate_site, obj_vf_site, obj_text_off;
+
+static void obj_defaults(void)
+{
+	memset(&of, 0, sizeof(of));
+	of.text_off = OBJ_TEXT_OFF;
+}
+
+static void build_obj(void)
+{
+	static const char shnames[] = "\0.text\0.rela.text\0.rodata\0.symtab\0.strtab\0.shstrtab\0";
+	static const char strtab_tmpl[] = "\0.text\0.rodata\0os_is_vgx_hyper\0_nv000001rm\0rm_is_supported_device\0"
+					  "_nv039075rm\0_nv000002rm\0";
+	static const char sentence[] = "NVRM: installed in this vGPU host system is not supported by proprietary nvidia.ko.";
+	static const unsigned char bars[5][5] = {
+		{ 0xbe, 0xf0, 0x0b, 0x00, 0x00 }, { 0xbe, 0xf4, 0x0b, 0x00, 0x00 }, { 0xbe, 0xf8, 0x0b, 0x00, 0x00 },
+		{ 0xbe, 0xfc, 0x0b, 0x00, 0x00 }, { 0xbe, 0x00, 0x0c, 0x00, 0x00 },
+	};
+	Elf64_Ehdr eh = { 0 };
+	Elf64_Shdr sh[7] = { { 0 } };
+	Elf64_Sym sy[8] = { { 0 } };
+	Elf64_Rela re[10] = { { 0 } };
+	char strtab[sizeof(strtab_tmpl)];
+	const size_t sym_off = 0xb00, str_off = 0xc00, ro_off = 0xa00, rela_off = 0x800, sh_off = 0xe00;
+	const size_t S = of.shift;
+	unsigned char *t = objimg + of.text_off;
+	size_t nrel = 0, i;
+
+	memset(objimg, 0, sizeof(objimg));
+	memcpy(strtab, strtab_tmpl, sizeof(strtab));
+	if (of.rename_scope) {
+		char *p = memmem(strtab, sizeof(strtab), "rm_is_supported_device", 22);
+
+		if (p)
+			p[strlen("rm_is_supported_device") - 1] = 'X';
+	}
+
+	memcpy(eh.e_ident, ELFMAG, SELFMAG);
+	eh.e_ident[EI_CLASS] = ELFCLASS64;
+	eh.e_ident[EI_DATA] = ELFDATA2LSB;
+	eh.e_ident[EI_VERSION] = EV_CURRENT;
+	eh.e_type = ET_REL;
+	eh.e_machine = EM_X86_64;
+	eh.e_version = EV_CURRENT;
+	eh.e_ehsize = sizeof(eh);
+	eh.e_shoff = sh_off;
+	eh.e_shentsize = sizeof(sh[0]);
+	eh.e_shnum = 7;
+	eh.e_shstrndx = 6;
+
+	sh[1].sh_name = 1;
+	sh[1].sh_type = SHT_PROGBITS;
+	sh[1].sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+	sh[1].sh_offset = of.text_off;
+	sh[1].sh_size = OBJ_TEXT;
+	sh[1].sh_addralign = 16;
+	sh[2].sh_name = 7;
+	sh[2].sh_type = SHT_RELA;
+	sh[2].sh_offset = rela_off;
+	sh[2].sh_entsize = sizeof(Elf64_Rela);
+	sh[2].sh_link = 4;
+	sh[2].sh_info = 1;
+	sh[2].sh_addralign = 8;
+	sh[3].sh_name = 18;
+	sh[3].sh_type = SHT_PROGBITS;
+	sh[3].sh_flags = SHF_ALLOC;
+	sh[3].sh_offset = ro_off;
+	sh[3].sh_size = 0x100;
+	sh[3].sh_addralign = 1;
+	sh[4].sh_name = 26;
+	sh[4].sh_type = SHT_SYMTAB;
+	sh[4].sh_offset = sym_off;
+	sh[4].sh_size = sizeof(sy);
+	sh[4].sh_entsize = sizeof(sy[0]);
+	sh[4].sh_link = 5;
+	sh[4].sh_info = 1;
+	sh[4].sh_addralign = 8;
+	sh[5].sh_name = 34;
+	sh[5].sh_type = SHT_STRTAB;
+	sh[5].sh_offset = str_off;
+	sh[5].sh_size = sizeof(strtab);
+	sh[5].sh_addralign = 1;
+	sh[6].sh_name = 42;
+	sh[6].sh_type = SHT_STRTAB;
+	sh[6].sh_offset = 0xd00;
+	sh[6].sh_size = sizeof(shnames);
+	sh[6].sh_addralign = 1;
+
+	sy[1].st_name = 1;
+	sy[1].st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION);
+	sy[1].st_shndx = 1;
+	sy[2].st_name = 7;
+	sy[2].st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION);
+	sy[2].st_shndx = 3;
+	sy[3].st_name = 15;
+	sy[3].st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC);
+	sy[3].st_shndx = 1;
+	sy[3].st_value = 0x300 + S;
+	sy[3].st_size = 0x10;
+	sy[4].st_name = 31;
+	sy[4].st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC);
+	sy[4].st_shndx = 1;
+	sy[4].st_value = 0x320 + S;
+	sy[4].st_size = 9;
+	sy[5].st_name = 43;
+	sy[5].st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC);
+	sy[5].st_shndx = 1;
+	sy[5].st_value = 0x40 + S;
+	sy[5].st_size = 0x120;
+	sy[6].st_name = 66;
+	sy[6].st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC);
+	sy[6].st_shndx = 1;
+	sy[6].st_value = 0x200 + S;
+	sy[6].st_size = 0x100;
+	sy[7].st_name = 78;
+	sy[7].st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC);
+	sy[7].st_shndx = 1;
+	sy[7].st_value = 0x380 + S;
+	sy[7].st_size = 0x10;
+
+	/* Probe gate: call the thunk, test al,al, branch into the refusal block. */
+	t[0x40 + S] = 0xe8;
+	if (of.patched_gate) {
+		t[0x47 + S] = 0x90;
+		t[0x48 + S] = 0x90;
+	} else {
+		t[0x47 + S] = of.bad_branch ? 0x74 : 0x75;
+		t[0x48 + S] = 0x7f;
+	}
+	t[0x45 + S] = 0x84;
+	t[0x46 + S] = 0xc0;
+	t[0xc8 + S] = 0x44;
+	t[0xc9 + S] = 0x89;
+	t[0xca + S] = 0xff;
+	t[0xcb + S] = 0x48;
+	t[0xcc + S] = 0x8d;
+	t[0xcd + S] = 0x05;
+	if (of.dup_gate) {
+		t[0x80 + S] = 0xe8;
+		t[0x85 + S] = 0x84;
+		t[0x86 + S] = 0xc0;
+		t[0x87 + S] = 0x75;
+		t[0x88 + S] = 0x3f;
+	}
+
+	/* VF count: HDR3 read, call, TotalVFs load, HDR5 read, store, BAR reads. */
+	memcpy(t + 0x200 + S, "\xbe\xd8\x0b\x00\x00", 5);
+	t[0x205 + S] = 0xe8;
+	if (of.bad_load)
+		memcpy(t + 0x20a + S, "\x0f\xb7\x45\x04", 4);
+	else if (of.patched_vf)
+		memcpy(t + 0x20a + S, "\x31\xc0\xb0\x04", 4);
+	else
+		memcpy(t + 0x20a + S, "\x0f\xb7\x45\x06", 4);
+	memcpy(t + 0x20e + S, "\xbe\xe0\x0b\x00\x00", 5);
+	if (of.bad_store)
+		memcpy(t + 0x213 + S, "\x89\xc3\x90\x90\x90\x90", 6);
+	else
+		memcpy(t + 0x213 + S, "\x89\x83\x60\x41\x00\x00", 6);
+	for (i = 0; i < 5; i++) {
+		memcpy(t + 0x230 + S + i * 0x10, bars[i], 5);
+		if (of.bad_hdr && i == 3)
+			memcpy(t + 0x230 + S + i * 0x10, bars[2], 5);
+		t[0x235 + S + i * 0x10] = 0xe8;
+	}
+
+	t[0x300 + S] = 0xc3;
+	t[0x320 + S] = 0xf3;
+	t[0x321 + S] = 0x0f;
+	t[0x322 + S] = 0x1e;
+	t[0x323 + S] = 0xfa;
+	t[0x324 + S] = 0xe9;
+	t[0x380 + S] = 0xc3;
+
+	if (!of.no_string)
+		memcpy(objimg + ro_off, sentence, sizeof(sentence));
+
+	/* relocations */
+	if (!of.no_thunk) {
+		re[nrel].r_offset = 0x41 + S;
+		re[nrel].r_info = ELF64_R_INFO(4, R_X86_64_PC32);
+		re[nrel].r_addend = -4;
+		nrel++;
+		re[nrel].r_offset = 0x325 + S;
+		re[nrel].r_info = ELF64_R_INFO(3, R_X86_64_PC32);
+		re[nrel].r_addend = -4;
+		nrel++;
+	}
+	re[nrel].r_offset = 0x206 + S;
+	re[nrel].r_info = ELF64_R_INFO(7, R_X86_64_PC32);
+	re[nrel].r_addend = -4;
+	nrel++;
+	for (i = 0; i < 5; i++) {
+		re[nrel].r_offset = 0x236 + S + i * 0x10;
+		re[nrel].r_info = ELF64_R_INFO(7, R_X86_64_PC32);
+		re[nrel].r_addend = -4;
+		nrel++;
+	}
+	if (of.dup_gate) {
+		re[nrel].r_offset = 0x81 + S;
+		re[nrel].r_info = ELF64_R_INFO(4, R_X86_64_PC32);
+		re[nrel].r_addend = -4;
+		nrel++;
+	}
+	re[nrel].r_offset = 0xce + S;
+	re[nrel].r_info = ELF64_R_INFO(2, R_X86_64_32S);
+	re[nrel].r_addend = 0;
+	nrel++;
+	sh[2].sh_size = nrel * sizeof(Elf64_Rela);
+
+	memcpy(objimg, &eh, sizeof(eh));
+	memcpy(objimg + sh_off, sh, sizeof(sh));
+	memcpy(objimg + sym_off, sy, sizeof(sy));
+	memcpy(objimg + str_off, strtab, sizeof(strtab));
+	memcpy(objimg + 0xd00, shnames, sizeof(shnames));
+	memcpy(objimg + rela_off, re, nrel * sizeof(re[0]));
+	obj_len = 0x1000;
+	obj_text_off = of.text_off;
+	obj_gate_site = of.text_off + 0x47 + S;
+	obj_vf_site = of.text_off + 0x20a + S;
+}
+
+static void object_locators(void)
+{
+	const struct gs_ada_revision *gate = shipped("module-gate"), *vf = shipped("vf-count");
+	struct gs_ada_revision one[1];
+	struct gs_ada_found f;
+	unsigned char copy[OBJ_IMG];
+
+	CHECK(gate && vf, "shipped table lacks module-gate or vf-count");
+	if (!gate || !vf)
+		return;
+
+	/* Stock object: the gate is the first pending revision. */
+	obj_defaults();
+	build_obj();
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0, "stock object not admitted: %s", err);
+	CHECK(f.row == gate && f.admission == GS_ADA_ANCHOR && f.state == 0 && f.site == obj_gate_site && f.width == 2,
+	      "stock object admission is not the gate row at the located site");
+	CHECK(f.function && !strcmp(f.function, "rm_is_supported_device") && f.function_offset == 0x7,
+	      "gate admission did not report the containing function and offset");
+	CHECK(!memcmp(f.old_bytes, "\x75\x7f", 2) && !memcmp(f.new_bytes, "\x90\x90", 2),
+	      "located gate bytes differ from the recorded row");
+	memcpy(copy, objimg, obj_len);
+	CHECK(gs_ada_edit(&f, copy, obj_len, 0, fresh(), sizeof(err)) == 0 && !memcmp(copy + obj_gate_site, "\x90\x90", 2),
+	      "gate apply did not write the two NOPs: %s", err);
+
+	/* The gated object is vf-count's input. */
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(copy, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0, "gated object not admitted: %s", err);
+	CHECK(f.row == vf && f.state == 0 && f.site == obj_vf_site && f.width == 4,
+	      "gated object admission is not the vf row at the located site");
+	CHECK(f.function && !strcmp(f.function, "_nv039075rm") && f.function_offset == 0xa,
+	      "vf admission did not report the containing function and offset");
+	CHECK(!memcmp(f.new_bytes, "\x31\xc0\xb0\x04", 4), "located vf bytes differ from the recorded row");
+	CHECK(gs_ada_edit(&f, copy, obj_len, 0, fresh(), sizeof(err)) == 0 && !memcmp(copy + obj_vf_site, "\x31\xc0\xb0\x04", 4),
+	      "vf apply did not write the four bytes: %s", err);
+
+	/* Both revisions applied: nothing left, and inspect reports the last row. */
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit(copy, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.module-gate: already at output state"), "patched object not refused: %s", err);
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(copy, obj_len, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 && f.row == vf && f.state == 1,
+	      "patched object inspect did not report vf-count at output state: %s", err);
+	CHECK(refused(gs_ada_admit(copy, obj_len, GS_ADA_BACKWARD, &f, fresh(), sizeof(err)), "structural revert"),
+	      "structural revert not refused: %s", err);
+
+	/* Already-patched recognition for each row on its own. */
+	obj_defaults();
+	of.patched_gate = 1;
+	build_obj();
+	one[0] = *gate;
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(one, 1, objimg, obj_len, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 && f.state == 1 &&
+	      f.admission == GS_ADA_ANCHOR, "patched gate not recognised: %s", err);
+	CHECK(refused(gs_ada_admit_in(one, 1, objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "already at output state"), "patched gate not refused for apply: %s", err);
+	obj_defaults();
+	of.patched_vf = 1;
+	build_obj();
+	one[0] = *vf;
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit_in(one, 1, objimg, obj_len, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 && f.state == 1,
+	      "patched vf not recognised: %s", err);
+
+	/* Shifted .text file offset and shifted code inside .text. */
+	obj_defaults();
+	of.text_off = 0x300;
+	of.shift = 0x80;
+	build_obj();
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0 && f.site == obj_gate_site &&
+	      f.site == 0x3c7 && f.function_offset == 0x7,
+	      "shifted object not found at its file offset: %s", err);
+
+	/* The name-independent fallback: renaming the scope symbol still finds one site. */
+	obj_defaults();
+	of.rename_scope = 1;
+	build_obj();
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0 && f.site == obj_gate_site &&
+	      f.function && !strcmp(f.function, "rm_is_supported_devicX"),
+	      "text-scan fallback did not find the gate: %s", err);
+
+	/* Refusals, each naming the row and the stage. */
+	obj_defaults();
+	of.dup_gate = 1;
+	build_obj();
+	CHECK(refused(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.module-gate: unique: 2 gate candidates"), "duplicate gate not refused: %s", err);
+	obj_defaults();
+	of.no_string = 1;
+	build_obj();
+	CHECK(refused(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.module-gate: reject-block:"), "missing reject string not refused: %s", err);
+	obj_defaults();
+	of.no_thunk = 1;
+	build_obj();
+	CHECK(refused(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.module-gate: vgx-thunk:"), "missing vgx target not refused: %s", err);
+	obj_defaults();
+	of.bad_branch = 1;
+	build_obj();
+	CHECK(refused(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.module-gate: branch:"), "changed branch not refused: %s", err);
+	obj_defaults();
+	of.bad_hdr = 1;
+	build_obj();
+	CHECK(refused(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.vf-count: bar-window:"), "changed HDR sequence not refused: %s", err);
+	obj_defaults();
+	of.bad_store = 1;
+	build_obj();
+	CHECK(refused(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.vf-count: store:"), "changed store shape not refused: %s", err);
+	obj_defaults();
+	of.bad_load = 1;
+	build_obj();
+	CHECK(refused(gs_ada_admit(objimg, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
+		      "anchor ada.vf-count: totalvfs-load:"), "wrong TotalVFs load not refused: %s", err);
+
+	/* A shared object is not these rows' input: the object rows are absent. */
+	obj_defaults();
+	build_obj();
+	one[0] = *shipped("plugin-mixed");
+	memset(&f, 0, sizeof(f));
+	CHECK(refused(gs_ada_admit_in(one, 1, objimg, obj_len, GS_ADA_ANY, &f, fresh(), sizeof(err)),
+		      "anchor ada.unknown: no recipe matches this input"), "an object was treated as a plugin: %s", err);
+}
+
+/* Runs cmd through a shell and returns its exit status, with combined output in out. */
+static int run(const char *cmd, char *out, size_t outlen)
+{
+	FILE *p;
+	size_t n = 0;
+	int status;
+
+	out[0] = '\0';
+	p = popen(cmd, "r");
+	if (!p)
+		return -1;
+	while (n + 1 < outlen && fgets(out + n, (int)(outlen - n), p) != NULL)
+		n += strlen(out + n);
+	status = pclose(p);
+	return status < 0 || !WIFEXITED(status) ? -1 : WEXITSTATUS(status);
+}
+
+/* The patcher binary is exercised only when it exists; make check builds it first. */
+static void cli(void)
+{
+	const char *bin = getenv("GS_PATCH_BIN");
+	char path[] = "/tmp/gs-ada-cli-XXXXXX", ppath[] = "/tmp/gs-ada-plugin-XXXXXX";
+	char opath[] = "/tmp/gs-ada-object-XXXXXX";
+	char dest[sizeof(ppath) + 8], cmd[1024], out[2048];
+	unsigned char data[N];
+	int fd;
+	size_t i;
+
+	if (!bin || !*bin)
+		bin = "driver/geforce-sriov-patch";
+	if (access(bin, X_OK) != 0) {
+		printf("test_patch_ada: CLI checks skipped: %s is not built\n", bin);
+		return;
+	}
+	fd = mkstemp(path);
+	CHECK(fd >= 0, "mkstemp failed");
+	if (fd < 0)
+		return;
+	for (i = 0; i < N; i++)
+		data[i] = (unsigned char)(i * 37u + 0x5au);
+	CHECK(write(fd, data, N) == (ssize_t)N, "writing the synthetic input failed");
+	CHECK(close(fd) == 0, "closing the synthetic input failed");
+	snprintf(dest, sizeof(dest), "%s.out", path);
+
+	snprintf(cmd, sizeof(cmd), "%s ada 2>&1", bin);
+	CHECK(run(cmd, out, sizeof(out)) == 2, "ada without a subcommand did not exit 2: %s", out);
+	snprintf(cmd, sizeof(cmd), "%s ada inspect %s 2>&1", bin, path);
+	CHECK(run(cmd, out, sizeof(out)) == 3, "ada inspect of an unknown digest did not exit 3: %s", out);
+	CHECK(strstr(out, "geforce-sriov-patch: anchor ada.unknown: no recipe matches this input and no structural locator is implemented for it") != NULL,
+	      "ada inspect did not name the anchor: %s", out);
+	CHECK(strstr(out, "admission=") == NULL, "ada inspect printed a report for a refused input: %s", out);
+	snprintf(cmd, sizeof(cmd), "%s ada apply %s %s 2>&1", bin, path, dest);
+	CHECK(run(cmd, out, sizeof(out)) == 3, "ada apply of an unknown digest did not exit 3: %s", out);
+	CHECK(access(dest, F_OK) != 0, "ada apply created an output file for a refused input");
+	snprintf(cmd, sizeof(cmd), "%s ada inspect %s.missing 2>&1", bin, path);
+	CHECK(run(cmd, out, sizeof(out)) == 1, "ada inspect of a missing file did not exit 1: %s", out);
+	CHECK(unlink(path) == 0, "unlinking the synthetic input failed");
+
+	/* A plugin-shaped file goes through the structural path end to end. */
+	plugin_defaults();
+	build_plugin();
+	fd = mkstemp(ppath);
+	CHECK(fd >= 0, "mkstemp plugin failed");
+	if (fd < 0)
+		return;
+	CHECK(write(fd, img, img_len) == (ssize_t)img_len, "writing the synthetic plugin failed");
+	CHECK(close(fd) == 0, "closing the synthetic plugin failed");
+	snprintf(cmd, sizeof(cmd), "%s ada inspect %s 2>&1", bin, ppath);
+	CHECK(run(cmd, out, sizeof(out)) == 0, "ada inspect of a synthetic plugin did not exit 0: %s", out);
+	CHECK(strstr(out, "admission=anchor") != NULL, "inspect did not report anchor admission: %s", out);
+	CHECK(strstr(out, "state=unconfirmed:unknown") != NULL, "inspect promoted an anchor admission: %s", out);
+	CHECK(strstr(out, "row 4: plugin-mixed:") != NULL, "inspect did not name the placement row: %s", out);
+	CHECK(strstr(out, "revision=plugin-mixed") != NULL, "inspect did not report the revision: %s", out);
+	CHECK(strstr(out, "file_offset=0x240") != NULL, "inspect did not report the located file offset: %s", out);
+	snprintf(dest, sizeof(dest), "%s.out", ppath);
+	snprintf(cmd, sizeof(cmd), "%s ada apply %s %s 2>&1", bin, ppath, dest);
+	CHECK(run(cmd, out, sizeof(out)) == 0, "ada apply of a synthetic plugin did not exit 0: %s", out);
+	CHECK(access(dest, F_OK) == 0, "ada apply did not create the plugin output file");
+	CHECK(unlink(dest) == 0, "unlinking the plugin output failed");
+	CHECK(unlink(ppath) == 0, "unlinking the synthetic plugin failed");
+
+	/* An object-shaped file goes through the structural path end to end. */
+	obj_defaults();
+	build_obj();
+	fd = mkstemp(opath);
+	CHECK(fd >= 0, "mkstemp object failed");
+	if (fd < 0)
+		return;
+	CHECK(write(fd, objimg, obj_len) == (ssize_t)obj_len, "writing the synthetic object failed");
+	CHECK(close(fd) == 0, "closing the synthetic object failed");
+	snprintf(cmd, sizeof(cmd), "%s ada inspect %s 2>&1", bin, opath);
+	CHECK(run(cmd, out, sizeof(out)) == 0, "ada inspect of a synthetic object did not exit 0: %s", out);
+	CHECK(strstr(out, "row 1: module-gate:") != NULL, "inspect did not name the gate row: %s", out);
+	CHECK(strstr(out, "admission=anchor") != NULL && strstr(out, "state=unconfirmed:unknown") != NULL,
+	      "inspect did not report an unconfirmed anchor admission: %s", out);
+	CHECK(strstr(out, "file_offset=0x247") != NULL, "inspect did not report the located gate offset: %s", out);
+	CHECK(strstr(out, "function=rm_is_supported_device") != NULL && strstr(out, "function_offset=0x7") != NULL,
+	      "inspect did not report the containing function: %s", out);
+	snprintf(dest, sizeof(dest), "%s.out", opath);
+	snprintf(cmd, sizeof(cmd), "%s ada apply %s %s 2>&1", bin, opath, dest);
+	CHECK(run(cmd, out, sizeof(out)) == 0, "ada apply of a synthetic object did not exit 0: %s", out);
+	CHECK(strstr(out, "row 3: vf-count:") != NULL || strstr(out, "row 1: module-gate:") != NULL,
+	      "ada apply did not report the applied row: %s", out);
+	CHECK(access(dest, F_OK) == 0, "ada apply did not create the object output file");
+	CHECK(unlink(dest) == 0, "unlinking the object output failed");
+	CHECK(unlink(opath) == 0, "unlinking the synthetic object failed");
+}
+
 int main(void)
 {
 	table_invariants();
 	synthetic_row();
 	plugin_chain();
+	admission();
+	plugin_locators();
+	object_locators();
+	cli();
 	printf("test_patch_ada: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }
