@@ -21,7 +21,7 @@
 - Ada: a stopped VM keeps its video memory.
   On an Ada card each VF uses a fixed range of the card's VRAM, its framebuffer slot. Until now a host program, for example a host CUDA job, could take the slot of a stopped VM, and that VM then failed to start.
   `install` now builds a small piece of code into your copy of `nvidia.ko` that holds the slot of every VF from activation on and hands it to NVIDIA's vGPU manager when the VM starts.
-  `status`, `doctor` and `check` show a `framebuffer slots` line for each Ada card, and the new config key `fb_slots` (`auto`, `on`, `off`) turns it off ([Host programs and VM memory](docs/ada.md#host-programs-and-vm-memory)).
+  `status`, `doctor` and `check` show a `framebuffer slots` line for each Ada card, and the new config key `fb_slots` (`auto`, `on`, `off`) turns it off ([Reserved VM memory](docs/ada.md#reserved-vm-memory)).
   The slots stay reserved for the VFs while their VMs are stopped, so host programs on that card get only the memory outside them.
 
 - An early livepatch unit, `geforce-sriov-livepatch.service`, loads the livepatch module `geforce_sriov` and then NVIDIA's driver (`nvidia`) before udev, using the new `livepatch --boot --load-driver` command.

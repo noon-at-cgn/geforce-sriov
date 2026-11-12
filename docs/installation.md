@@ -463,7 +463,7 @@ A CUDA library that another package or you installed is left as it is. If progra
 `install --no-host-cuda` removes the libraries again, and so does `uninstall`.
 
 `install` also writes `/etc/modprobe.d/geforce-sriov-uvm.conf` for it ([Modprobe files](#modprobe-files)).
-On an Ada card, the memory of each VF stays reserved for its VM, so host CUDA programs can use only the rest of the card ([Host programs and VM memory](ada.md#host-programs-and-vm-memory)).
+On an Ada card, the memory of each VF stays reserved for its VM, so host CUDA programs can use only the rest of the card ([Reserved VM memory](ada.md#reserved-vm-memory)).
 `activate` loads `nvidia_uvm` after the VFs are ready and unloads it again only when no program uses it, so stop host CUDA programs before you run `activate` again.
 
 ## Modprobe files

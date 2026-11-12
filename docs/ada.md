@@ -10,7 +10,7 @@ It presents the card to NVIDIA's vGPU software as a professional RTX 6000 Ada.
 - Use host driver 580.159.01 with GSP off (`install` sets that up), a Linux guest driver 535.230.02 and a Windows guest driver 539.19. Other versions are **not** guaranteed to work ([Guests and VMs](#guests-and-vms) lists what else was tested).
 - Ada needs more host-side work than Ampere, and `install` does it for you ([NVIDIA host driver setup](#nvidia-host-driver-setup)).
 - Later VFs have higher framebuffer slots, so put VMs with a large vGPU type on the lower VFs ([Choosing a vGPU type](#choosing-a-vgpu-type)).
-- The slots stay reserved for the VFs, so a host program cannot take the memory of a stopped VM ([Host programs and VM memory](#host-programs-and-vm-memory)).
+- The memory of every VF is **reserved from boot**, about 8 of 12 GiB with four 2 GiB VFs, so a stopped VM can always start again ([Reserved VM memory](#reserved-vm-memory)).
 - Every guest needs the setting `RMSetVgpuGspPluginOffloadMode=0` ([Guests and VMs](#guests-and-vms)).
 - The limits of this generation are in [Known limits](#known-limits).
 
@@ -260,16 +260,35 @@ The Debian 12 guest shows `NVIDIA RTX6000-Ada-2Q` with 2048 MiB and guest driver
 The Windows 11 guest shows `NVIDIA RTX 6000 Ada-2Q` with 2 GB.
 NVIDIA Control Panel and GPU-Z report guest driver 539.19.
 
-## Host programs and VM memory
+## Reserved VM memory
 
-Each VF of an Ada card uses a fixed range of the card's VRAM, its framebuffer slot.
-NVIDIA's driver treats the slot of a stopped VM as free memory, so a host program such as a host CUDA job could take it, and the VM then failed to start with `Failed to alloc guest FB memory` in the host journal.
+### What it is
 
-geforce-sriov now keeps the slots for the VFs:
+On an Ada card, geforce-sriov **reserves the memory of every VF from boot**, whether its VM is running or not.
+Each VF has a fixed range of the card's VRAM, its framebuffer slot, and its vGPU always uses that range.
+With four VFs of the default type (2 GiB each), about 8 of the 12 GiB on an RTX 4070 SUPER are reserved.
+Host programs, such as a host CUDA job, can use the rest.
 
-- `activate` holds the slot of every VF as soon as the vGPU types are set, at boot and whenever you run it.
-- When a VM starts, NVIDIA's vGPU manager gets the slot of its VF. When the VM stops, the slot stays held for its next start.
-- A host program that asks for memory gets it from outside the slots, or is told that the card has no free memory.
+| VFs and type | Reserved | Left for host programs (RTX 4070 SUPER, 12 GiB) |
+|---|---|---|
+| 4 VFs of 2 GiB (default) | about 8 GiB | about 4 GiB |
+| 2 VFs of 2 GiB (`vfs=2`) | about 4 GiB | about 8 GiB |
+| reservation off (`fb_slots=off`) | only the memory of running VMs | everything else |
+
+A running VM uses its own reserved range, so starting a VM does **not** take more memory.
+
+### Why it is needed
+
+NVIDIA's driver treats the range of a stopped VM as free memory.
+Without the reservation, a host program can take that range while the VM is stopped.
+The VM then **fails to start** until the program frees the memory, and the host journal shows `Failed to alloc guest FB memory`.
+With the reservation, a stopped VM can always start again.
+
+### How it works
+
+- `activate` reserves the range of every VF as soon as it sets the vGPU types, at boot and whenever you run it.
+- When a VM starts, NVIDIA's vGPU manager receives the reserved range of its VF. When the VM stops, the range stays reserved for its next start.
+- A host program that asks for memory gets it from outside the reserved ranges, or is told that the card has no free memory.
 
 You do not need to do anything. `geforce-sriov status` shows one line for each Ada card:
 
@@ -277,19 +296,31 @@ You do not need to do anything. `geforce-sriov status` shows one line for each A
 framebuffer slots: 4 held (1 in use, 3 free)
 ```
 
-`in use` counts the slots whose VM is running.
-When a slot is **not** held, the line names the reason and what to do, which is usually `sudo geforce-sriov activate` while no VM start is pending.
-A slot that is not held is never an error: its VM starts as it did before 0.3.0, and can fail to start only while a host program has its memory.
+`in use` counts the ranges whose VM is running.
+When a range is **not** held, the line names the reason and what to do, which is usually `sudo geforce-sriov activate` while no VM start is pending.
+A range that is not held is never an error: its VM starts as it did before 0.3.0, and can fail to start only while a host program has its memory.
 
-To turn it off, set `fb_slots=off` in `/etc/geforce-sriov/config` and run `sudo geforce-sriov activate`.
-The slots are then released, and host programs can use the whole card again ([Configuration file](configuration.md#configuration-file)).
+### What you see in nvidia-smi
 
-How it works is in the [technical reference](technical-reference.md#the-framebuffer-slot-owner).
+On the host, `nvidia-smi` counts the reserved memory for the card, not for the VMs:
+
+- The memory used on the Ada card includes every reserved range, also those of stopped VMs.
+- The vGPU process of each Ada VM shows **0 MiB**, because the memory it uses was reserved before the VM started.
+
+Each guest still has its full vGPU memory. Ampere cards have no fixed ranges, so their vGPU processes show their memory as before.
+
+### How to change it
+
+- **Fewer VFs** reserve less: set `vfs=2` in `/etc/geforce-sriov/config` (or run `sudo ./geforce-sriov install --vfs 2` from the source folder), then power the machine off and on. `vfs` applies to **every** selected card, Ampere included ([Configuration file](configuration.md#configuration-file)).
+- **A smaller vGPU type** reserves less per VF. Type 941 (1 GiB) does **not** work on Ada, so 942 (2 GiB) is the smallest ([Choosing a vGPU type](#choosing-a-vgpu-type)).
+- **Turn the reservation off** with `fb_slots=off` in `/etc/geforce-sriov/config`, then run `sudo geforce-sriov activate`.
+  The ranges are released, so host programs can use all memory that running VMs do not use, but a stopped VM may then fail to start while a host program uses its memory ([Configuration file](configuration.md#configuration-file)).
+
+How it works internally is in the [technical reference](technical-reference.md#the-framebuffer-slot-owner).
 
 ## Known limits
 
-- The framebuffer slots of the VFs stay reserved while their VMs are stopped ([Host programs and VM memory](#host-programs-and-vm-memory)).
-  Host programs on the card can use only the memory outside the slots: about 4 of 12 GiB on an RTX 4070 SUPER with four VFs of the default type.
+- The memory of every VF stays reserved, also while its VM is stopped, so host programs get only the rest: about 4 of 12 GiB on an RTX 4070 SUPER with four 2 GiB VFs ([Reserved VM memory](#reserved-vm-memory)).
 - Holding the slots is tested with host driver 580.159.01. With another host driver version it is best effort: `install` builds NVIDIA's module without it when its checks do not pass, and `status` then says so.
 - On an Ada card that is also the boot display GPU, holding the slots has **not** been tested.
 - vGPU type 941 (RTX6000-Ada-1Q) does **not** work: the guest driver does not initialise ([Choosing a vGPU type](#choosing-a-vgpu-type)).
