@@ -97,7 +97,7 @@ flowchart TD
 | `/etc/geforce-sriov/config` | `/etc/geforce-sriov/` | Removes it while unchanged |
 | `geforce-sriov-nvidia.conf` and `geforce-sriov-autoload.conf`. With host CUDA, also `geforce-sriov-uvm.conf` | `/etc/modprobe.d/` | Removes the ones `install` wrote while unchanged |
 | The two boot units, the `nvidia-vgpud` drop-in and the guest-autostart drop-ins | `/etc/systemd/system/` | Disables the units and removes the files while unchanged |
-| The kernel hooks and the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`. On other hosts, the `kernel-install` plugin or the pacman hook, with the `geforce-sriov-kernel-hook` script | `/etc/kernel/postinst.d/`, `/etc/kernel/header_postinst.d/`, `/etc/apt/apt.conf.d/`, `/etc/kernel/install.d/`, `/etc/pacman.d/hooks/`, `<prefix>/bin/` | Removes the ones `install` wrote while unchanged |
+| The kernel hooks and the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`. On a `kernel-install` host without `/etc/kernel/postinst.d`, the plugin. On a pacman host, the pacman hook. For those two, also the `geforce-sriov-kernel-hook` script | `/etc/kernel/postinst.d/`, `/etc/kernel/header_postinst.d/`, `/etc/apt/apt.conf.d/`, `/etc/kernel/install.d/`, `/etc/pacman.d/hooks/`, `<prefix>/bin/` | Removes the ones `install` wrote while unchanged |
 | NVIDIA's CUDA libraries for host CUDA, their links and `geforce-sriov-cuda.conf` | `<prefix>/lib/geforce-sriov/cuda/`, `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` | Removes each file and link while it is unchanged, then runs `ldconfig` |
 | NVIDIA's graphics libraries and X modules for the host desktop, and their loader file. Also the EGL, Vulkan and X output-class files and the `nvidia-drm_gbm.so` link | `<prefix>/lib/geforce-sriov/gl/`, `<prefix>/lib/geforce-sriov/xorg/`, `/etc/ld.so.conf.d/geforce-sriov-gl.conf` and the paths in [What install adds](installation.md#what-install-adds) | Removes each file and link while it is unchanged, then runs `ldconfig` |
 | The install manifest and the driver log | `/var/lib/geforce-sriov/` | Removes them, and the directory when nothing else is in it |
@@ -287,7 +287,7 @@ A live install copies the binaries to `--prefix` (default `/usr/local`), the hoo
 
 - in `/var/lib/geforce-sriov/`: `installed-files` with every file it recorded, `format` with the version stamp, and `selection` with the identity of each selected card;
 - the kernel hooks `/etc/kernel/postinst.d/geforce-sriov` and `/etc/kernel/header_postinst.d/geforce-sriov`, for each of those directories that exists;
-- the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`, which runs the hook with `--retry` after dpkg;
+- when `/etc/kernel/postinst.d` and `/etc/apt/apt.conf.d` both exist, the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`, which runs the hook with `--retry` after dpkg;
 - on a `kernel-install` host without `/etc/kernel/postinst.d`, the plugin `/etc/kernel/install.d/90-geforce-sriov.install`;
 - on a pacman host, the hook `/etc/pacman.d/hooks/90-geforce-sriov.hook`, which runs the hook script with `--retry`;
 - for those last two hosts, the hook script `geforce-sriov-kernel-hook` beside the program;

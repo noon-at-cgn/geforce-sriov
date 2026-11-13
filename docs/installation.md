@@ -305,7 +305,7 @@ A card left out is bound by the driver but not activated, and the rebuilt `nvidi
 - Patched copies of NVIDIA's module and plugin, and a backup of the stock module (not with `--driver=skip`).
 - The kernel hook, a script that the package manager runs when a kernel or its headers are installed ([After a kernel update](#after-a-kernel-update)). Its files are:
   - `/etc/kernel/postinst.d/geforce-sriov` and `/etc/kernel/header_postinst.d/geforce-sriov`, for each of those directories that exists
-  - the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`
+  - the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`, when `/etc/kernel/postinst.d` and `/etc/apt/apt.conf.d` both exist
   - on a host with `kernel-install` and no `/etc/kernel/postinst.d`, the plugin `/etc/kernel/install.d/90-geforce-sriov.install`
   - on a host with pacman, `/etc/pacman.d/hooks/90-geforce-sriov.hook`
   - for the last two, the hook script `geforce-sriov-kernel-hook` beside the program
@@ -640,7 +640,7 @@ Two cases build nothing, and the hook records them:
 - The headers of the new kernel are missing. `status` says "the headers of kernel RELEASE are not installed; install them, then run the command below".
 - NVIDIA's own module for the kernel cannot be built. `status` says "NVIDIA's own module for kernel RELEASE is not built yet".
 
-The snippet tries the first case again at every apt run. It tries the second again only when NVIDIA's own module exists or the headers changed since, so no apt run repeats a DKMS build that fails every time. If an activation just after boot holds the lock, the snippet waits for it, six tries ten seconds apart. `status` stops naming a kernel once its module is the recorded build.
+The snippet tries the first case again at every apt run. It tries the second again only when NVIDIA's own module exists or the headers changed since, so no apt run repeats a DKMS build that fails every time. The kernel hook that the kernel or headers package runs does wait: if an activation just after boot holds the lock, it tries six times, ten seconds apart. `status` stops naming a kernel once its module is the recorded build.
 A failed build never fails the kernel package or apt. `geforce-sriov status` then names the kernel (`kernel hook: the automatic build for kernel RELEASE failed ...`), and `activate` on that kernel refuses with the build it lacks. The snippet does not try that failed build again, so a failure for another reason stays reported until you fix it.
 To fix it, read `/var/lib/geforce-sriov/kernel-hook-logs/RELEASE.log`, then run `sudo geforce-sriov rebuild --kernel RELEASE`. This is the one command that does what the hook does.
 These systems build for a new kernel by themselves. `install` writes the file for each one whose directory exists:

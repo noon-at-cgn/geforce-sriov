@@ -557,7 +557,7 @@ With an Ada card, leaving it out gives NVIDIA's fixed slots: a host program in t
 
 The build writes `nvidia.ko` and `nvidia-vgpu-vfio.ko` to the top of the copied tree.
 Only `nvidia.ko` contains the patched object, so the installed `nvidia-vgpu-vfio.ko` stays as it is.
-See [Compare with a stock build](#compare-with-a-stock-build) for how to check the result before installing it.
+Compare the result with a stock build before installing it. See [Compare with a stock build](#compare-with-a-stock-build).
 
 ### Install the patched module
 
