@@ -73,9 +73,9 @@ msix=on
 # The hook ties each reply to one GPU by its PCI address, using read-only driver
 # queries. Host driver 580.159.01 is the confirmed version. Other host driver
 # versions are not guaranteed to work.
-# If the queries fail, the PCI-info reply falls back to the device ID. This
-# happens only when a fresh scan finds every NVIDIA GPU with that ID selected.
-# Otherwise the reply stays unchanged. `geforce-sriov status` and
+# If the queries fail, the PCI-info reply falls back to the device ID only when
+# a fresh scan finds every NVIDIA GPU with that ID selected. Otherwise the reply
+# stays unchanged. `geforce-sriov status` and
 # `install --dry-run` report such a shared ID.
 identity=off
 #
