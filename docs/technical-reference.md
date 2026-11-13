@@ -40,6 +40,88 @@ flowchart TD
     A --> D["vGPU daemons"]
 ```
 
+## Changes and reversibility
+
+This section lists what the package changes, where each change lives and what ends it.
+The [README](../README.md#safety-and-reversibility) has the short version.
+
+geforce-sriov is software only.
+It needs no hardware change, and it does **not** flash the ROM (the vBIOS), the card's firmware or anything else persistent on the card.
+The `geforce_sriov` module changes two runtime register settings: the MSI-X hide bit of the GPU and the ARI Forwarding Enable bit of the PCIe port above it.
+Both are held only while the host runs, and neither is written to firmware, so a power cycle without the boot units leaves neither of them set.
+
+### Runtime changes
+
+These changes exist only in the running system.
+The boot units that `install` enables make them again at each boot, and nothing makes them without those units or a manual `activate`.
+
+| Change | Made by | What it is |
+|---|---|---|
+| MSI-X setting on the GPU | The `geforce_sriov` module, at load, with `msix=on` | Clears bit 29 of the GPU's configuration register at offset `0x41C`, the bit NVIDIA uses to unlink MSI-X from the capability chain. Any PF reset sets it again ([The kernel module](#the-kernel-module)) |
+| ARI forwarding on the PCIe port | The PCI core, or `geforce_sriov` when the kernel does not find the hidden capability on its own | Sets the ARI Forwarding Enable bit in the port's Device Control 2 register, only when the port supports it |
+| The livepatch | `geforce-sriov-livepatch.service`, or `activate` | Replaces three kernel functions in the running kernel (`pci_find_ext_capability`, `pci_read_config_word` and `pci_write_config_word`), and acts only on the cards in `bdfs` |
+| Removal and rescan of a card's empty bus | `activate` | Lets the kernel read the card again with the livepatch in place |
+| VFs and vGPU types | `activate`, through NVIDIA's `sriov-manage` and sysfs | Creates the VFs and sets each VF's type |
+| Power settings | `activate` | Sets `power/control` to `on` for the card, its bridge and its VFs. On a laptop GPU, with `d3cold=off` in the config, it also writes `0` to `d3cold_allowed`. When `activate` stops before the removal, it gives these back |
+| Module block and run files | `activate` | `/run/modprobe.d/zz-geforce-sriov-enable.conf` and `/run/geforce-sriov/`, both on a memory-backed directory |
+| The boot display framebuffer | `activate`, on the boot display GPU only | Hands the firmware framebuffer (the video memory the BIOS/UEFI set up for the boot screen) to NVIDIA's display modules ([The boot display GPU](#the-boot-display-gpu)) |
+
+One runtime change leaves a file on disk on purpose.
+The activation lock, `/var/lib/geforce-sriov/prepare-attempt`, marks an activation that is incomplete or in an uncertain state.
+The activation lock stays after an interrupted activation, and after `uninstall`, until you clear it ([The activation lock](recovery.md#the-activation-lock)).
+
+### Files on disk
+
+```mermaid
+flowchart TD
+    INS["geforce-sriov install"]
+    INS --> BIN["Programs and the identity hook<br/>under the prefix, /usr/local by default"]
+    INS --> SRC["Livepatch module source and its DKMS build<br/>/usr/src/geforce-sriov-VERSION"]
+    INS --> NV["Patched nvidia.ko and vGPU plugin copy<br/>stock nvidia.ko backed up under /var/lib/geforce-sriov/stock"]
+    INS --> CFG["Config and modprobe files<br/>/etc/geforce-sriov and /etc/modprobe.d"]
+    INS --> UNITS["Units and drop-ins<br/>/etc/systemd/system"]
+    INS --> HOOKS["Kernel hooks<br/>rebuild the module for each new kernel"]
+    UNITS --> BOOT["Enabled boot units make the runtime changes at each boot"]
+```
+
+| Files | Where | `uninstall` |
+|---|---|---|
+| `geforce-sriov`, `geforce-sriov-patch`, `geforce-sriov-driver`, the `gs-driver-*.sh` helpers, the `driver-patches/` directory | `<prefix>/bin/` | Removes them |
+| The identity hook `libgeforce_sriov.so` and `config.example` | `<prefix>/lib/geforce-sriov/`, `<prefix>/share/geforce-sriov/` | Removes them |
+| The `geforce_sriov` source and the DKMS registration | `/usr/src/geforce-sriov-<version>/` | Runs `dkms remove` and removes the files |
+| The patched `nvidia.ko`, with the display and `nvidia-uvm` modules when built | Where NVIDIA's own module lives, usually `/lib/modules/<release>/updates/dkms/` | Puts NVIDIA's module back from the backup, and removes added modules, while they still match the build record |
+| The patched plugin copy `libnvidia-vgpu.so.<version>.geforce-sriov` and the `libnvidia-vgpu.so` link | NVIDIA's library directory | Points the link back at NVIDIA's own plugin and removes the copy while it is the one `install` made |
+| The backup of NVIDIA's module, the build records and the kept build inputs | `/var/lib/geforce-sriov/stock/<release>/`, `driver-build`, `driver-builds/<kernel>`, `inputs/` | Removes them after a successful restore |
+| `/etc/geforce-sriov/config` | `/etc/geforce-sriov/` | Removes it while unchanged |
+| `geforce-sriov-nvidia.conf`, `geforce-sriov-autoload.conf`, and with host CUDA `geforce-sriov-uvm.conf` | `/etc/modprobe.d/` | Removes the ones `install` wrote while unchanged |
+| The two boot units, the `nvidia-vgpud` drop-in and the guest-autostart drop-ins | `/etc/systemd/system/` | Disables the units and removes the files while unchanged |
+| The kernel hooks and the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`, or the `kernel-install` plugin or the pacman hook with the `geforce-sriov-kernel-hook` script | `/etc/kernel/postinst.d/`, `/etc/kernel/header_postinst.d/`, `/etc/apt/apt.conf.d/`, `/etc/kernel/install.d/`, `/etc/pacman.d/hooks/`, `<prefix>/bin/` | Removes the ones `install` wrote while unchanged |
+| NVIDIA's CUDA libraries for host CUDA, their links and `geforce-sriov-cuda.conf` | `<prefix>/lib/geforce-sriov/cuda/`, `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` | Removes each file and link while it is unchanged, then runs `ldconfig` |
+| NVIDIA's graphics libraries and X modules for the host desktop, their loader file, the EGL, Vulkan and X output-class files and the `nvidia-drm_gbm.so` link | `<prefix>/lib/geforce-sriov/gl/`, `<prefix>/lib/geforce-sriov/xorg/`, `/etc/ld.so.conf.d/geforce-sriov-gl.conf` and the paths in [What install adds](installation.md#what-install-adds) | Removes each file and link while it is unchanged, then runs `ldconfig` |
+| The install manifest and the driver log | `/var/lib/geforce-sriov/` | Removes them, and the directory when nothing else is in it |
+
+`install` records each file it writes with its SHA-256 in `/var/lib/geforce-sriov/installed-files`.
+`uninstall` removes a file only while it still matches that record, and a directory only when it is empty.
+It keeps a changed file and says so, and it **never** touches a file the manifest does not list.
+
+Restoring NVIDIA's module is stricter.
+`geforce-sriov-driver --restore` puts the stock `nvidia.ko` back **only** while the installed `nvidia.ko` is still the one `install` wrote, and **only** from a backup whose SHA-256 matches the one in the build record.
+If either check fails it keeps the installed `nvidia.ko` and the backup, `uninstall` exits 1, and the message names the manual commands.
+Without `--kernel`, `--restore` (which `uninstall` runs) restores every kernel that has a build record, one after the other. A backup that was not put back stays, with a printed command for it ([Uninstall](installation.md#uninstall)).
+
+Two things stay by design: the `--driver-file` extraction in `/var/lib/geforce-sriov/nvidia/<version>/` stays until you delete it (`uninstall` names the directory and prints the `rm -r` command), and the driver NVIDIA's installer put on the host stays until you remove it with NVIDIA's `nvidia-uninstall`.
+
+If you disable the boot units but leave the files, no NVIDIA driver loads at boot, because `geforce-sriov-autoload.conf` still keeps udev from loading it.
+Run `modprobe nvidia` by hand, or run `uninstall`, which removes that file.
+
+### Undoing an activation
+
+The package never disables VFs, so the simplest complete undo is to power the machine off and on.
+A boot without `geforce_sriov` is an ordinary boot.
+A boot with `geforce_sriov.skip` on the kernel command line has no NVIDIA driver: neither unit runs, and the package's autoload file keeps udev from loading `nvidia` ([Turn features off](recovery.md#turn-features-off)).
+`uninstall --unload` disables the livepatch, waits for the transition and runs `rmmod`; it refuses while a listed card has VFs, while the `bdfs` parameter of `geforce_sriov` cannot be read, or after an interrupted activation.
+A card that was rescanned keeps using the revealed capability until it is removed and rescanned again, so in practice, power the machine off and on ([recovery.md](recovery.md)).
+
 ## What activation does
 
 `geforce-sriov activate` brings the selected cards from a cold, NVIDIA-bound or already-enabled state to VFs that are ready for a VM.

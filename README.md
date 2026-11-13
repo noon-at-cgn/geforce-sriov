@@ -3,6 +3,56 @@
 geforce-sriov lets several virtual machines share one NVIDIA GeForce card through NVIDIA's vGPU software.
 Each VM can use its own SR-IOV virtual function (VF).
 
+## Motivation
+
+Normally a GeForce card belongs to one VM or to the host.
+NVIDIA's vGPU software can split a card among several VMs, but it offers that only on the professional cards.
+The supported GeForce cards have the same SR-IOV capability (the PCIe feature that vGPU builds on), but they hide it from the Linux kernel.
+geforce-sriov automates the steps that make it usable:
+
+- it reveals the hidden capability to the kernel,
+- it prepares your own copy of NVIDIA's driver files,
+- it makes the card look like its professional counterpart to NVIDIA's vGPU software, and
+- it creates and configures the virtual functions at each boot.
+
+`setup` handles the driver and the VF configuration, and asks you for what it needs, such as where NVIDIA's package is and which GPUs to use.
+Setting up the guests is still your job.
+
+```mermaid
+flowchart LR
+    subgraph BEFORE["Without geforce-sriov"]
+        direction TB
+        G["GeForce card"] -->|"PCIe passthrough"| ONE["One VM"]
+        G -.->|"or used by"| HOST["The host"]
+    end
+    subgraph AFTER["With geforce-sriov"]
+        direction TB
+        PF["GeForce card<br/>(PF)"]
+        PF --> VF1["VF"]
+        PF --> VF2["VF"]
+        PF --> VF3["VF"]
+        PF --> VF4["VF"]
+        VF1 --> VM1["VM"]
+        VF2 --> VM2["VM"]
+        VF3 --> VM3["VM"]
+        VF4 --> VM4["VM"]
+    end
+    BEFORE ~~~ AFTER
+```
+
+These terms appear throughout the documentation (the [glossary](docs/glossary.md) has more):
+
+| Term | Meaning |
+|---|---|
+| Host | The machine that holds the GPU and runs the VMs: a Linux KVM host such as Proxmox VE |
+| Guest, VM | A virtual machine running on the host |
+| GPU | The GeForce card |
+| SR-IOV | A PCI feature that lets one device present several lightweight copies of itself |
+| PF (physical function) | The GeForce card itself, as the host sees it |
+| VF (virtual function) | One copy of the card created by SR-IOV. Each VF is handed to one VM |
+| vGPU | The virtual GPU a VM gets through its VF, using NVIDIA's vGPU software |
+| vGPU type (profile) | The fixed memory size of a vGPU, for example `RTXA6000-4Q` with 4 GB of VRAM |
+
 geforce-sriov has three parts:
 
 ```mermaid
@@ -30,6 +80,26 @@ flowchart TD
 > Please submit a
 > [compatibility report](https://github.com/noon-at-cgn/geforce-sriov/issues/new?template=compatibility-report.yml)
 > to help verify more hardware, whether it works or not.
+
+## Safety and reversibility
+
+geforce-sriov changes software only.
+It does **not** write firmware (vBIOS), it makes **no** permanent hardware change, and it does **not** supply NVIDIA software or vGPU licensing.
+
+- These files stay on disk across reboots until you run `uninstall`:
+  - a patched copy of NVIDIA's kernel module (`nvidia.ko`, and the display and `nvidia-uvm` modules when they are built), with NVIDIA's original module kept as a backup;
+  - a patched copy of NVIDIA's vGPU plugin library;
+  - the source of the `geforce_sriov` kernel module and its DKMS registration;
+  - the geforce-sriov config file;
+  - the boot units and the drop-ins for `nvidia-vgpud` and for guest autostart;
+  - the driver option files in `/etc/modprobe.d/`;
+  - the kernel hooks in `/etc/kernel/postinst.d` and `/etc/kernel/header_postinst.d` (the ones that exist), the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`, and, where installed, the `kernel-install` plugin or the pacman hook that rebuild NVIDIA's module for each new kernel;
+  - with host CUDA or the host desktop, NVIDIA's CUDA and graphics libraries in geforce-sriov's own folders under `lib/geforce-sriov`, with the files that tell the loader and the graphics stack where they are.
+- The runtime setup is gone after every reboot or power-off: the loaded `geforce_sriov` kernel module, the VFs, the vGPU types and the two register settings the module changes. The boot units apply it again at each boot.
+
+`uninstall` removes the files it installed and restores NVIDIA's original module (`nvidia.ko`) from a backup that it verifies first, so you do not need to reinstall the operating system.
+It **keeps** files you changed and files it did not install, and it leaves NVIDIA's own driver install in place.
+[Changes and reversibility](docs/technical-reference.md#changes-and-reversibility) lists every item.
 
 ## Disclaimer
 
