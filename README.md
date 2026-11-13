@@ -86,20 +86,11 @@ flowchart TD
 geforce-sriov changes software only.
 It does **not** write firmware (vBIOS), it makes **no** permanent hardware change, and it does **not** supply NVIDIA software or vGPU licensing.
 
-- These files stay on disk across reboots until you run `uninstall`:
-  - a patched copy of NVIDIA's kernel module (`nvidia.ko`, and the display and `nvidia-uvm` modules when they are built), with NVIDIA's original module kept as a backup;
-  - a patched copy of NVIDIA's vGPU plugin library;
-  - the source of the `geforce_sriov` kernel module and its DKMS registration;
-  - the geforce-sriov config file;
-  - the boot units and the drop-ins for `nvidia-vgpud` and for guest autostart;
-  - the driver option files in `/etc/modprobe.d/`;
-  - the kernel hooks in `/etc/kernel/postinst.d` and `/etc/kernel/header_postinst.d` (the ones that exist), the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`, and, where installed, the `kernel-install` plugin or the pacman hook that rebuild NVIDIA's module for each new kernel;
-  - with host CUDA or the host desktop, NVIDIA's CUDA and graphics libraries in geforce-sriov's own folders under `lib/geforce-sriov`, with the files that tell the loader and the graphics stack where they are.
-- The runtime setup is gone after every reboot or power-off: the loaded `geforce_sriov` kernel module, the VFs, the vGPU types and the two register settings the module changes. The boot units apply it again at each boot.
+- Installed files stay until you run `uninstall`.
+- The runtime setup (the VFs and the vGPU types) is gone after every reboot or power-off, and the boot units apply it again at each boot.
+- `uninstall` removes what it installed and restores NVIDIA's original module, so you never need to reinstall the operating system. It keeps files you changed.
 
-`uninstall` removes the files it installed and restores NVIDIA's original module (`nvidia.ko`) from a backup that it verifies first, so you do not need to reinstall the operating system.
-It **keeps** files you changed and files it did not install, and it leaves NVIDIA's own driver install in place.
-[Changes and reversibility](docs/technical-reference.md#changes-and-reversibility) lists every item.
+[Changes and reversibility](docs/technical-reference.md#changes-and-reversibility) lists every file and setting.
 
 ## Disclaimer
 
