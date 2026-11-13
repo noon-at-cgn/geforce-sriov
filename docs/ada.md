@@ -26,7 +26,7 @@
 - Most Ada cards report 1 VF; `install` makes NVIDIA's driver accept 4.
 - The stock vGPU plugin stops an Ada vGPU from starting; the patched copy does not.
 
-The symbols, codes and byte details are in [Revisions](driver-patch.md#revisions).
+See [Revisions](driver-patch.md#revisions) for the symbols, codes and byte details.
 
 With the default type:
 
@@ -155,7 +155,7 @@ The desktop and the CUDA library are installed by [Host desktop](installation.md
 geforce-sriov has no switch to go back to fixed slots.
 To get them back, uninstall, power the machine off and on, and install the previous release (0.3.0).
 With another driver version and an Ada card, `install` stops when it cannot make the VM video memory change.
-The mechanism, the admission rule and the refusal text are in [Ada VM placement](technical-reference.md#ada-vm-placement).
+See [Ada VM placement](technical-reference.md#ada-vm-placement) for the mechanism, the admission rule and the refusal text.
 
 ## Host stack
 
@@ -217,7 +217,7 @@ sudo geforce-sriov activate                   # after a boot where the activate 
 geforce-sriov check                           # before every VM start
 ```
 
-Exit codes and `--type` are in [commands](configuration.md#commands).
+See [commands](configuration.md#commands) for exit codes and `--type`.
 
 - `activate` creates the VFs if they are missing, loads `nvidia_vgpu_vfio`, restarts `nvidia-vgpud` and `nvidia-vgpu-mgr` in order, re-probes each selected PF, sets the vGPU type on every VF, powers each VF on and reads the result back.
   Restart those daemons through `activate` only.
@@ -278,7 +278,7 @@ A matching type shows that the types were registered, not that `activate` ran in
 ## Guests and VMs
 
 geforce-sriov installs nothing in a guest.
-The steps shared by every card are in [Guests](installation.md#guests).
+See [Guests](installation.md#guests) for the steps shared by every card.
 The 16.9 drivers below come from an older vGPU release than the host driver.
 They are the confirmed guest drivers for Ada. The 16.9 branch is outside NVIDIA's supported matrix for this host driver.
 

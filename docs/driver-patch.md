@@ -316,13 +316,13 @@ Two optional builds add modules and need NVIDIA files beyond the host driver ([W
 
 | Build | Switch | Modules added | Needs |
 |---|---|---|---|
-| Display | `display=auto` or `display=on` with a boot display GPU selected (the card that shows the BIOS/UEFI screen at power-on), or `--display` with one | `nvidia-modeset`, `nvidia-drm` | the Linux guest driver package and NVIDIA's public kernel module source |
-| Host CUDA | `--host-cuda` (off by default) | `nvidia-uvm` | the Linux guest driver package |
+| Display | `display=auto` or `display=on` with a boot display GPU selected (the card that shows the BIOS/UEFI screen at power-on), or `--display` with one | `nvidia-modeset`, `nvidia-drm` | the Linux driver package and NVIDIA's public kernel module source |
+| Host CUDA | `--host-cuda` (off by default) | `nvidia-uvm` | the Linux driver package |
 
-Both builds need the Linux guest driver package; the display build also needs NVIDIA's public kernel module source:
+Both builds need the Linux driver package; the display build also needs NVIDIA's public kernel module source:
 
-- `--companion-file PATH` or `--companion-source DIR`: the Linux guest driver package, either the `.run` file or an extracted directory.
-  It is NVIDIA's Linux guest driver 580.159.03 (`NVIDIA-Linux-x86_64-580.159.03-grid.run`, from the vGPU software 19.5 download) or the GeForce Linux driver 580.159.03 (`NVIDIA-Linux-x86_64-580.159.03.run`).
+- `--companion-file PATH` or `--companion-source DIR`: the Linux driver package, either the `.run` file or an extracted directory.
+  It is NVIDIA's Linux driver 580.159.03: the vGPU guest driver from the vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`), or NVIDIA's GeForce Linux driver of that version.
 - `--nvkms-source PATH`: NVIDIA's public kernel module source at tag 580.159.03 ([open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules)), as a directory or a tarball. NVKMS is its display mode-setting part.
 
 Each of these declares its version, and `install` records it.
@@ -330,7 +330,7 @@ Each of these declares its version, and `install` records it.
 ```mermaid
 flowchart LR
     host["Host package<br/>nv-kernel.o_binary"] --> rev["Byte patches<br/>(plus display-idx39 for display)"]
-    second["Linux guest driver package"] --> stage["Staged source tree"]
+    second["Linux driver package"] --> stage["Staged source tree"]
     nvkms["NVKMS source<br/>(display only)"] --> stage
     rev --> stage
     stage --> mods["nvidia.ko<br/>nvidia-modeset, nvidia-drm<br/>nvidia-uvm"]
@@ -340,14 +340,14 @@ A display build differs from the plain build in these ways:
 
 - It makes a fourth object byte patch, `display-idx39`, on the output of the VF-count patch (or of the Ada placement change when an Ada card is selected).
   `geforce-sriov-patch display list|inspect INPUT|apply INPUT NEWOUTPUT|revert PATCHED NEWOUTPUT` runs it; `display list` prints the recorded digests.
-- It stages the source files of the Linux guest driver package and of the public source into a copy of the tree, and applies the source patches that ship in `driver-patches/`: `gpu-allow` (a GPU-ID allowlist for the DRM driver, DRM being the Linux graphics subsystem) and `allocation-threshold` (an allocation threshold).
-  When the version of the Linux guest driver package differs from the host driver's, the build also applies the third patch, `client-accept`, which lets the driver accept the programs of exactly that version; `modinfo` shows `gs_client_accept` for a build that has it ([What install adds](installation.md#what-install-adds)).
+- It stages the source files of the Linux driver package and of the public source into a copy of the tree, and applies the source patches that ship in `driver-patches/`: `gpu-allow` (a GPU-ID allowlist for the DRM driver, DRM being the Linux graphics subsystem) and `allocation-threshold` (an allocation threshold).
+  When the version of the Linux driver package differs from the host driver's, the build also applies the third patch, `client-accept`, which lets the driver accept the programs of exactly that version; `modinfo` shows `gs_client_accept` for a build that has it ([What install adds](installation.md#what-install-adds)).
   If that patch does not fit the source, the build goes ahead without it and NVIDIA's graphics libraries are not installed.
 - It does **not** use the eight-offset comparison, because the source patches change `.text` on purpose.
   A build of confirmed inputs must end at the recorded object chain digest, and the finished `nvidia.ko` must carry the display change; a display change admitted by its anchors is accepted and recorded as unconfirmed.
 - Its ABI check is the full one, with the sibling modules' own `Module.symvers` as a second symbol provider, and it requires `nvidia-modeset` to carry the NVKMS version of the public source.
 
-`install` records the result in `/var/lib/geforce-sriov/driver-build`, with the versions of the host package, the Linux guest driver package and the public kernel module source, and a confirmation value: `confirmed-inputs` when the host package, the Linux guest driver package, the source and every byte patch match the recorded digests and versions, and `unconfirmed` otherwise.
+`install` records the result in `/var/lib/geforce-sriov/driver-build`, with the versions of the host package, the Linux driver package and the public kernel module source, and a confirmation value: `confirmed-inputs` when the host package, the Linux driver package, the source and every byte patch match the recorded digests and versions, and `unconfirmed` otherwise.
 A host version other than 580.159.01 is recorded as unconfirmed, and `install` prints the best-effort notice for it.
 `status` shows the record.
 The manual path below covers the plain build only.

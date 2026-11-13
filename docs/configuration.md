@@ -14,9 +14,9 @@ The full reference follows below.
 - vGPU type (the size of each vGPU): set `type_ada=N` or `type_ampere=N` in the config.
   Stop the VMs, write `0` to `nvidia/current_vgpu_type` of every VF of the card, then run `sudo geforce-sriov activate`. No power cycle is needed ([Choosing a vGPU type](#choosing-a-vgpu-type)).
 - Display on or off for the boot display GPU: run `sudo ./geforce-sriov install --display` or `--no-display` from the source folder.
-  `--display` needs the Linux guest driver package and NVIDIA's public kernel module source ([What to download](installation.md#what-to-download)).
+  `--display` needs the Linux driver package and NVIDIA's public kernel module source ([What to download](installation.md#what-to-download)).
 - Host CUDA on or off: run `sudo ./geforce-sriov install --host-cuda` or `--no-host-cuda` from the source folder.
-  `--host-cuda` needs the Linux guest driver package ([What to download](installation.md#what-to-download)).
+  `--host-cuda` needs the Linux driver package ([What to download](installation.md#what-to-download)).
 - Applying a change: the switches and the VF count are read once, when the livepatch module loads at boot, so changing them takes a cold power cycle, **not** a reboot.
   A vGPU type change takes only `activate`. See [Turn features off](recovery.md#turn-features-off) for the switch for each symptom.
 
@@ -47,8 +47,8 @@ The configuration file holds your card selection, feature switches, VF count and
 | `type_ampere` | vGPU type ID | `525` | The same for an Ampere card |
 | `d3cold` | `off` | none (no consent) | Records consent to keep the selected laptop GPUs powered. Without it, `activate` refuses the run if a laptop GPU is selected. `install --disable-d3cold` writes the key; any value other than `off` is refused ([Consent](laptops.md#consent)) |
 | `display` | `auto`/`on`/`off` | `auto` | Build NVIDIA's display modules and hand the boot display GPU's console to them. They are built only when a selected GPU is the boot display, with `auto` and `on` alike; `off` never builds them ([Boot display GPU](installation.md#boot-display-gpu)) |
-| `host_cuda` | `on`/`off` | `off` | Build `nvidia-uvm` and install NVIDIA's CUDA library, so that CUDA programs can run on the host. Needs the Linux guest driver package ([Host CUDA](installation.md#host-cuda)) |
-| `host_desktop` | `auto`/`on`/`off` | `auto` | Install NVIDIA's graphics libraries for the host desktop. `auto` turns them on when the display build is in effect and the Linux guest driver package was given ([Host desktop](installation.md#host-desktop)) |
+| `host_cuda` | `on`/`off` | `off` | Build `nvidia-uvm` and install NVIDIA's CUDA library, so that CUDA programs can run on the host. Needs the Linux driver package ([Host CUDA](installation.md#host-cuda)) |
+| `host_desktop` | `auto`/`on`/`off` | `auto` | Install NVIDIA's graphics libraries for the host desktop. `auto` turns them on when the display build is in effect and the Linux driver package was given ([Host desktop](installation.md#host-desktop)) |
 
 The ceiling for `vfs` is the card's hardware default, except on an Ada card that reports 1.
 On those Ada cards, the VF-count revision of the host module sets the ceiling to 4.
