@@ -186,7 +186,7 @@ Host layouts (switches, shared buses, IOMMU groups, BAR space) are covered in
 
 The desktop workstation rows (`24b0`, `2571`, `27b1`, `27b2`, `28b0`) carry the same hidden SR-IOV block as the GeForce cards of their generation and are handled the same way.
 The laptop and embedded rows, including workstation parts, take the same path with added power guards; see [Laptop support](laptops.md).
-The Ada rows are explained in [Ada](ada.md).
+See [Ada](ada.md) for the Ada rows.
 
 ## Capability positions per generation
 

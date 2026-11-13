@@ -40,7 +40,7 @@ flowchart LR
     BEFORE ~~~ AFTER
 ```
 
-These terms appear throughout the documentation (the [glossary](docs/glossary.md) has more):
+These terms appear throughout the documentation (see the [glossary](docs/glossary.md) for more terms):
 
 | Term | Meaning |
 |---|---|
@@ -88,9 +88,9 @@ It does **not** write firmware (vBIOS), it makes **no** permanent hardware chang
 
 - Installed files stay until you run `uninstall`.
 - The runtime setup (the VFs and the vGPU types) is gone after every reboot or power-off, and the boot units apply it again at each boot.
-- `uninstall` removes what it installed and restores NVIDIA's original module, so you never need to reinstall the operating system. It keeps files you changed.
+- `uninstall` removes what it installed and restores NVIDIA's original module, so you do not need to reinstall the operating system. It keeps files you changed.
 
-[Changes and reversibility](docs/technical-reference.md#changes-and-reversibility) lists every file and setting.
+See [Changes and reversibility](docs/technical-reference.md#changes-and-reversibility) for every file and setting.
 
 ## Disclaimer
 
@@ -186,7 +186,7 @@ The second run checks every VF and completes any startup steps that did not run 
 
 Next, [create your VM](docs/installation.md#create-a-vm).
 On later boots, the boot units restore the VFs automatically.
-The [installation guide](docs/installation.md) covers each step and its expected output.
+See the [installation guide](docs/installation.md) for each step and its expected output.
 See [Uninstall](docs/installation.md#uninstall) to remove everything.
 
 To move from another version of geforce-sriov, uninstall that version first, power the machine off and on, then install this one.
@@ -249,7 +249,7 @@ You select it like any other card.
 `activate` hands the console to NVIDIA's display modules, so the console stays on, and `activate` refuses the card unless the installed build has those modules.
 `install` builds them when a selected GPU is the boot display.
 That needs NVIDIA's second driver package and NVIDIA's public kernel module source ([Boot display GPU](docs/installation.md#boot-display-gpu)).
-On a laptop, [Display](docs/laptops.md#display) says which display setups make the NVIDIA GPU the boot display.
+On a laptop, see [Display](docs/laptops.md#display) for which display setups make the NVIDIA GPU the boot display.
 
 ## Supported cards and driver versions
 

@@ -138,7 +138,7 @@ flowchart TD
 ## Guests and VMs
 
 geforce-sriov installs nothing in a guest.
-Use the drivers in the [supported stack](installation.md#supported-software-stack) and set `RMSetVgpuGspPluginOffloadMode=0` as [Guests](installation.md#guests) describes: a modprobe option in a Linux guest, a registry DWORD in a Windows guest.
+Use the drivers in the [supported stack](installation.md#supported-software-stack) and set `RMSetVgpuGspPluginOffloadMode=0` (see [Guests](installation.md#guests)): a modprobe option in a Linux guest, a registry DWORD in a Windows guest.
 
 Each VF backs one vGPU of the default type.
 Attach it as a plain VFIO device ([Create a VM](installation.md#create-a-vm)).

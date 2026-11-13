@@ -238,7 +238,7 @@ The tool's table has six rows:
 ## Byte patches
 
 The byte patches are the revisions of NVIDIA's host object and of the vGPU plugin copy that this page describes under [Revisions](#revisions).
-[Which revisions to make](#which-revisions-to-make) says which of them each host needs, and [Supported inputs](#supported-inputs) says which files `install` admits.
+See [Which revisions to make](#which-revisions-to-make) for which of them each host needs, and [Supported inputs](#supported-inputs) for which files `install` admits.
 
 ## Which revisions to make
 

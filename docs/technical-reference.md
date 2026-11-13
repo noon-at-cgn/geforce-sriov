@@ -9,7 +9,7 @@ Config file keys and parsing rules are in the [configuration reference](configur
 
 ## How it works
 
-The README's [How it works](../README.md#how-it-works) gives the short version, and [Capability positions per generation](devices.md#capability-positions-per-generation) explains the default of 4 VFs (virtual functions: the lightweight PCI devices SR-IOV adds to a card, each of which can back one vGPU).
+See the README's [How it works](../README.md#how-it-works) for the short version, and [Capability positions per generation](devices.md#capability-positions-per-generation) for the default of 4 VFs (virtual functions: the lightweight PCI devices SR-IOV adds to a card, each of which can back one vGPU).
 The full sequence has five steps:
 
 1. The `geforce_sriov` module, a livepatch built by DKMS (which rebuilds it for each new kernel), exposes the hidden SR-IOV feature of the cards you list to the kernel.
@@ -43,7 +43,7 @@ flowchart TD
 ## Changes and reversibility
 
 This section lists what the package changes, where each change lives and what ends it.
-The [README](../README.md#safety-and-reversibility) has the short version.
+See the [README](../README.md#safety-and-reversibility) for the short version.
 
 geforce-sriov is software only.
 It needs no hardware change, and it does **not** flash the ROM (the vBIOS), the card's firmware or anything else persistent on the card.
@@ -424,7 +424,7 @@ A power loss or a `SIGKILL` can stop it between any two of them, so the commit i
 4. The record is published last, and then the journal and `txn/` are removed.
 
 A run that finds a journal first finishes that commit from the staged files. When a staged file is gone, it puts back the files as they were from the copies in `txn/`; the earlier record was never touched, so it describes that state again.
-A file that is neither what the commit found nor what it built was changed by someone else since. In that case, and when a needed copy is missing, the run changes nothing, keeps the journal and stops ([Symptoms](recovery.md#symptoms) has the message and the two ways out).
+A file that is neither what the commit found nor what it built was changed by someone else since. In that case, and when a needed copy is missing, the run changes nothing, keeps the journal and stops (see [Symptoms](recovery.md#symptoms) for the message and the two ways out).
 With `--dry-run`, the script only reports that an interrupted install exists.
 
 ## status and install --dry-run

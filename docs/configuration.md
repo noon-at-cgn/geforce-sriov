@@ -18,7 +18,7 @@ The full reference follows below.
 - Host CUDA on or off: run `sudo ./geforce-sriov install --host-cuda` or `--no-host-cuda` from the source folder.
   `--host-cuda` needs the second NVIDIA driver package ([Host CUDA](installation.md#host-cuda)).
 - Applying a change: the switches and the VF count are read once, when the livepatch module loads at boot, so changing them takes a cold power cycle, **not** a reboot.
-  A vGPU type change takes only `activate`. [Turn features off](recovery.md#turn-features-off) lists the switch for each symptom.
+  A vGPU type change takes only `activate`. See [Turn features off](recovery.md#turn-features-off) for the switch for each symptom.
 
 ## Configuration file
 
@@ -473,7 +473,7 @@ Combining it with `--nvidia-source` or `--driver=skip` is a usage error (exit 2)
 
 By default, the package is only extracted (`sh PATH --extract-only`).
 NVIDIA's installer for the vGPU userspace runs only when you also pass `--accept-nvidia-license`, which records your acceptance of NVIDIA's licence.
-Both options are described in [One command from a clean host](installation.md#one-command-from-a-clean-host).
+See [One command from a clean host](installation.md#one-command-from-a-clean-host) for both options.
 
 ## Systemd units
 

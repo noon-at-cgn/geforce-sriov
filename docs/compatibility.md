@@ -5,8 +5,8 @@ Reports from other machines help establish which cards and hosts work.
 Failed and partially working setups are just as useful: choose *Does not work* or *Partially* in the form and say where it stopped.
 
 See [Supported cards](devices.md#status-of-every-row) for the status of every card and driver version.
-The [Ampere](ampere.md) and [Ada](ada.md) pages cover generation-specific details.
-[Community reports](community-reports.md) lists the setups people have reported so far.
+See the [Ampere](ampere.md) and [Ada](ada.md) pages for generation-specific details.
+See [Community reports](community-reports.md) for the setups people have reported so far.
 
 Reports are voluntary.
 The form takes a few minutes to complete, and only a few fields are required.

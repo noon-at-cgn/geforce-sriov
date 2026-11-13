@@ -235,7 +235,7 @@ See [Capability positions per generation](devices.md#capability-positions-per-ge
 
 Use the desktop guest setup for the card's generation ([Guests](installation.md#guests)).
 On Windows, `RMSetVgpuGspPluginOffloadMode=0` is a per-device setting.
-After changing the GPU identity, set it again as [Guests](installation.md#guests) describes.
+After changing the GPU identity, set it again (see [Guests](installation.md#guests)).
 
 ## Recovery
 

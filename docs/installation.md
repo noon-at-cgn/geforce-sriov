@@ -74,7 +74,7 @@ Have these ready before the first `setup`:
 - SSH access to the host from another machine, which you have tried once and which keeps the host reachable while the screen is blank;
 - a way to power-cycle the host (the power button, a smart plug or a remote management port).
 
-[What install --dry-run and status check](#what-install---dry-run-and-status-check) lists everything the tools need.
+See [What install --dry-run and status check](#what-install---dry-run-and-status-check) for everything the tools need.
 
 ### Supported software stack
 
@@ -271,7 +271,7 @@ Loading `nvidia` binds every NVIDIA card on the host; geforce-sriov cannot restr
 A mixed host (Ada and Ampere, see [Combining generations](devices.md#combining-generations)) must therefore list every card it will use, with one `--device` each.
 A card left out is bound by the driver but not activated, and the rebuilt `nvidia.ko` applies to it as well.
 
-`install` puts these on the host. [Install details](technical-reference.md#install-details) has the paths, and `uninstall` removes what `install` recorded.
+`install` puts these on the host. See [Install details](technical-reference.md#install-details) for the paths. `uninstall` removes what `install` recorded.
 
 - The CLI, the hook, the driver tools, the DKMS module source, the config and the systemd units, including the drop-ins for `nvidia-vgpud` and for VM autostart.
 - Patched copies of NVIDIA's module and plugin, and a backup of the stock module (not with `--driver=skip`).
