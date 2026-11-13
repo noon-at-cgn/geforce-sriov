@@ -37,15 +37,33 @@ The individual commands below are for manual operation and troubleshooting.
 
 ## Before you start
 
-- NVIDIA's vGPU host package for Linux KVM, proprietary flavour, host driver 580.159.01 (vGPU software 19.5), the confirmed version. Other versions are **not guaranteed to work**.
-  Obtain it from NVIDIA with your own entitlement.
+- NVIDIA's vGPU host driver for Linux KVM, proprietary flavour, host driver 580.159.01 (vGPU software 19.5), the confirmed version. Other versions are **not guaranteed to work**.
+  Obtain it from NVIDIA with your own entitlement: the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run` from the vGPU software 19.5 download.
   Either install it with DKMS, which rebuilds kernel modules for each new kernel, or have its `.run` file ready for `--driver-file` ([One command from a clean host](#one-command-from-a-clean-host)).
+- For host CUDA, the Linux guest driver package; for the display build on the boot display GPU, the Linux guest driver package and NVIDIA's public kernel module source ([What to download](#what-to-download)).
 - A card from the [device table](devices.md#generations). A [boot display GPU](#boot-display-gpu) is allowed; it needs the display modules.
 - On a laptop, read [Laptop support](laptops.md) first: system sleep must be blocked and NVIDIA's runtime power management turned off.
 - The IOMMU turned on in firmware (VT-d or AMD-Vi, plus *Above 4G decoding*) and in the kernel.
 - A vGPU licence setup of your own for the guests. Licensing is outside this project.
 - A way to power the machine off and on (IPMI, a smart plug or the power button), and SSH or a console
   to get back in.
+
+### What to download
+
+| Feature | What to download | Exact version | Needed when |
+|---|---|---|---|
+| vGPU host driver | NVIDIA vGPU host driver for Linux KVM, the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`, from the NVIDIA vGPU software 19.5 download (NVIDIA Licensing Portal) | 580.159.01 | Always |
+| Host CUDA | The Linux guest driver package: NVIDIA's Linux guest driver `.run` file `NVIDIA-Linux-x86_64-580.159.03-grid.run` from the same vGPU software 19.5 download, or NVIDIA's GeForce Linux driver `NVIDIA-Linux-x86_64-580.159.03.run` | 580.159.03 | You turn host CUDA on (`--host-cuda`) |
+| Host display and desktop on the boot display GPU | The Linux guest driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | A GPU you select is the boot display GPU. The desktop libraries come from the Linux guest driver package; the public kernel module source is used only for the display modules |
+
+What each input is used for:
+
+- The Linux guest driver package supplies NVIDIA's CUDA libraries (host CUDA), NVIDIA's graphics libraries (host desktop) and the source files that the display build adds to NVIDIA's kernel source.
+  Give it as a `.run` file (`--companion-file PATH`) or as an extracted directory (`--companion-source DIR`).
+  The version is read from the package, not from the file name, and a `.run` file is run to extract it, so use only a package you trust.
+  A file whose name states 580.159.03 but whose SHA-256 is not a recorded one is refused.
+- NVIDIA's public kernel module source supplies `nvidia-modeset` and `nvidia-drm` for the display build.
+  Give it as a tarball or a directory (`--nvkms-source PATH`).
 
 The host runs Linux with KVM and libvirt or QEMU. Install these prerequisites with your
 distribution's package manager:
@@ -62,7 +80,7 @@ Check these on the host before you run `setup`:
 - The `nouveau` driver is not loaded: `lsmod | grep nouveau` prints nothing. Otherwise put `blacklist nouveau` and `options nouveau modeset=0` in `/etc/modprobe.d/blacklist-nouveau.conf`, run `update-initramfs -u` and power-cycle.
 - The IOMMU is on: `ls /sys/kernel/iommu_groups` lists numbered folders. Otherwise turn on VT-d or AMD-Vi and *Above 4G decoding* in the BIOS/UEFI setup. `setup` only warns about it, and the VM start fails later.
 - Secure Boot is off: `mokutil --sb-state`.
-- If the card is the boot display (it is when it is the host's only GPU): `cat /sys/bus/pci/devices/<address>/boot_vga` prints `1`. Then the second NVIDIA driver package and NVIDIA's public kernel module source are needed ([Boot display GPU](#boot-display-gpu)).
+- If the card is the boot display (it is when it is the host's only GPU): `cat /sys/bus/pci/devices/<address>/boot_vga` prints `1`. Then the Linux guest driver package (580.159.03) and NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03) are needed ([What to download](#what-to-download)).
 
 ### Prepare a way back
 
@@ -145,7 +163,7 @@ Otherwise, pass one `--device BDF` per card, at most 32.
 You can select the boot display GPU like any other ([Boot display GPU](#boot-display-gpu)):
 
 - `setup` runs `install --dry-run` first, printed as `== install --dry-run`. A failure stops it with `Stopped: fix what the checks above name, then run setup again. Nothing changed.`
-- When a selected GPU is the boot display, the host console needs NVIDIA's display modules. `setup` asks for NVIDIA's second driver package and NVIDIA's public kernel module source. Without a terminal, or with `--no-prompt`, pass `--companion-file PATH` (or `--companion-source DIR`) and `--nvkms-source PATH`, or pass `--no-display`.
+- When a selected GPU is the boot display, the host console needs NVIDIA's display modules. `setup` asks for the path of the Linux guest driver package (580.159.03) and of NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03). Without a terminal, or with `--no-prompt`, pass `--companion-file PATH` (or `--companion-source DIR`) and `--nvkms-source PATH`, or pass `--no-display`.
 - If any selected GPU is a laptop GPU, `setup` then shows a D3cold notice and asks for consent to keep it powered; the default is no ([Consent](laptops.md#consent)).
   Answering yes passes `--disable-d3cold` to `install --dry-run` and `install`.
   `setup` exits 3 before installing anything if you decline, or if it cannot prompt (`--no-prompt` or no terminal) and `--disable-d3cold` was not given.
@@ -186,10 +204,10 @@ The flags below work on `install` directly as well.
 | `--accept-nvidia-license` | Accepts NVIDIA's licence and runs `sh PATH --silent --dkms --skip-module-load --kernel-module-type=proprietary` when the package's userspace is not already installed. The licence is `LICENSE` in the extraction. Without this flag, installation extracts the package, then refuses before other writes if userspace is missing and gives the manual installer command (`sh PATH --dkms --skip-module-load --kernel-module-type=proprietary`). |
 | `--nvidia-source DIR` | Uses a kernel source tree outside `/usr/src/nvidia-<version>`, such as an extracted `kernel/` directory. Cannot combine with `--driver-file`. |
 | `--driver=skip` | Leaves NVIDIA's module, plugin and modprobe option untouched. Use only after completing [the manual driver path](driver-patch.md#the-manual-path). |
-| `--display`, `--no-display` | Builds NVIDIA's display modules (`nvidia-modeset`, `nvidia-drm`) or leaves them out. By default they are built when a selected GPU is the boot display ([Boot display GPU](#boot-display-gpu)). `--companion-file PATH` or `--companion-source DIR` names NVIDIA's second driver package, and `--nvkms-source PATH` NVIDIA's public kernel module source; both are inputs of the display build. |
+| `--display`, `--no-display` | Builds NVIDIA's display modules (`nvidia-modeset`, `nvidia-drm`) or leaves them out. By default they are built when a selected GPU is the boot display ([Boot display GPU](#boot-display-gpu)). `--companion-file PATH` or `--companion-source DIR` names the Linux guest driver package, and `--nvkms-source PATH` NVIDIA's public kernel module source; both are inputs of the display build ([What to download](#what-to-download)). |
 | `--disable-d3cold` | Records D3cold consent as `d3cold=off` in the config so `activate` keeps the selected laptop GPUs powered ([Consent](laptops.md#consent)).<br><br>Requires at least one selected laptop GPU (exit 2 otherwise); a staged install (`--destdir`) records consent without this check. Passing `--device` without this flag removes consent from the config. |
-| `--host-cuda`, `--no-host-cuda` | Builds `nvidia-uvm` and installs NVIDIA's CUDA library, so CUDA programs can run on the host, or leaves them out. Off by default. Needs NVIDIA's second driver package (`--companion-file PATH` or `--companion-source DIR`). See [Host CUDA](#host-cuda). |
-| `--host-desktop`, `--no-host-desktop` | Installs NVIDIA's graphics libraries, so the host desktop is drawn by the GPU, or leaves them out. By default (`auto`) they are installed when the display build is in effect and the second driver package is given. See [Host desktop](#host-desktop). |
+| `--host-cuda`, `--no-host-cuda` | Builds `nvidia-uvm` and installs NVIDIA's CUDA library, so CUDA programs can run on the host, or leaves them out. Off by default. Needs the Linux guest driver package (`--companion-file PATH` or `--companion-source DIR`). See [Host CUDA](#host-cuda). |
+| `--host-desktop`, `--no-host-desktop` | Installs NVIDIA's graphics libraries, so the host desktop is drawn by the GPU, or leaves them out. By default (`auto`) they are installed when the display build is in effect and the Linux guest driver package is given. See [Host desktop](#host-desktop). |
 
 The package is extracted with `sh PATH --extract-only` into `/var/lib/geforce-sriov/nvidia/<version>/`.
 If its filename has no version, the directory uses the first 16 hex digits of its SHA-256 instead.
@@ -642,8 +660,8 @@ A host desktop on that GPU is drawn by it when `host_desktop` is on ([Host deskt
 Activation needs a build of NVIDIA's module with the display modules:
 
 - `install` builds them when a selected GPU is the boot display (`display=auto`).
-- The build needs NVIDIA's second driver package (`--companion-file PATH` or `--companion-source DIR`) and NVIDIA's public kernel module source (`--nvkms-source PATH`).
-  The second package is the Linux vGPU guest driver of version 580.159.03 from the vGPU software 19.5 download, or NVIDIA's GeForce driver of that version.
+- The build needs the Linux guest driver package (`--companion-file PATH` or `--companion-source DIR`) and NVIDIA's public kernel module source (`--nvkms-source PATH`).
+  The Linux guest driver package is NVIDIA's Linux guest driver of version 580.159.03 from the vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`), or NVIDIA's GeForce Linux driver of that version (`NVIDIA-Linux-x86_64-580.159.03.run`).
   The kernel module source is NVIDIA's `open-gpu-kernel-modules` tag 580.159.03, `https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz`.
   `setup` asks for both. `install --dry-run` names a missing input.
 - With `--no-display`, or with a build that has no display modules, `activate` refuses the boot display GPU before it releases anything.
@@ -666,9 +684,9 @@ Stop it by hand, or run `sudo geforce-sriov activate --stop-display-manager` aft
 - `nvidia-vgpud` refuses to start, or `modprobe nvidia` loads nothing: see
   [Symptoms](recovery.md#symptoms).
 
-## NVIDIA's second package and its licence
+## NVIDIA's Linux guest driver package and its licence
 
-NVIDIA's second driver package has its own licence, the one that came with your copy of the package.
+NVIDIA's Linux guest driver package has its own licence, the one that came with your copy of the package.
 
 - geforce-sriov ships, downloads and redistributes **no** file from this package.
 - When you pass `--companion-file` or `--companion-source`, `install` copies the files it needs, unmodified, from your copy into geforce-sriov's folders on your own host, for your own use.
@@ -702,11 +720,11 @@ flowchart LR
 You need:
 
 - the display build in effect: a selected GPU is the boot display and `display` is not `off`;
-- NVIDIA's second driver package (`--companion-file PATH` or `--companion-source DIR`);
+- the Linux guest driver package (`--companion-file PATH` or `--companion-source DIR`);
 - no other NVIDIA graphics driver on the host.
 
 The setting is `host_desktop=auto|on|off`, default `auto`. The options are `--host-desktop` and `--no-host-desktop`.
-`auto` is on when the display build is in effect, the second package is given and no other NVIDIA graphics driver is on the host.
+`auto` is on when the display build is in effect, the Linux guest driver package is given and no other NVIDIA graphics driver is on the host.
 Changing it needs `sudo ./geforce-sriov install` from the source folder, no rebuild and no reboot.
 
 ### What install adds
@@ -718,8 +736,8 @@ Changing it needs `sudo ./geforce-sriov install` from the source folder, no rebu
 No file that a distribution package owns is replaced, and NVIDIA's copies of libglvnd are not installed.
 The link in the `gbm` directory is the one new entry inside a directory that a package owns.
 
-NVIDIA's host driver 580.159.01 refuses libraries of another version, and the second package carries 580.159.03.
-The module build therefore carries a small source patch (`client_accept`) that lets the driver accept programs of exactly the second package's version.
+NVIDIA's host driver 580.159.01 refuses libraries of another version, and the Linux guest driver package carries 580.159.03.
+The module build therefore carries a small source patch (`client_accept`) that lets the driver accept programs of exactly the version of the Linux guest driver package.
 NVIDIA's own version check still runs and still requires the same major version.
 `modinfo` shows `gs_client_accept` for a build that has the patch.
 See [The host desktop](technical-reference.md#the-host-desktop) for the mechanism.
@@ -745,7 +763,7 @@ The desktop uses video memory on the boot display GPU: some hundred MiB, more wi
 
 - Another NVIDIA graphics driver is on the host: `install` warns, names the file it found, and installs no graphics libraries. Remove that driver, or use `--no-host-desktop`.
 - The login screen does not appear: log in on a text console or over SSH, run `sudo ./geforce-sriov install --no-host-desktop` in the source folder, then restart the display manager.
-- The libraries are of another version than the build accepts: `install` and `status` say so. Run `install` again with `--companion-file PATH` for the matching second package.
+- The libraries are of another version than the build accepts: `install` and `status` say so. Run `install` again with `--companion-file PATH` for the matching Linux guest driver package (580.159.03).
 - `activate` stops the display manager only with `--stop-display-manager`, and only when activation must unload or reload the display stack. Without that option it refuses while the display manager holds a selected GPU. A desktop on a GPU that is not selected does not cause this refusal. A process you started yourself that holds a selected GPU's device node does.
 
 ### Turn it off
@@ -758,14 +776,14 @@ The desktop uses video memory on the boot display GPU: some hundred MiB, more wi
 Host CUDA lets CUDA programs run on the host itself.
 It is off by default.
 
-You need NVIDIA's second driver package (`--companion-file PATH` or `--companion-source DIR`).
+You need the Linux guest driver package (`--companion-file PATH` or `--companion-source DIR`).
 `setup` asks `Build NVIDIA's CUDA module for the host too, so CUDA programs can run on the host? [y/N]`; the default is no.
 
 The setting is `host_cuda=on|off`, default `off`. The options are `--host-cuda` and `--no-host-cuda`.
 With it on, `install`:
 
 - builds `nvidia-uvm` together with NVIDIA's module;
-- installs NVIDIA's CUDA library from the second package into `<prefix>/lib/geforce-sriov/cuda/`, and `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` names that directory to the loader;
+- installs NVIDIA's CUDA library from the Linux guest driver package into `<prefix>/lib/geforce-sriov/cuda/`, and `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` names that directory to the loader;
 - writes `/etc/modprobe.d/geforce-sriov-uvm.conf` ([Modprobe files](#modprobe-files)).
 
 A CUDA library that belongs to another package is left alone.
@@ -891,7 +909,7 @@ For implementation details, see the [Technical reference](technical-reference.md
 | NVIDIA's units | `nvidia-vgpud.service` and `nvidia-vgpu-mgr.service` exist | `systemctl list-unit-files 'nvidia-vgpu*'` lists both. If not, see [below](#nvidias-vgpu-daemon-units) |
 | The card | In the device table, function `.0`, a PCI bridge directly above it, and no other device on its PCI bus | `./geforce-sriov devices`; `./geforce-sriov install --dry-run --device BDF` checks the rest |
 | Laptop power | On a laptop GPU:<br>D3cold consent is recorded as `d3cold=off`, or assessed as recorded when `--disable-d3cold` is given to `install --dry-run`.<br>The GPU answers a config read.<br>A file in `/etc/modprobe.d/` sets `options nvidia NVreg_DynamicPowerManagement=0`.<br>`sleep.target` is masked ([D3cold](laptops.md#d3cold)). | `grep d3cold /etc/geforce-sriov/config`; `grep -h NVreg_DynamicPowerManagement /etc/modprobe.d/*.conf`; `systemctl is-enabled sleep.target` prints `masked` |
-| Display build | A selected GPU that is the boot display needs the display modules. Installing them takes NVIDIA's second package and NVIDIA's public kernel module source (`--companion-file` or `--companion-source`, and `--nvkms-source`), or `--no-display` | `cat /sys/bus/pci/devices/<BDF>/boot_vga` prints `1` for the boot display |
+| Display build | A selected GPU that is the boot display needs the display modules. Installing them takes the Linux guest driver package and NVIDIA's public kernel module source (`--companion-file` or `--companion-source`, and `--nvkms-source`), or `--no-display` | `cat /sys/bus/pci/devices/<BDF>/boot_vga` prints `1` for the boot display |
 | Early loading | Nothing loads `nvidia` before the boot unit: not `/etc/modules`, `/etc/modules-load.d/` or the initramfs | `status` warns when it finds it |
 | Boot hold | No file in `/etc/modprobe.d/` holds `nvidia` back with `blacklist nvidia` and `install nvidia /bin/false`, because `activate` loads the driver itself | `grep -h nvidia /etc/modprobe.d/*.conf` |
 | GSP option | No file in `/etc/modprobe.d/` sets `NVreg_EnableGpuFirmware` to a value other than `0`; a file that sets `0` is noted, and the driver step keeps it | `grep -h NVreg_EnableGpuFirmware /etc/modprobe.d/*.conf` |

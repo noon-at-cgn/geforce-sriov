@@ -374,8 +374,8 @@ Staging records `--device` addresses unchecked, checks no devices, and rejects `
 ### Host CUDA libraries
 
 A CUDA program needs `nvidia-uvm` in the kernel and NVIDIA's CUDA library in userspace.
-NVIDIA's vGPU host package has no `libcuda`; the second package has it, in its own version (580.159.03 beside the 580.159.01 host driver, which works).
-With `host_cuda=on`, `install` therefore installs these files from the second package, as far as the package has them. They are the libraries NVIDIA's own installer installs for CUDA:
+NVIDIA's vGPU host package has no `libcuda`; the Linux guest driver package has it, in its own version (580.159.03 beside the 580.159.01 host driver, which works).
+With `host_cuda=on`, `install` therefore installs these files from the Linux guest driver package, as far as the package has them. They are the libraries NVIDIA's own installer installs for CUDA:
 
 | Library | What it is for |
 |---|---|
@@ -388,15 +388,15 @@ With `host_cuda=on`, `install` therefore installs these files from the second pa
 - They go into `<prefix>/lib/geforce-sriov/cuda/`, each with the link the loader follows (`libcuda.so.1`, for example) and `libcuda.so`, as NVIDIA's installer makes them.
 - `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` names that directory, and `install` runs `ldconfig`. No environment variable is needed.
 - The directory is the package's own, so a `libcuda` that another package or the user installed is never replaced. The loader searches the directories of `ld.so.conf.d` in the order of the file names, which puts this one before the distribution's; `install` and `status` ask `ldconfig -p` which `libcuda.so.1` programs get, and warn when it is another one.
-- `libnvidia-ml`, which `nvidia-smi` uses, is **not** taken from the second package: the host package has its own, and that library checks the driver's version.
+- `libnvidia-ml`, which `nvidia-smi` uses, is **not** taken from the Linux guest driver package: the host package has its own, and that library checks the driver's version.
 - Every file and link is in the install manifest with its digest or target. `uninstall` and `install --no-host-cuda` remove each one while it is unchanged; `rebuild` leaves them alone, because they do not depend on the kernel.
 
 ### Kept inputs and `rebuild`
 
-A display or host CUDA build needs the second NVIDIA driver package and, for the display, NVIDIA's public kernel module source, and a build for another kernel needs them again.
+A display or host CUDA build needs the Linux guest driver package and, for the display, NVIDIA's public kernel module source, and a build for another kernel needs them again.
 After a successful driver step, `install` therefore keeps them in `/var/lib/geforce-sriov/inputs/`, which is owned by root and not writable by group or others:
 
-- `companion/<name>`: the second driver package, a file or a tree as it was given.
+- `companion/<name>`: the Linux guest driver package, a file or a tree as it was given.
 - `nvkms/<name>`: the public source, an archive or a tree.
 - `index`: `key=value` lines with `nvidia_source` and, per input, its path, kind (file or directory), SHA-256 for a file, declared version and where it came from.
 - The host kernel tree is kept by path only, and only while every file in it belongs to root and is not writable by group or others. It is NVIDIA's own `/usr/src/nvidia-<version>` or the extraction `install` keeps under `/var/lib/geforce-sriov/nvidia/`.
@@ -707,7 +707,7 @@ The step applies the revision for Ada only or Ada with Ampere (the module is sha
 | Key | Meaning |
 |---|---|
 | `ada_placement` | `1` when the build carries the Ada placement change, `0` when not. A build for another value than the selection asks for is built again by the next `install` or `rebuild` |
-| `client_accept` | The version of the second package's libraries the build accepts ([The host desktop](#the-host-desktop)); absent when the patch is not in the build |
+| `client_accept` | The version of the Linux guest driver package's libraries the build accepts ([The host desktop](#the-host-desktop)); absent when the patch is not in the build |
 
 ### Admission
 
@@ -744,12 +744,12 @@ Ampere cards print no line.
 
 ## The host desktop
 
-With the display build in effect and the second NVIDIA package given, `install` can also put NVIDIA's graphics libraries on the host, so the desktop on the boot display GPU is drawn by the GPU.
+With the display build in effect and the Linux guest driver package given, `install` can also put NVIDIA's graphics libraries on the host, so the desktop on the boot display GPU is drawn by the GPU.
 Usage is in [Host desktop](installation.md#host-desktop); the same mechanism installs the host CUDA libraries ([Host CUDA](installation.md#host-cuda)).
 
 ### Files
 
-NVIDIA's host package has no graphics libraries, so they come from the second package.
+NVIDIA's host package has no graphics libraries, so they come from the Linux guest driver package.
 They go into directories of geforce-sriov's own, so no file of a distribution package is replaced:
 
 - `<prefix>/lib/geforce-sriov/gl/`: the libraries (GLX, EGL, GBM, Vulkan) and their soname links;
@@ -767,13 +767,13 @@ If another NVIDIA graphics driver owns files in these places, `install` installs
 
 ### The version check
 
-NVIDIA's host driver 580.159.01 refuses libraries of another version, and the second package is 580.159.03.
+NVIDIA's host driver 580.159.01 refuses libraries of another version, and the Linux guest driver package is 580.159.03.
 `driver-patches/client-accept.patch` is a source patch of `nvidia/nv.c`.
-It hands a strict version request, whose string is exactly the version of the second package, to NVIDIA's own check as a relaxed one.
+It hands a strict version request, whose string is exactly the version of the Linux guest driver package, to NVIDIA's own check as a relaxed one.
 That check still runs and still requires the same major version.
 Every other client is checked as before, and `nvidia-smi`, NVML and the vGPU manager send 580.159.01.
 The build records `client_accept=<version>`, and `modinfo` shows `gs_client_accept`.
-The patch is applied in a display build whose second package is of another version than the host's.
+The patch is applied in a display build whose Linux guest driver package is of another version than the host's.
 
 ### Which GPUs X opens
 

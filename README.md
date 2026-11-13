@@ -116,14 +116,24 @@ that results from using it.
 
 ## What you need
 
-- You provide NVIDIA's vGPU host driver package for Linux KVM, from NVIDIA with your own entitlement.
+- You provide NVIDIA's software from NVIDIA with your own entitlement: the vGPU host driver always, and for some features the Linux guest driver package and NVIDIA's public kernel module source (table below).
   The confirmed version is vGPU Software 19.5 with host driver 580.159.01. geforce-sriov does not
-  include, download or provide any NVIDIA software. Some features need a second NVIDIA driver package, which you also provide. It has its own
-  NVIDIA licence ([NVIDIA's second package and its licence](docs/installation.md#nvidias-second-package-and-its-licence)).
+  include, download or provide any NVIDIA software. The Linux guest driver package has its own
+  NVIDIA licence ([NVIDIA's Linux guest driver package and its licence](docs/installation.md#nvidias-linux-guest-driver-package-and-its-licence)).
 - A card from the [device table](docs/devices.md#generations) and a vGPU licence setup of your own.
 - A Linux host (x86_64, kernel 6.8 or later with livepatch support) with KVM and libvirt or QEMU,
   kernel headers, DKMS, a C compiler, `make` and `pciutils`, with the IOMMU on. Run `install --dry-run` to check
   all of this ([What install --dry-run and status check](docs/installation.md#what-install---dry-run-and-status-check)).
+
+What to download, and when you need it:
+
+| Feature | What to download | Exact version | Needed when |
+|---|---|---|---|
+| vGPU host driver | NVIDIA vGPU host driver for Linux KVM, the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`, from the NVIDIA vGPU software 19.5 download (NVIDIA Licensing Portal) | 580.159.01 | Always |
+| Host CUDA | The Linux guest driver package: NVIDIA's Linux guest driver `.run` file `NVIDIA-Linux-x86_64-580.159.03-grid.run` from the same vGPU software 19.5 download, or NVIDIA's GeForce Linux driver `NVIDIA-Linux-x86_64-580.159.03.run` | 580.159.03 | You turn host CUDA on (`--host-cuda`) |
+| Host display and desktop on the boot display GPU | The Linux guest driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | A GPU you select is the boot display GPU. The desktop libraries come from the Linux guest driver package; the public kernel module source is used only for the display modules |
+
+Pass the Linux guest driver package as a `.run` file (`--companion-file PATH`) or as an extracted directory (`--companion-source DIR`), and the public kernel module source as a tarball or a directory (`--nvkms-source PATH`).
 
 The versions geforce-sriov targets:
 
@@ -160,7 +170,8 @@ To remove geforce-sriov without installing a new version, do steps 1 to 3. Detai
 
 ### Install
 
-You need NVIDIA's vGPU host `.run` package from your NVIDIA entitlement, and a supported card.
+You need NVIDIA's vGPU host driver `.run` file (`NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`) from your NVIDIA entitlement, and a supported card.
+For the boot display GPU or host CUDA, also get the files in the table under [What you need](#what-you-need).
 
 ```sh
 make
@@ -171,11 +182,11 @@ sudo ./geforce-sriov setup    # second run, after it
 
 `setup` prompts for any required options you omitted:
 
-- The `.run` package path, when no NVIDIA driver is installed.
+- The path of the vGPU host driver `.run` file, when no NVIDIA driver is installed.
 - Acceptance of NVIDIA's licence.
 - The GPUs to use, when more than one qualifies.
-- NVIDIA's second driver package and kernel module source, if you select the boot display GPU.
-- Whether to build NVIDIA's CUDA module for the host too, so CUDA programs can run on the host. If you say yes, it needs the second driver package as well ([Host CUDA](docs/installation.md#host-cuda)).
+- The path of the Linux guest driver package (580.159.03) and of NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03), if you select the boot display GPU.
+- Whether to build NVIDIA's CUDA module for the host too, so CUDA programs can run on the host. If you say yes, it needs the Linux guest driver package as well ([Host CUDA](docs/installation.md#host-cuda)).
 - Consent to keep a laptop GPU powered when idle (D3cold off), if you select one ([Laptop support](docs/laptops.md#consent)).
 
 If a prerequisite is missing, `setup` stops and names the required action.
@@ -248,7 +259,7 @@ A value of `1` means the GPU is marked as the boot display.
 You select it like any other card.
 `activate` hands the console to NVIDIA's display modules, so the console stays on, and `activate` refuses the card unless the installed build has those modules.
 `install` builds them when a selected GPU is the boot display.
-That needs NVIDIA's second driver package and NVIDIA's public kernel module source ([Boot display GPU](docs/installation.md#boot-display-gpu)).
+That needs the Linux guest driver package (580.159.03) and NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03) ([Boot display GPU](docs/installation.md#boot-display-gpu)).
 On a laptop, see [Display](docs/laptops.md#display) for which display setups make the NVIDIA GPU the boot display.
 
 ## Supported cards and driver versions
