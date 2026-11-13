@@ -71,7 +71,7 @@ Have these ready before the first `setup`:
 
 - a backup of your VM configs and of any data you cannot recreate;
 - a bootable recovery medium, such as a USB installer for the host;
-- SSH access to the host from another machine, tested, which keeps the host reachable while the screen is blank;
+- SSH access to the host from another machine, which you have tried once and which keeps the host reachable while the screen is blank;
 - a way to power-cycle the host (the power button, a smart plug or a remote management port).
 
 [What install --dry-run and status check](#what-install---dry-run-and-status-check) lists everything the tools need.
