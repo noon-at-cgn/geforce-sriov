@@ -6,6 +6,7 @@ Failed and partially working setups are just as useful: choose *Does not work* o
 
 See [Supported cards](devices.md#status-of-every-row) for the status of every card and driver version.
 The [Ampere](ampere.md) and [Ada](ada.md) pages cover generation-specific details.
+[Community reports](community-reports.md) lists the setups people have reported so far.
 
 Reports are voluntary.
 The form takes a few minutes to complete, and only a few fields are required.
@@ -15,6 +16,11 @@ The form takes a few minutes to complete, and only a few fields are required.
 Run these commands on the host.
 Replace `0000:01:00.0` with your card's address from `lspci -nn | grep -i nvidia`.
 In a source checkout without an install, use `./geforce-sriov` instead of `geforce-sriov`.
+
+Two IDs identify your card:
+
+- A PCI ID such as `10de:2684` is `vendor:device`: `10de` is NVIDIA, and the device ID identifies the card model.
+- The subsystem ID identifies the board maker's variant of that card.
 
 | What | Command | What to copy |
 |---|---|---|
@@ -31,6 +37,10 @@ In a source checkout without an install, use `./geforce-sriov` instead of `gefor
 For a problem from the previous boot, use `-b -1` instead of `-b`; this requires a persistent journal.
 Without systemd's journal, `sudo dmesg | grep -E 'geforce_sriov|NVRM|AER'` shows the same lines for the current boot.
 See [Logs](recovery.md#logs) for other log sources.
+In those lines:
+
+- `NVRM` lines are NVIDIA driver messages.
+- `AER` lines are PCIe error reports.
 
 For each guest, note:
 

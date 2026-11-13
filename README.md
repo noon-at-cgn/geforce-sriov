@@ -278,7 +278,7 @@ See [Supported cards](docs/devices.md#generations) for the full list and [Ampere
 | [Boot display GPU](docs/installation.md#boot-display-gpu) | Sharing the card that shows the boot screen |
 | [Symptoms](docs/recovery.md#symptoms), [Recovery](docs/recovery.md) | Fixes for common problems, the one rule, the activation lock, and what not to do |
 | [Glossary](docs/glossary.md), [Technical reference](docs/technical-reference.md), [Identity hook](hook/README.md) | Terms, how each part works, how the hook works, and what the CLI does under the hood |
-| [Compatibility reports](docs/compatibility.md) | What to collect, what to remove, and what happens to a report |
+| [Compatibility reports](docs/compatibility.md), [Community reports](docs/community-reports.md) | How to report whether your hardware works, and the setups people have reported so far |
 | [Changelog](CHANGELOG.md) | The release notes |
 
 ## Related projects
