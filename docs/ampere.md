@@ -169,6 +169,35 @@ The guests see a vGPU profile called `RTXA6000-4Q`, not the GeForce name: geforc
 The Windows screenshot was taken in a guest with its own licence setup.
 Licensing is outside this project.
 
+## Performance: vGPU VM vs host
+
+The same PyTorch benchmark ran on one memory-modded RTX 3080 20GB in two places: on the host, using the card's physical GPU directly, and in a VM with one 4 GiB vGPU on the same card.
+Nothing else ran on the card.
+
+| Benchmark | Host (LXC, physical GPU) | VM (vGPU) | VM / host |
+|---|---|---|---|
+| FP32 matmul (TFLOPS) | 20.47 | 20.54 | 1.003 |
+| FP16 matmul, tensor cores (TFLOPS) | 58.35 | 58.54 | 1.003 |
+| Device memory copy (GB/s) | 681.7 | 704.4 | 1.033 |
+
+Each value is the median of three runs.
+A VM / host value above 1 means the VM was faster.
+On matmul, the vGPU in the VM performed within 1% of the host.
+The memory copy was 3% faster in the VM.
+The card's memory clock was 2.7% higher during the VM runs (9501 MHz against 9251 MHz), close to the memory-copy difference.
+
+Method:
+
+- Host: an LXC container on the Proxmox VE host, running CUDA on the card's physical GPU next to
+  NVIDIA's vGPU host driver 580.159.01.
+- VM: one 4 GiB vGPU (`RTXA6000-4Q`) with guest driver 580.159.03.
+- Both sides used the same Debian root file system, the same PyTorch environment, the same four
+  pinned host CPU cores and 8 GiB of memory.
+- Workloads: a 4096 × 4096 matrix multiply in FP32 and in FP16, and a 1 GiB copy within the GPU's memory.
+  Each was timed over a 15 s window, after one warm-up run, and its results were checked.
+- The SM clock was about 1905 MHz throughout, power stayed at the card's 320 W limit, and the peak
+  temperature was 66 °C, with no thermal throttling.
+
 ## Known limits
 
 - `vfs` accepts values from 1 to the card's ceiling (16 on Ampere and `28b0`, 4 on other Ada cards); NVIDIA's patched driver uses at most 4 VFs per card.

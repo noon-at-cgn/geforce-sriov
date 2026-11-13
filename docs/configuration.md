@@ -58,7 +58,6 @@ NVIDIA's patched driver uses at most 4 VFs per card.
 An unknown key is refused as a whole: `line N: unknown key 'KEY'`.
 A key that contains `vf` adds `; the VF count key is vfs (vfs=1..16, default 4)`.
 
-
 `install` and `install --dry-run` refuse a `vfs` above the ceiling and warn about a value above 4.
 
 The module's switches and VF count are fixed when it loads.

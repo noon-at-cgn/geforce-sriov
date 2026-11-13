@@ -152,6 +152,7 @@ With `ProbeAllGpus` set to false, which the installed X output-class file does, 
 The desktop and the CUDA library are installed by [Host desktop](installation.md#host-desktop) and [Host CUDA](installation.md#host-cuda).
 
 geforce-sriov has no setting that gives each VF a fixed range of video memory.
+To get the fixed slots of 0.3.0 back, uninstall, power the machine off and on, and install the previous release (0.3.0).
 With another driver version and an Ada card, `install` stops when it cannot make the VM video memory change.
 See [Ada VM placement](technical-reference.md#ada-vm-placement) for the mechanism, the admission rule and the refusal text.
 

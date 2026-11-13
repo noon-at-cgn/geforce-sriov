@@ -736,6 +736,8 @@ Ampere cards print no line.
   With 2112 MiB free in one piece a 2 GiB VM starts; split into two pieces of 1056 MiB it does not.
   A full or fragmented card refuses the VM, not the host program: `nvidia-vgpu-mgr` logs `Failed to alloc guest FB memory`, `NVOS status 0x51` and `vmiope_process_configuration failed with 0x1a`, and the VM starts again once memory is freed.
 - Every Ada VF shows placement `Not Applicable`.
+- There is no switch to go back.
+  To get fixed slots, uninstall, power cycle and install the previous release (0.3.0).
 
 ## The host desktop
 
