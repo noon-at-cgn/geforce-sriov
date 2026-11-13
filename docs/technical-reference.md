@@ -371,6 +371,62 @@ Staging records `--device` addresses unchecked, checks no devices, and rejects `
 `--sysfs-root` and `--driver-file` (exit 2). The target host is told to run
 `geforce-sriov install --dry-run`.
 
+### Host CUDA libraries
+
+A CUDA program needs `nvidia-uvm` in the kernel and NVIDIA's CUDA library in userspace.
+NVIDIA's vGPU host package has no `libcuda`; the second package has it, in its own version (580.159.03 beside the 580.159.01 host driver, which works).
+With `host_cuda=on`, `install` therefore installs these files from the second package, as far as the package has them. They are the libraries NVIDIA's own installer installs for CUDA:
+
+| Library | What it is for |
+|---|---|
+| `libcuda.so.<version>` | The CUDA driver library that every CUDA program loads |
+| `libnvidia-ptxjitcompiler.so.<version>` | Loaded by `libcuda` when a program gives it a kernel as PTX |
+| `libnvidia-nvvm.so.<version>`, `libnvidia-nvvm70.so.4` | Loaded by `libcuda` for NVVM IR and link-time optimisation |
+| `libnvidia-gpucomp.so.<version>` | Loaded by `libcuda` under exactly this name |
+| `libcudadebugger.so.<version>` | Loaded by `libcuda` when a CUDA debugger attaches |
+
+- They go into `<prefix>/lib/geforce-sriov/cuda/`, each with the link the loader follows (`libcuda.so.1`, for example) and `libcuda.so`, as NVIDIA's installer makes them.
+- `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` names that directory, and `install` runs `ldconfig`. No environment variable is needed.
+- The directory is the package's own, so a `libcuda` that another package or the user installed is never replaced. The loader searches the directories of `ld.so.conf.d` in the order of the file names, which puts this one before the distribution's; `install` and `status` ask `ldconfig -p` which `libcuda.so.1` programs get, and warn when it is another one.
+- `libnvidia-ml`, which `nvidia-smi` uses, is **not** taken from the second package: the host package has its own, and that library checks the driver's version.
+- Every file and link is in the install manifest with its digest or target. `uninstall` and `install --no-host-cuda` remove each one while it is unchanged; `rebuild` leaves them alone, because they do not depend on the kernel.
+
+### Kept inputs and `rebuild`
+
+A display or host CUDA build needs the second NVIDIA driver package and, for the display, NVIDIA's public kernel module source, and a build for another kernel needs them again.
+After a successful driver step, `install` therefore keeps them in `/var/lib/geforce-sriov/inputs/`, which is owned by root and not writable by group or others:
+
+- `companion/<name>`: the second driver package, a file or a tree as it was given.
+- `nvkms/<name>`: the public source, an archive or a tree.
+- `index`: `key=value` lines with `nvidia_source` and, per input, its path, kind (file or directory), SHA-256 for a file, declared version and where it came from.
+- The host kernel tree is kept by path only, and only while every file in it belongs to root and is not writable by group or others. It is NVIDIA's own `/usr/src/nvidia-<version>` or the extraction `install` keeps under `/var/lib/geforce-sriov/nvidia/`.
+
+`install` without input options passes `--retained` to the driver step, so a display or host CUDA build is made from the kept inputs, and `install --dry-run` and `setup` do not ask for an input that is kept.
+`geforce-sriov rebuild [--kernel RELEASE]` runs the same driver step, `geforce-sriov-driver --retained --kernel <release>` with `--display` or `--no-display` and `--host-cuda` or `--no-host-cuda` as the config selects, from the installed copy.
+The kernel hook runs `rebuild --kernel` for each new kernel ([After a kernel update](installation.md#after-a-kernel-update)).
+`--kernel` builds for an installed kernel that is not running yet, so one power cycle is enough after a kernel update.
+The driver step refuses before its first change (exit 3) when a kept input is missing, when its digest or declared version differs from what was kept, when the index does not say whether an input is a file or a directory, or when a kept host tree now has a file that another user owns or that group or others can write to. In each case the message names the `install` option that keeps the input again.
+`install` run from the installed copy, which has `geforce-sriov-driver` beside it and no source tree, refuses and names `rebuild`.
+
+The published record `driver-build` names one kernel.
+The record of every other kernel is kept in `/var/lib/geforce-sriov/driver-builds/<kernel>` and becomes the published record again when a run is for that kernel, so a rerun for a kernel whose build is installed finds its record and builds nothing, whichever kernel was built last.
+An `nvidia.ko` that the script built is never copied into `stock/<kernel>`: when the installed `nvidia.ko` is such a build and no backup of NVIDIA's own module exists, the run refuses before any change, because an uninstall would have nothing to put back.
+
+### Journaled commit of the driver build
+
+`geforce-sriov-driver`, the script that does the driver build, replaces several files at once: each built module, the plugin copy and its link, the modprobe file and the build record (`/var/lib/geforce-sriov/driver-build`).
+A power loss or a `SIGKILL` can stop it between any two of them, so the commit is journaled and the next run can tell what happened:
+
+1. Everything the commit needs goes under `/var/lib/geforce-sriov` first and is synced: the built modules, the patched plugin, and a copy of each file as it is before the commit (`txn/`).
+   These copies belong to this commit. The stock backups under `stock/` are a different set: they hold NVIDIA's own files for `--restore`.
+2. The journal `driver-build.gs-new` is written. It holds the record to publish and `journal_*` lines that name the staged files. From here on the commit is recoverable.
+3. Each file is installed under a temporary `.gs-new` name, synced and renamed, so an installed file is always complete, old or new. Modules of the earlier build that this build drops are touched last, so once they are touched the commit can always be finished and never has to be undone.
+4. The record is published last, and then the journal and `txn/` are removed.
+
+A run that finds a journal first finishes that commit from the staged files. When a staged file is gone, it puts back the files as they were from the copies in `txn/`; the earlier record was never touched, so it describes that state again.
+A file that is neither what the commit found nor what it built was changed by someone else since. In that case, and when a needed copy is missing, the run changes nothing, keeps the journal and stops ([Symptoms](recovery.md#symptoms) has the message and the two ways out).
+With `--dry-run`, the script only reports that an interrupted install exists.
+
 ## status and install --dry-run
 
 `status` shows the state of each selected card and names its next step, then prints the host checks that apply after install.
@@ -468,6 +524,8 @@ Only then is `activating` removed.
 
 The VF steps run after every card's re-probe, because re-probing one card's PF resets the other cards' VFs to `power/control=auto`.
 After any re-probe, stop the VMs and run `activate` again; this covers the whole host.
+A run on a host that is already active changes nothing when every VF is ready.
+Otherwise it only finishes what is missing (types, VF power, a display or CUDA module) without restarting the daemons or re-probing a GPU, so running VMs are not disturbed.
 `--dry-run` checks and prints the steps.
 
 The daemon restart is host-wide, and every selected PF must finish its re-probe before any VF type or power setting is written:

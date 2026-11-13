@@ -1,9 +1,59 @@
 # Recovery
 
-This page covers recovery when a card or host misbehaves.
-Read it before you need it.
-Start diagnosis with `geforce-sriov status`: it names each card's next step and ends with the host checks.
+This page helps you get a host working again when a card disappears, `activate` stops, or a VM does not start.
+Terms such as PF, VF, livepatch, the activation lock and cold power cycle are explained in the [Glossary](glossary.md).
+You need SSH or a console on the host, and a way to power the machine off and on (IPMI, a smart plug or the power button).
+Recovery never needs a reinstall of the operating system.
+The package gives you three ways back: runtime changes end with a power cycle, [Turn features off](#turn-features-off) switches single features off, and [`uninstall`](#remove-geforce-sriov) removes the package and puts NVIDIA's original driver module back from its backup.
+Read this page before you need it, and set up SSH access (plus netconsole, which sends the kernel log over the network, or a serial console if you have one) so you can read logs when the screen is dead.
 Before installing, run `geforce-sriov install --dry-run`.
+
+## If something goes wrong
+
+The most common problems and the first thing to try.
+Each links to the full explanation, and the [Symptoms](#symptoms) table below covers many more.
+
+| Problem | First fix |
+|---|---|
+| A card is missing from `lspci`, or the host does not answer | Power the machine fully off and on, **not** a reboot, and do **not** rescan the bus ([the one rule](#the-one-rule)) |
+| `activate` or the boot unit exits 5, or `status` says the activation lock is set | After a cold power cycle, run `geforce-sriov status`, then `sudo geforce-sriov activate --clear-lock` and `sudo geforce-sriov activate` ([The activation lock](#the-activation-lock)) |
+| After a kernel update, `status` shows a `kernel hook:` line, or `activate` refuses because `nvidia.ko` is not the build geforce-sriov installed | Run `sudo geforce-sriov rebuild --kernel <release>`, then power-cycle ([After a kernel update](installation.md#after-a-kernel-update)) |
+| A VM does not start, or the start fails with an error about the vGPU type | Run `geforce-sriov check`, put the VM on a lower VF or pick a smaller vGPU type ([Choosing a vGPU type](configuration.md#choosing-a-vgpu-type)) |
+| The guest driver fails (`RmInitAdapter failed` on Linux, Code 43 on Windows) | Install the vGPU guest driver for your card and set `RMSetVgpuGspPluginOffloadMode=0` in the guest ([Guests](installation.md#guests)) |
+| The screen stays blank after `activate` on the boot display GPU | Log in over SSH and follow the one rule, and do **not** rebind the display by hand ([The console of the boot display GPU](#the-console-of-the-boot-display-gpu)) |
+
+## Where to start
+
+Start with `geforce-sriov status`: it names each card's next step and ends with the host checks.
+If the host is unreachable or a card is missing from `lspci`, you cannot run it yet, so do a cold power cycle first.
+
+```mermaid
+flowchart TD
+    A["Something is wrong"] --> B{"Is the host reachable?"}
+    B -->|No| C["Do not rescan the bus.<br/>Cold power cycle"]
+    B -->|Yes| B2{"Is the card listed by lspci?"}
+    B2 -->|No| C
+    B2 -->|Yes| D["Run status"]
+    C --> D
+    D --> E{"Is the activation lock set (exit 5)?"}
+    E -->|Yes| F["Cold power cycle,<br/>then clear the activation lock"]
+    E -->|No| G["Find the message in Symptoms,<br/>fix it, run activate again"]
+    F --> G
+```
+
+### Reboot or power-off
+
+A reboot restarts the operating system without necessarily removing power from the card.
+A cold power cycle switches the machine off, so the card loses power and starts from a clean state.
+Several failures leave a card in a state that only a power loss clears, which is why this page keeps asking for one:
+
+| Situation | What you need | Why |
+|---|---|---|
+| A card is missing from `lspci`, or the host cannot be reached | Full power-off, then on | A GPU that stops answering config cycles (reads of its PCI config space, the register block that identifies and controls it) comes back only after a full power-off |
+| `activate` or the boot unit exits 5, or the activation lock is set | Full power-off, then on | The earlier activation stopped partway, so the state of the card is unknown |
+| You changed `vfs`, `ari` or `msix`, or `install` put a new patched NVIDIA module in place | Full power-off, then on | The `geforce_sriov` module fixes its parameters when it loads, and it must load before `nvidia` |
+| After `uninstall` | Full power-off, then on | The loaded modules and the cards keep their state until then |
+| `activate` refused or stopped before it removed a card (exit 3): a program holds the GPU, a VM still has a vGPU, or a display manager is in the way | No power cycle: fix it and run `activate` again | Nothing was changed for that card |
 
 ## The one rule
 
@@ -58,6 +108,15 @@ Keep SSH access, and netconsole or a serial console if available, so you can rea
 | `activate`: `type <N> is not in nvidia/creatable_vgpu_types …; nothing written. The driver keeps the vGPU types it registered first after a boot, so after a change of identity or professional counterpart, power the machine off and on` | NVIDIA's `nvidia_vgpu_vfio` keeps the type table of each GPU's first registration until the next boot. Neither a PF re-probe nor a daemon restart refreshes it, so after a change of identity or target the old table stays | Power the machine off and on, then run `activate` again |
 | `uninstall` exits 1 and prints `NVIDIA's module was not restored: …` | Restoring NVIDIA's `nvidia.ko`, plugin link or modprobe file did not complete, or `uninstall` refused to run `geforce-sriov-driver` because it changed since install | `uninstall` kept `geforce-sriov-driver` and every backup in `/var/lib/geforce-sriov/stock/`. The message gives the reason and the two ways to finish: fix the reason, then run `geforce-sriov-driver --restore`, or copy `/var/lib/geforce-sriov/stock/<kernel release>/nvidia.ko` over the installed `nvidia.ko` and run `depmod -a <kernel release>`; [Reverting](driver-patch.md#reverting) covers the plugin link and the modprobe file ([Remove geforce-sriov](#remove-geforce-sriov)) |
 | Guest GPU work stalls | The stock `nvidia.ko` is loaded (DKMS rebuilt it after an update) | Run `sudo geforce-sriov rebuild --kernel RELEASE` for this kernel ([After a kernel update](installation.md#after-a-kernel-update)); on the manual path re-apply the [driver patch](driver-patch.md#after-a-kernel-or-nvidia-driver-update) |
+| `rebuild` or `install`: `refused: NVIDIA's own module for <release> is not built yet (modinfo -k <release> -n nvidia finds none). Install the headers of that kernel, build NVIDIA's module with `dkms install nvidia/<version> -k <release>` …` | DKMS did not build NVIDIA's own module for that kernel, for example because its headers were missing. geforce-sriov patches NVIDIA's module, so that module must exist first. Nothing was changed | Install that kernel's headers, run `sudo dkms install nvidia/<version> -k <kernel>` (or `dkms autoinstall -k <kernel>`), then `sudo geforce-sriov rebuild --kernel <kernel>` |
+| `rebuild`: `refused: NVIDIA's second package that an earlier install kept is missing: <path>. NVIDIA's files are as they were. …`, or the same for `NVIDIA's public kernel module source`, or `… that an earlier install kept was changed since: …` | The copy of the second NVIDIA driver package or the kernel module source that an earlier install kept was deleted or altered. A kept file that was altered is **not** used or run. Nothing was changed (exit 3) | Run `sudo ./geforce-sriov install` in the source folder with the option the message names (`--companion-file PATH` or `--companion-source DIR`, or `--nvkms-source PATH`). That keeps the input again, and `rebuild` works afterwards |
+| `rebuild`: `refused: this build needs NVIDIA's second package, and no earlier install kept one …` | The config asks for the display or host CUDA build, but the install that built NVIDIA's module kept no second driver package. Nothing was changed | Run `sudo ./geforce-sriov install` in the source folder with `--companion-file PATH` (or `--companion-source DIR`) |
+| `install`: `refused, nothing changed: <bindir>/geforce-sriov is the installed copy, and install runs from the source folder it was built in. …` | `install` needs the source tree, which the installed copy does not carry | After a kernel update, run `sudo geforce-sriov rebuild`. To change the installation, run `sudo ./geforce-sriov install` in the source folder |
+| `install` or `rebuild`: `geforce-sriov-driver: refused: <module> is a module geforce-sriov built for <kernel> earlier, and … holds no backup of NVIDIA's own module, so there is nothing to put back at an uninstall. …` | The installed `nvidia.ko` is one geforce-sriov built, and its backup of NVIDIA's own module is missing, so a later `uninstall` could not restore it. Nothing was changed (exit 3) | Run the `dkms install --force nvidia/<version> -k <kernel>` command the message prints, then the command again |
+| `install`: `geforce-sriov-driver: refused: an earlier run was interrupted while it installed its files, and it can be neither completed nor undone: <reason>. Nothing was changed, and <journal> is kept. …` | A power loss or kill stopped the commit of `nvidia.ko`, the plugin copy and the record. The next run finishes or undoes it, but it refuses when a file was changed in the meantime, because it cannot tell which state is right | Check the file the reason names, or reinstall NVIDIA's vGPU host driver so that NVIDIA's own files are back. Then delete the journal the message names (`/var/lib/geforce-sriov/driver-build.gs-new`, the install's record of its file changes) and run `install` again |
+| `nvidia-vgpud` fails its start check | `check --daemon-ready` refused: the activation lock is set, a selected card is missing, its VFs are not all enabled and bound to `nvidia`, or a BAR is unassigned | Run `geforce-sriov check --daemon-ready` to read the reason, then `geforce-sriov activate` with no VM running |
+| No NVIDIA driver is loaded after a boot with `geforce_sriov.skip` | That switch skips both boot units, and the package keeps udev (the service that loads drivers for detected hardware) from loading `nvidia` | Run `modprobe nvidia` if you need the driver, or boot without the switch ([Turn features off](#turn-features-off)) |
+| The desktop or login screen does not start on the boot display GPU while the host desktop is off, and the X server log says it failed to load the `nvidia` module | An old `/etc/X11/xorg.conf`, for example one left by a desktop NVIDIA driver, names `Driver "nvidia"`, but NVIDIA's vGPU host package has no X driver, so X cannot start | Move the old `/etc/X11/xorg.conf` away and start the display manager again. X then picks its generic `modesetting` driver on its own and needs no configuration |
 | `<bdf> is not the GPU that was selected` (from `activate`, `check`, `check --daemon-ready` or the early boot unit; nothing was written to any GPU) | A different card sits at the address `install` recorded in `/var/lib/geforce-sriov/selection`, for example after a card was moved or replaced | Run the command the message prints to select the cards that are there now. Two identical boards cannot be told apart |
 | `<bdf> is the boot display GPU, and the installed build of NVIDIA's module has no display modules` (from `activate`) | The boot display GPU is selected, but the installed build was made without the display modules, so releasing the console would leave the host with none | Run one of the commands the message prints (the build again with the display modules, or `sudo geforce-sriov rebuild`), then power the machine off and on. Or select another GPU |
 | An Ada VM does not start. The vGPU manager log has `Failed to alloc guest FB memory`, `NVOS status 0x51` and `vmiope_process_configuration failed with 0x1a`, and the kernel `start failed. status: 0x1` | An Ada VM needs one contiguous free piece of video memory of its size, and the card has none: it is full or fragmented. With 2112 MiB free in one piece a 2 GiB VM starts; split into two pieces of 1056 MiB it does not ([VM video memory](ada.md#vm-video-memory)) | Stop or close the host programs that use that card's video memory, then start the VM again; it starts once memory is freed. A slot can no longer be chosen by hand |
@@ -74,6 +133,10 @@ After a manager restart or a re-probe of any card's PF (its physical function, t
 3. Run `activate` again.
 
 A udev rule or a service that writes `on` to the VFs is no replacement.
+
+Running `activate` on a host that is already active does not disturb running VMs.
+It changes nothing when every VF is ready, and otherwise it only sets the missing types and VF power state (or loads a missing display or CUDA module) without restarting the daemons or re-probing a GPU.
+After a run that stopped halfway, the leftover `/run/geforce-sriov/activating` file makes `activate` take the full path again.
 
 `activate` sets the activation lock before it removes a card and around each PF re-probe.
 If a PF does not come back to `nvidia`, it exits 5, leaves the lock set and powers none of that card's VFs; recover as in [The activation lock](#the-activation-lock).
@@ -140,6 +203,11 @@ A failure can leave the console released:
   The console stays released until the next boot.
   Do not rebind it by hand.
 
+While `activate` works on the boot display GPU, the monitor can go blank, and the display can stay blank until the next boot after a failure.
+SSH and the journal keep working, so run `geforce-sriov status` and read the journal from another machine.
+Stopping the display manager ends the running desktop session, so save your work first; the boot unit never stops it.
+Do not rebind the console or rescan the bus by hand.
+
 A card that does not come back follows [the one rule](#the-one-rule): cold power cycle, and do not rescan again.
 
 ## Logs
@@ -174,7 +242,8 @@ The wording of NVIDIA's and QEMU's messages can differ on other versions.
 
 To skip both boot units for one boot, add `geforce_sriov.skip` to the kernel command line for that boot.
 In GRUB, press `e` on the entry and append it to the `linux` line.
-Neither unit runs, and nothing else changes.
+Neither unit runs.
+That boot has no NVIDIA driver at all, for every NVIDIA GPU, because the package keeps udev from loading it: run `modprobe nvidia` if you need it.
 
 Each switch below lives in `/etc/geforce-sriov/config` and is read by the next `livepatch` and `activate` run:
 

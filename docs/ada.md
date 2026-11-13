@@ -287,6 +287,9 @@ They are the confirmed guest drivers for Ada. The 16.9 branch is outside NVIDIA'
 | Linux | 535.230.02 (vGPU 16.9) | `options nvidia NVreg_RegistryDwords="RMSetVgpuGspPluginOffloadMode=0"` in `/etc/modprobe.d/`. Without it the guest driver loops `RmInitAdapter failed! (0x22:0x65:897)` |
 | Windows | 539.19 (vGPU 16.9) | DWORD `RMSetVgpuGspPluginOffloadMode` = `0` in the adapter's class key and in `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm`. Without it the device shows Code 43 |
 
+A Windows guest on an Ada card can also use driver 582.53 (vGPU software 19.5), which runs CUDA.
+A Linux guest cannot use the 19.5 driver (580.159.03) for CUDA on an Ada card: it does not run CUDA in an Ada guest, so use 535.230.02.
+
 Each VF is passed to QEMU as a plain VFIO device, with the vGPU type already set on the VF and no mdev ([Create a VM](installation.md#create-a-vm)).
 The argument is the same on every host.
 On Proxmox VE it goes in a raw `args` line rather than `hostpci…,mdev=`:

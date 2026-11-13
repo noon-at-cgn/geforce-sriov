@@ -227,6 +227,14 @@ The tool's table has six rows:
   `ada revert` of a file admitted by its windows is refused; it needs the recorded digest.
 - `NEWOUTPUT` and the exit status follow [Usage](#usage).
 
+### The display and abi-check commands
+
+- `display list|inspect|apply|revert` handles the fourth object byte patch of a display build, `display-idx39` ([Display and host CUDA builds](#display-and-host-cuda-builds)).
+  `list` prints the recorded input and output digests of each recipe: `idx39-580.159.01` (input: the VF count result `946b27b8…`, output `83ce12ab…`) and `idx39-ada-placement-580.159.01` (input: the Ada placement result `20eaebca…`, output `48fd6ddd…`).
+- `abi-check` is the check `install` runs on every build.
+  It compares the `vermagic` of each `--module` with `--vermagic`, and, unless `--vermagic-only` is given, the stored symbol CRCs of each module against the core module (`--core`) and the kernel's `Module.symvers` (`--kernel-symvers`, the kernel's list of exported symbols with their CRCs).
+  `install` passes `--vermagic-only` for a plain build on a kernel without module versioning, because such a kernel stores no CRCs.
+
 ## Byte patches
 
 The byte patches are the revisions of NVIDIA's host object and of the vGPU plugin copy that this page describes under [Revisions](#revisions).
@@ -300,6 +308,48 @@ When there is no difference at all, the installed module already is this build.
 If the modprobe file (or another file that sets the option to `0`), the patched plugin copy and this kernel's backup of the stock module are in place (the backup differs from the build at exactly the offsets above), the step writes the record for this kernel and ends without a change to NVIDIA's files.
 A copy from an earlier install with the placement change only is replaced with the patched plugin copy.
 Otherwise it refuses, tells you to reinstall the stock module first, and names `--driver=skip`, which keeps the installed module as it is and installs the rest.
+
+## Display and host CUDA builds
+
+By default `install` builds only `nvidia.ko`.
+Two optional builds add modules from a second NVIDIA driver package:
+
+| Build | Switch | Modules added | Needs |
+|---|---|---|---|
+| Display | `display=auto` or `display=on` with a boot display GPU selected (the card that shows the BIOS/UEFI screen at power-on), or `--display` with one | `nvidia-modeset`, `nvidia-drm` | the second driver package and NVIDIA's public kernel module source |
+| Host CUDA | `--host-cuda` (off by default) | `nvidia-uvm` | the second driver package |
+
+Both builds need the second NVIDIA driver package; the display build also needs NVIDIA's public kernel module source:
+
+- `--companion-file PATH` or `--companion-source DIR`: the second driver package, either the `.run` file or an extracted directory.
+  It is the Linux vGPU guest driver 580.159.03 or the GeForce 580.159.03 package.
+- `--nvkms-source PATH`: NVIDIA's public kernel module source at tag 580.159.03 ([open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules)), as a directory or a tarball. NVKMS is its display mode-setting part.
+
+Each of these declares its version, and `install` records it.
+
+```mermaid
+flowchart LR
+    host["Host package<br/>nv-kernel.o_binary"] --> rev["Byte patches<br/>(plus display-idx39 for display)"]
+    second["Second package"] --> stage["Staged source tree"]
+    nvkms["NVKMS source<br/>(display only)"] --> stage
+    rev --> stage
+    stage --> mods["nvidia.ko<br/>nvidia-modeset, nvidia-drm<br/>nvidia-uvm"]
+```
+
+A display build differs from the plain build in these ways:
+
+- It makes a fourth object byte patch, `display-idx39`, on the output of the VF-count patch (or of the Ada placement change when an Ada card is selected).
+  `geforce-sriov-patch display list|inspect INPUT|apply INPUT NEWOUTPUT|revert PATCHED NEWOUTPUT` runs it; `display list` prints the recorded digests.
+- It stages the source files of the second driver package and of the public source into a copy of the tree, and applies the source patches that ship in `driver-patches/`: `gpu-allow` (a GPU-ID allowlist for the DRM driver, DRM being the Linux graphics subsystem) and `allocation-threshold` (an allocation threshold).
+  With the host desktop, the third patch, `client-accept`, lets the driver accept the programs of exactly the second package's version; `modinfo` shows `gs_client_accept` for a build that has it ([What install adds](installation.md#what-install-adds)).
+- It does **not** use the eight-offset comparison, because the source patches change `.text` on purpose.
+  For 580.159.01 it requires the patched object to have the recorded SHA-256 and the finished `nvidia.ko` to carry the display change.
+- Its ABI check is the full one, with the sibling modules' own `Module.symvers` as a second symbol provider, and it requires `nvidia-modeset` to carry the NVKMS version of the public source.
+
+`install` records the result in `/var/lib/geforce-sriov/driver-build`, with the versions of the host package, the second driver package and the NVKMS source, and a confirmation value: `confirmed-inputs` when the host package, the second package, the source and every byte patch match the recorded digests and versions, and `unconfirmed` otherwise.
+A host version other than 580.159.01 is recorded as unconfirmed, and `install` prints the best-effort notice for it.
+`status` shows the record.
+The manual path below covers the plain build only.
 
 ## After a kernel or NVIDIA driver update
 

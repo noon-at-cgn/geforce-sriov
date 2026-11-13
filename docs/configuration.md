@@ -3,6 +3,23 @@
 This page covers the configuration file, commands, systemd units and kernel module parameters.
 See [Configuration file](#configuration-file) for parsing and validation rules, and [Commands](#commands) for each command's complete option list.
 
+## Common changes
+
+The most frequent changes, each with the command to use.
+The full reference follows below.
+
+- VFs per card: set `vfs=N` in `/etc/geforce-sriov/config`, or run `sudo ./geforce-sriov install --vfs N` from the source folder, which writes it.
+  The default is 4, and the ceiling is the card's own count ([Configuration file](#configuration-file)).
+  Power the machine fully off and on afterwards.
+- vGPU type (the size of each vGPU): set `type_ada=N` or `type_ampere=N` in the config.
+  Stop the VMs, write `0` to `nvidia/current_vgpu_type` of every VF of the card, then run `sudo geforce-sriov activate`. No power cycle is needed ([Choosing a vGPU type](#choosing-a-vgpu-type)).
+- Display on or off for the boot display GPU: run `sudo ./geforce-sriov install --display` or `--no-display` from the source folder.
+  `--display` needs the second NVIDIA driver package and NVIDIA's public kernel module source ([Boot display GPU](installation.md#boot-display-gpu)).
+- Host CUDA on or off: run `sudo ./geforce-sriov install --host-cuda` or `--no-host-cuda` from the source folder.
+  `--host-cuda` needs the second NVIDIA driver package ([Host CUDA](installation.md#host-cuda)).
+- Applying a change: the switches and the VF count are read once, when the livepatch module loads at boot, so changing them takes a cold power cycle, **not** a reboot.
+  A vGPU type change takes only `activate`. [Turn features off](recovery.md#turn-features-off) lists the switch for each symptom.
+
 ## Configuration file
 
 The configuration file holds your card selection, feature switches, VF count and each generation's vGPU type.
@@ -301,6 +318,7 @@ They also cover what applies both before and after install: kernel livepatch sup
 
 `geforce-sriov activate` is the command to run after a boot.
 It acts on every Ada and Ampere card selected by `bdfs`.
+Running `activate` on a host that is already active does not disturb running VMs: it changes nothing when every VF is ready, and otherwise it only sets the missing types and VF power state (or loads a missing display or CUDA module) without restarting the daemons or re-probing a GPU.
 
 Options:
 
