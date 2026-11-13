@@ -116,14 +116,9 @@ that results from using it.
 
 ## What you need
 
-- You provide NVIDIA's software, from NVIDIA with your own entitlement (the right to download NVIDIA's vGPU software): the vGPU host driver always, and for some features NVIDIA's Linux driver package and NVIDIA's public kernel module source (table below).
-  The confirmed version is vGPU Software 19.5 with host driver 580.159.01: for this version geforce-sriov checks NVIDIA's files, and each file it produces from them, against recorded SHA-256 digests (see [Supported inputs](docs/driver-patch.md#supported-inputs)). geforce-sriov does not
-  include, download or provide any NVIDIA software. The Linux driver package has its own
-  NVIDIA licence ([NVIDIA's Linux driver package and its licence](docs/installation.md#nvidias-linux-driver-package-and-its-licence)).
-- A card from the [device table](docs/devices.md#generations) and a vGPU licence setup of your own.
-- A Linux host (x86_64, kernel 6.8 or later built with livepatch support, `CONFIG_LIVEPATCH`: the kernel feature that replaces functions of the running kernel, which the `geforce_sriov` kernel module uses; see the [glossary](docs/glossary.md#livepatch)) with KVM and libvirt or QEMU,
-  kernel headers, DKMS, a C compiler, `make` and `pciutils`, with the IOMMU on. Run `install --dry-run` to check
-  all of this ([What install --dry-run and status check](docs/installation.md#what-install---dry-run-and-status-check)).
+- A card from the [device table](docs/devices.md#generations), and a vGPU licence setup of your own.
+- A Linux host (x86_64) with KVM and libvirt or QEMU, the IOMMU on, and a kernel 6.8 or later with livepatch support (see the [glossary](docs/glossary.md#livepatch)). `install --dry-run` checks everything else it needs (kernel headers, DKMS, a C compiler; see [What install --dry-run and status check](docs/installation.md#what-install---dry-run-and-status-check)).
+- NVIDIA's files from the table below, downloaded with your own NVIDIA entitlement (the right to download NVIDIA's vGPU software). geforce-sriov does not include or download any NVIDIA software.
 
 What to download, and when you need it:
 
@@ -145,13 +140,7 @@ The versions geforce-sriov targets:
 | Guest driver setting (required) | `RMSetVgpuGspPluginOffloadMode=0`, a setting of NVIDIA's guest driver: a modprobe option in a Linux guest, a registry value in a Windows guest. Without it the guest driver fails (`RmInitAdapter failed` on Linux, Code 43 on Windows) | Same |
 | Default vGPU type | 525, RTXA6000-2Q, 2048 MiB | 942, RTX6000-Ada-2Q, 2048 MiB |
 
-Use the host and guest driver versions in this table.
-Host driver 580.159.01 is the confirmed version.
-Another host driver version is **not guaranteed to work**.
-With another host driver version, `install` still builds when it finds each byte sequence it changes exactly once in NVIDIA's files. Such a build is recorded as unconfirmed and is **not guaranteed to work**; `install` says so first, and `setup` asks you before it continues (the default answer is no; `--allow-unsupported-driver` answers yes).
-With an Ada card selected, `install` stops when it cannot make the change that lets an Ada VM take any free video memory when it starts ([VM video memory](docs/ada.md#vm-video-memory)).
-Other guest driver versions are **not guaranteed to work** either.
-See [Supported software stack](docs/installation.md#supported-software-stack) for the full table and [Guests](docs/installation.md#guests) for guest setup.
+Use these versions. Other host or guest driver versions are **not guaranteed to work**; see [Supported software stack](docs/installation.md#supported-software-stack) for what `install` does with another version and [Guests](docs/installation.md#guests) for guest setup.
 
 ## Quick start
 

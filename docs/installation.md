@@ -64,8 +64,9 @@ What each input is used for:
   A file whose name states 580.159.03 but whose SHA-256 is not a recorded one is refused.
 - NVIDIA's public kernel module source supplies `nvidia-modeset` and `nvidia-drm` for the display build.
   Give it as a tarball or a directory (`--nvkms-source PATH`).
+- The Linux driver package has its own NVIDIA licence; see [NVIDIA's Linux driver package and its licence](#nvidias-linux-driver-package-and-its-licence).
 
-The host runs Linux with KVM and libvirt or QEMU. Install these prerequisites with your
+The host runs Linux (x86_64, kernel 6.8 or later built with livepatch support, `CONFIG_LIVEPATCH`: the kernel feature that replaces functions of the running kernel, which the `geforce_sriov` kernel module uses; see the [glossary](glossary.md#livepatch)) with KVM and libvirt or QEMU. Install these prerequisites with your
 distribution's package manager:
 
 - kernel headers for the running kernel release
@@ -121,8 +122,8 @@ flowchart TD
     P -->|No| R
 ```
 
-- With another host driver version, `install` prints that the version is not guaranteed to work and carries on with a best-effort build. Its input and safety checks still apply ([Supported inputs](driver-patch.md#supported-inputs)).
-  `setup` asks first. The default answer is no, and `--allow-unsupported-driver` answers yes. 580.159.01 is the only confirmed version.
+- With another host driver version, `install` prints that the version is not guaranteed to work and carries on with a best-effort build: it builds when it finds each byte sequence it changes exactly once in NVIDIA's files, and records the build as unconfirmed. Its input and safety checks still apply ([Supported inputs](driver-patch.md#supported-inputs)).
+  `setup` asks first. The default answer is no, and `--allow-unsupported-driver` answers yes. 580.159.01 is the only confirmed version: for it geforce-sriov checks NVIDIA's files, and each file it produces from them, against recorded SHA-256 digests.
 - With an Ada card selected, `install` stops on a host driver version in which it cannot make the VM video memory change ([VM video memory](ada.md#vm-video-memory)). It does not stop when only Ampere cards are selected.
 - With another host driver version loaded, `status`, `check` and `activate` print `NVIDIA's driver X is not guaranteed to work; confirmed versions: 580.159.01.` and carry on. In `status` this is an ordinary line and does not change the exit status.
   This holds on the manual path (`--driver=skip`) too.
