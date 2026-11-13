@@ -322,7 +322,7 @@ Two optional builds add modules and need NVIDIA files beyond the host driver ([W
 Both builds need the Linux driver package; the display build also needs NVIDIA's public kernel module source:
 
 - `--companion-file PATH` or `--companion-source DIR`: the Linux driver package, either the `.run` file or an extracted directory.
-  It is NVIDIA's Linux driver 580.159.03: the vGPU guest driver from the vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`), or NVIDIA's GeForce Linux driver of that version.
+  It is NVIDIA's Linux driver 580.159.03: the vGPU guest driver from the vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`), or NVIDIA's GeForce Linux driver (`NVIDIA-Linux-x86_64-580.159.03.run` from `https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/`).
 - `--nvkms-source PATH`: NVIDIA's public kernel module source at tag 580.159.03 ([open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules)), as a directory or a tarball. NVKMS is its display mode-setting part.
 
 Each of these declares its version, and `install` records it.
