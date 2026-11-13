@@ -17,8 +17,16 @@ RequiresMountsFor=/var/lib/geforce-sriov @BINDIR@
 Type=oneshot
 ExecStart=@BINDIR@/geforce-sriov activate --boot
 RemainAfterExit=yes
-# Allows the bounded per-card operations and service startup to complete.
-TimeoutStartSec=600
+# TimeoutStartSec is written by install: an upper bound of activation, the sum of its own limits
+# (every wait, write and process at its limit, per selected card and VF; at least 900 s). The
+# waiting loops end on elapsed time, so activation ends through its own limits before systemd does,
+# even on a systemd that ignores the extension below (the manual names only Type=notify; measured on
+# systemd 257.13 only). Normal activation takes seconds per card; the value matters only in a real
+# hang. The selection and the VF count change through install, which rewrites this unit.
+# Before each step that can wait, the CLI also sends EXTEND_TIMEOUT_USEC (that step's own limit
+# plus a margin) to the notify socket.
+NotifyAccess=main
+TimeoutStartSec=@START_TIMEOUT@
 StandardOutput=journal+console
 StandardError=journal+console
 

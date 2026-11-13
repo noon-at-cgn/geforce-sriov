@@ -3,6 +3,7 @@
  * file whose whole-file SHA-256 was measured before or after the revision. */
 #include "ada.h"
 #include "elf_reader.h"
+#include "insn_find.h"
 #include "patch.h"
 #include <stdarg.h>
 #include <stddef.h>
@@ -42,7 +43,13 @@ static const struct gs_ada_revision revisions[] = {
 	 "580.159.01",
 	 "7ddfad458bbfdb0c4d6902a9e045bd15c84f63aea19314f3d3a60967224b73c6",
 	 "aa4fdeb5288b5e56e7d4972466813d78e10cfb428fcf62fb53b84fec718cf07c",
-	 0xa5f28, 6, {0x8b, 0xbb, 0xd0, 0x29, 0x00, 0x00}, {0xbf, 0x04, 0x00, 0x00, 0x00, 0x90}, 1, NULL, 0}
+	 0xa5f28, 6, {0x8b, 0xbb, 0xd0, 0x29, 0x00, 0x00}, {0xbf, 0x04, 0x00, 0x00, 0x00, 0x90}, 1, NULL, 0},
+	{"ada-placement",
+	 "nvidia host kernel object (580.159.01, proprietary, CPU-side mode); input state is the final object of the plain chain; output state stores 0 instead of 1 as homogeneousPlacementSupported (the immediate of `movb $0x1,0x134c3a(%rsi,%rax,1)` becomes `movb $0x0,...` in _nv042355rm), so an Ada VM takes one contiguous free piece of video memory when it starts; applied only when an Ada card is selected",
+	 "580.159.01",
+	 "946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29",
+	 "20eaebcac4f5220d21f64bcd5145143abe8f806a25cb9e249088a1b98df7d157",
+	 0xd3a86, 1, {0x01}, {0x00}, 1, "_nv042355rm", 0x7f6}
 };
 #define REVISION_COUNT (sizeof(revisions) / sizeof(revisions[0]))
 
@@ -233,7 +240,10 @@ struct plugin_site {
 	unsigned char new_bytes[16];
 };
 
-enum { GS_ADA_ABSENT = 1 };
+/* ABSENT: the row has no locator for this input. NOTFOUND: the row's window is not in .text. It
+ * refuses a forward step when no row is located or a later row is; it never refuses the rows
+ * before it in the chain, since another build may hold other code there. */
+enum { GS_ADA_ABSENT = 1, GS_ADA_NOTFOUND = 2 };
 
 static int32_t get_i32(const unsigned char *p)
 {
@@ -950,6 +960,65 @@ static int locate_vf(const struct obj_ctx *c, struct plugin_site *out, char *err
 	return 0;
 }
 
+/* The code window of the ada-placement row: `head` bytes of unchanged code, then the row's changed
+ * bytes (its `width` bytes), then `tail` bytes of unchanged code. The head and the tail make the
+ * window unique. The window is searched in all of .text, in its stock form and in its patched form. */
+static const struct {
+	unsigned char head[24];
+	size_t head_len;
+	unsigned char tail[8];
+	size_t tail_len;
+} placement_window = {
+	/* imul $0x134f58,0x8(%rbp),%rax; mov 0x0(%rbp),%rsi; movb $imm,0x134c3a(%rsi,%rax,1); jmp */
+	{ 0x48, 0x69, 0x45, 0x08, 0x58, 0x4f, 0x13, 0x00, 0x48, 0x8b, 0x75, 0x00,
+	  0xc6, 0x84, 0x06, 0x3a, 0x4c, 0x13, 0x00 }, 19,
+	{ 0xe9, 0xd1, 0xf8, 0xff }, 4
+};
+
+/* 0 located, -1 refused, GS_ADA_NOTFOUND when the window is not in .text, GS_ADA_ABSENT when the
+ * row cannot carry a window. The whole .text is searched, so the build's function names do not
+ * matter; the containing function, when a symbol holds the match, is reported as information. */
+static int locate_placement(const struct gs_ada_revision *r, const struct obj_ctx *c,
+			    struct plugin_site *out, char *err, size_t errlen)
+{
+	struct gs_insn_scope scope = { GS_INSN_SCOPE_TEXT, NULL };
+	struct gs_insn_match m[2];
+	unsigned char pat[2][32], mask[32];
+	size_t head = placement_window.head_len;
+	size_t len = head + r->width + placement_window.tail_len, k;
+	int rc[2];
+
+	if (r->width == 0 || len > sizeof(pat[0]))
+		return GS_ADA_ABSENT;
+
+	memset(mask, 0xff, sizeof(mask));
+	for (k = 0; k < 2; k++) {
+		memcpy(pat[k], placement_window.head, head);
+		memcpy(pat[k] + head, k == 0 ? r->old_bytes : r->new_bytes, r->width);
+		memcpy(pat[k] + head + r->width, placement_window.tail, placement_window.tail_len);
+		rc[k] = gs_insn_find_unique(c->e, pat[k], mask, len, &scope, &m[k], err, errlen);
+		if (rc[k] == GS_INSN_ERR)
+			return -1;
+	}
+	if (rc[0] == GS_INSN_MULTIPLE || rc[1] == GS_INSN_MULTIPLE || (rc[0] == GS_INSN_FOUND && rc[1] == GS_INSN_FOUND))
+		return fail(err, errlen, "unique: %zu windows of %s in .text (want 1)", m[0].count + m[1].count,
+			    r->name);
+	if (rc[0] == GS_INSN_NONE && rc[1] == GS_INSN_NONE) {
+		fail(err, errlen, "window: the code window of %s was not found in .text", r->name);
+		return GS_ADA_NOTFOUND;
+	}
+	k = rc[0] == GS_INSN_FOUND ? 0 : 1;
+	out->site = m[k].file_offset + head;
+	out->state = (int)k;
+	out->width = r->width;
+	out->divisor = 0;
+	memcpy(out->old_bytes, r->old_bytes, r->width);
+	memcpy(out->new_bytes, r->new_bytes, r->width);
+	out->function = m[k].func_name;
+	out->function_offset = m[k].func_name ? m[k].match_offset + head : 0;
+	return 0;
+}
+
 /* One row's structural locator, when one has been established for it. */
 static int locate(const struct gs_ada_revision *r, const unsigned char *data, size_t size,
 		  struct plugin_site *out, char *err, size_t errlen)
@@ -957,7 +1026,8 @@ static int locate(const struct gs_ada_revision *r, const unsigned char *data, si
 	struct gs_elf e;
 	Elf64_Ehdr h;
 
-	if (strcmp(r->name, "module-gate") == 0 || strcmp(r->name, "vf-count") == 0) {
+	if (strcmp(r->name, "module-gate") == 0 || strcmp(r->name, "vf-count") == 0 ||
+	    strcmp(r->name, "ada-placement") == 0) {
 		struct obj_ctx ctx;
 
 		/* Only a relocatable object can carry these sites. */
@@ -969,8 +1039,11 @@ static int locate(const struct gs_ada_revision *r, const unsigned char *data, si
 			return GS_ADA_ABSENT;
 		if (obj_open(data, size, &e, &ctx, err, errlen))
 			return -1;
-		return strcmp(r->name, "module-gate") == 0 ? locate_gate(&ctx, out, err, errlen)
-							   : locate_vf(&ctx, out, err, errlen);
+		if (strcmp(r->name, "module-gate") == 0)
+			return locate_gate(&ctx, out, err, errlen);
+		if (strcmp(r->name, "vf-count") == 0)
+			return locate_vf(&ctx, out, err, errlen);
+		return locate_placement(r, &ctx, out, err, errlen);
 	}
 	if (strcmp(r->name, "plugin-mixed") != 0 && strcmp(r->name, "plugin-div4") != 0)
 		return GS_ADA_ABSENT;
@@ -993,6 +1066,8 @@ int gs_ada_admit_in(const struct gs_ada_revision *rows, size_t count, const unsi
 	struct gs_ada_found digest = { 0 };
 	struct plugin_site site = { 0 }, other_site = { 0 };
 	const struct gs_ada_revision *pick = NULL, *known = NULL, *located = NULL, *refused = NULL, *other = NULL;
+	const struct gs_ada_revision *missing = NULL;
+	char missing_reason[256] = { 0 };
 	const struct gs_ada_revision *bad_div = NULL;
 	unsigned bad_divisor = 0;
 	char detail[256] = { 0 }, reason[256] = { 0 }, first_reason[256] = { 0 }, hash[65];
@@ -1038,6 +1113,13 @@ int gs_ada_admit_in(const struct gs_ada_revision *rows, size_t count, const unsi
 		rc = locate(&rows[i], data, size, &s, reason, sizeof(reason));
 		if (rc == GS_ADA_ABSENT)
 			continue;
+		if (rc == GS_ADA_NOTFOUND) {
+			if (!missing) {
+				missing = &rows[i];
+				snprintf(missing_reason, sizeof(missing_reason), "%s", reason);
+			}
+			continue;
+		}
 		if (rc) {
 			if (!refused) {
 				refused = &rows[i];
@@ -1068,6 +1150,10 @@ int gs_ada_admit_in(const struct gs_ada_revision *rows, size_t count, const unsi
 	if (bad_div)
 		return fail(err, errlen, "anchor ada.%s: installed divisor %u is not the recorded 4", bad_div->name,
 			    bad_divisor);
+	/* A window that is missing refuses a forward step when no row is located or when the located
+	 * row comes after it in the chain: the chain cannot be followed past a missing step. */
+	if (missing && mode == GS_ADA_FORWARD && (!located || missing < located))
+		return fail(err, errlen, "anchor ada.%s: %s", missing->name, missing_reason);
 	if (located) {
 		if (mode == GS_ADA_BACKWARD)
 			return fail(err, errlen, "anchor ada.%s: structural revert cannot restore the replaced "
@@ -1091,6 +1177,8 @@ int gs_ada_admit_in(const struct gs_ada_revision *rows, size_t count, const unsi
 		return fail(err, errlen, "anchor ada.%s: %s", other->name,
 			    mode == GS_ADA_FORWARD ? "already at output state" : "not at output state");
 	}
+	if (missing)
+		return fail(err, errlen, "anchor ada.%s: %s", missing->name, missing_reason);
 	return fail(err, errlen, "anchor ada.unknown: no recipe matches this input and no structural locator "
 				 "is implemented for it");
 }

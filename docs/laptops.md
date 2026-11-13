@@ -1,40 +1,25 @@
 # Laptop support
 
-This page covers laptops with an NVIDIA Ampere or Ada GPU.
-They follow the same steps as desktop cards, plus extra power handling: a laptop powers an idle GPU off to save battery, and that would wipe the SR-IOV setup, so the package keeps the GPU awake while VMs use it.
-
-## What you need to know
-
-- A laptop follows the same steps as a desktop card, plus consent to keep the GPU powered: without it, `setup` and `activate` stop ([Consent](#consent)).
-- Block system sleep and turn NVIDIA's runtime power management off before you start ([D3cold](#d3cold)).
-- Keeping the GPU awake costs battery life while VMs use it.
-- With Optimus (the integrated GPU drives the display), the NVIDIA GPU is not the boot display, so no display modules are needed ([Display](#display)).
-- No laptop GPU has been tested.
-
 ## At a glance
 
 | Item | Value |
 |---|---|
-| Device IDs | The PCI device ID of every laptop row in [devices.md](devices.md#rows), listed in the two tables under [Supported laptop GPUs](#supported-laptop-gpus) |
+| Device IDs | Every laptop row in [devices.md](devices.md#rows), listed in the two tables under [Supported laptop GPUs](#supported-laptop-gpus) |
 | Path | The same as the desktop cards of the generation ([Ampere](ampere.md), [Ada](ada.md)) |
 | Presented as | Ampere: RTX A6000, `10de:2230`. Ada: RTX 6000 Ada, `10de:26b1` |
 | VFs per card | 4 |
-| Host and guest drivers | The recommended versions in the [supported software stack](installation.md#supported-software-stack); other versions are not guaranteed to work |
-| Power | `activate` keeps a laptop GPU powered and blocks D3cold (the powered-off idle state) while it works. `setup` and `activate` stop without consent (`d3cold=off`), and `doctor` fails it. System sleep also needs to be blocked ([D3cold](#d3cold)) |
+| Host and guest drivers | The [supported software stack](installation.md#supported-software-stack) |
+| Power | With consent (`d3cold=off`), `activate` keeps the GPU powered and blocks D3cold. Without consent, it refuses the entire run and activates no GPU. System sleep must also be blocked ([D3cold](#d3cold)) |
 | Status | supported; see [Ampere](ampere.md#at-a-glance) and [Ada](ada.md#at-a-glance) |
-
-A PCI ID has the form `vendor:device`: `10de` is NVIDIA, and the second part identifies the card model.
-"Presented as" is the professional card whose identity the GeForce card takes on, so that NVIDIA's vGPU software accepts it.
 
 ## Supported laptop GPUs
 
 Ampere and Ada laptop GPUs are supported.
-They use the same professional counterpart, NVIDIA host driver setup and guest drivers as desktop cards of the same generation.
-Blackwell GPUs are **not** expected to work with the current implementation ([Generations](devices.md#generations)).
+They use the same target, host stack and guest drivers as desktop cards of the same generation.
 
 ### IDs with a config-space dump
 
-Each ID below has public raw [config-space](glossary.md) dumps (the raw contents of a PCI device's configuration registers, which include its list of optional features) from one or more machines, as listed in the table.
+Each ID below has public raw config-space dumps from one or more machines, as listed in the table.
 Every dump shows hidden SR-IOV, ARI and MSI-X capabilities at the same positions as desktop cards of that generation.
 
 | Device | Die | Product | Generation | Dumps |
@@ -67,12 +52,13 @@ Every dump shows hidden SR-IOV, ARI and MSI-X capabilities at the same positions
 
 ### IDs without a dump
 
-There are no public config-space dumps for the IDs below.
-They are included because every laptop GPU of the same generation that does have a dump uses the desktop layout, so they follow the same path.
-The five Embedded parts are not laptop GPUs, but they use the same path and power guards and need D3cold consent too.
+No public config-space dumps are available for the IDs below.
+They are included because every laptop GPU with a config-space dump for the same generation has the desktop layout.
+They use the same activation path.
+The five Embedded parts are not laptop GPUs, but use the same path and power guards and also require D3cold consent.
 
-The package's livepatch module (`geforce_sriov`, which reveals the hidden SR-IOV feature) checks the hidden SR-IOV block when it loads, before `activate` removes or rescans the card.
-If the block is missing, the livepatch module refuses the card and `activate` stops without removing it.
+The kernel module checks the hidden SR-IOV block when it loads, before `activate` removes or rescans the card.
+If the block is missing, the module refuses the card and `activate` stops without removing it.
 
 | Device | Die | Product | Generation |
 |---|---|---|---|
@@ -116,136 +102,131 @@ The tools refuse laptop GPUs absent from both tables, like any other unlisted ca
 
 ## Display
 
-The boot display GPU is the one that shows the BIOS/UEFI screen at power-on and then drives the host's display, the Linux text console or a graphical desktop ([Glossary](glossary.md)).
-An NVIDIA GPU in that role needs extra handling, because `activate` has to hand its display to NVIDIA's display modules ([Boot display card](installation.md#boot-display-card)).
-Whether your NVIDIA GPU is the boot display depends on what the laptop's screen is wired to:
+Display wiring determines whether the NVIDIA GPU is the boot display:
 
-- Optimus, with the integrated GPU driving the display: the laptop's screen is wired to the CPU's built-in graphics, and the NVIDIA GPU only renders on request. This is the common case. The NVIDIA GPU is **not** the boot display, and no display modules are needed.
-- MUX in dGPU mode, or HDMI or DisplayPort wired to the NVIDIA GPU: a MUX is a hardware switch (often a BIOS or vendor-app setting) that connects the screen to the NVIDIA GPU instead. In that mode, or with an external display on the GPU's own port, the display is attached to the NVIDIA GPU, so it is the boot display. See [Boot display card](installation.md#boot-display-card).
+- Optimus, with the integrated GPU driving the display: the NVIDIA GPU is not the boot display.
+- MUX in dGPU mode, or HDMI or DisplayPort wired to the NVIDIA GPU: the NVIDIA GPU may be the boot display.
 
-To check, run `cat /sys/bus/pci/devices/<BDF>/boot_vga`, replacing `<BDF>` with your GPU's PCI address, for example `0000:01:00.0`.
-A value of `1` means the GPU is the boot display.
+Run `cat /sys/bus/pci/devices/<BDF>/boot_vga`, replacing `<BDF>` with your GPU's PCI address, for example `0000:01:00.0`.
+If it reads `1`, follow [Boot display GPU](installation.md#boot-display-gpu).
 
 ```mermaid
 flowchart TD
-    Q{"Is the NVIDIA GPU<br/>driving the display?"}
-    O["No: the integrated GPU drives it (Optimus)<br/>no display modules"]
-    M["Yes: MUX in dGPU mode,<br/>or HDMI/DP wired to it"]
-    B["Boot display card<br/>(boot_vga reads 1)"]
-    Q -->|"No"| O
-    Q -->|"Yes"| M
-    M --> B
+    Q{"Which GPU drives<br/>the display?"}
+    O["Integrated GPU (Optimus)<br/>not the boot display"]
+    M["NVIDIA GPU (MUX in dGPU mode,<br/>or HDMI/DP wired to it)"]
+    B["Boot display GPU path"]
+    Q -->|"Integrated GPU"| O
+    Q -->|"NVIDIA GPU"| M
+    M -->|"boot_vga reads 1"| B
 ```
 
 ## D3cold
 
-D3cold is the deepest PCI power state: the device is fully powered off and cannot answer.
-Laptops use it to cut power to an idle GPU and save battery.
+Laptops can cut power to an idle GPU to save battery.
+This state is called D3cold.
 When power returns, the GPU restarts from scratch: its SR-IOV setup is erased, every running vGPU stops and the GPU firmware resets.
 
-Both a hybrid (Optimus) laptop and NVIDIA's driver, through its runtime power management, can power down an idle NVIDIA GPU, so the package keeps the GPU awake while it works.
-The power guards below apply to every laptop and embedded GPU in the tables above.
-Keeping the GPU awake costs battery life, which is why it needs your consent.
+Both a hybrid laptop and NVIDIA's laptop driver can power down an idle NVIDIA GPU.
+The device table flags every row in the tables above for the power guards described below.
 
 ### Consent
 
-The power guards need your consent, which is recorded in the config as `d3cold=off`.
-Without it, `setup` and `activate` stop with exit 3 before anything changes if any selected GPU is a laptop GPU, and `doctor` reports a failure.
-The message includes the `install` command that records consent.
+The power guards require consent, recorded in the config as `d3cold=off`.
+Without it, `activate` refuses the entire run if any selected GPU is a laptop GPU: it exits 3 before waking a GPU or writing anything, and activates no GPU.
+The refusal includes the `install` command needed to record consent.
 
 - `setup` shows a D3cold notice and asks whether to disable it for the selected laptop GPUs; the default is no.
-  On a first install, it comes after the GPU selection and before the host CUDA question.
-  On an installed host whose config lacks consent, `setup` asks before `doctor` and ends the run after a yes.
+  On a first install, this is the last question.
+  On an installed host whose config lacks consent, `setup` asks before its `install --dry-run` step and ends the run after a yes.
 - `setup` exits 3 without changes if you decline, or if it cannot prompt (`--no-prompt` or no terminal) and `--disable-d3cold` was not given.
 - `setup --disable-d3cold` and `install --disable-d3cold` record consent without asking the D3cold question.
-  On a live run, the option needs at least one selected laptop GPU, or the command exits 2.
+  On a live run, the option requires at least one selected laptop GPU; otherwise, the command exits 2.
   A staged install (`--destdir`) skips this check and records consent.
 - On an installed host, accepting or passing `--disable-d3cold` runs `install --driver=skip --disable-d3cold` to record consent without changing NVIDIA's files, then ends the `setup` run.
 - `install --device` without `--disable-d3cold` removes consent from the config and reports the removal; without `--device`, `install` preserves it.
 - `uninstall` removes consent with the config only if the config is unchanged since install.
 
-### Package behavior
+### What geforce-sriov does
 
-- For a laptop GPU, `activate` sets the `power/control` of the parent bridge (the PCIe port above the GPU) and of the GPU to `on` (the sysfs switch that keeps a device powered) and writes `0` to the GPU's `d3cold_allowed` (the sysfs switch that permits D3cold).
-  It waits up to 5 seconds for the GPU to answer a config read while powered on.
-- If the GPU does not answer, `activate` restores the settings it changed and stops before any removal.
-  The message names the GPU and what failed.
-- If a card fails or is stopped, `activate` also restores power settings for cards it did not remove.
-- `activate` writes `d3cold_allowed` again after the rescan and holds it around the driver re-probe (unbinding and rebinding NVIDIA's driver).
+- With consent, `activate` sets the parent bridge's and GPU's `power/control` to `on` and writes `0` to the GPU's `d3cold_allowed` before it writes to the card.
+  If the GPU reports active, a config read must succeed before these writes.
+  It waits up to 5 seconds for config space to return the GPU's NVIDIA ID while powered on.
+- If the GPU does not answer, `activate` restores the settings it changed and refuses with exit 3.
+  The message explains how to keep the GPU powered.
+- If a card is refused or fails later, `activate` also restores the power settings it changed on the other cards.
+- `activate` keeps `d3cold_allowed` at `0` around the rescan and around the driver re-probe.
 - The parent bridge stays `on` for the session; `activate` reports this.
-- `check` needs every VF to answer a config read at offset `0x08`.
+- `check` requires every VF to answer a config read at offset `0x08`.
   Reading a laptop GPU's or VF's config space resumes it if suspended.
-- `doctor` writes nothing, but its config-space reads resume a suspended GPU.
+- Before install, `install --dry-run` writes nothing, but its config-space reads resume a suspended GPU.
   A GPU that does not answer fails the check, as does a laptop GPU without D3cold consent.
-  If consent is recorded in the config or planned with `doctor --disable-d3cold`, `doctor` reports that consent as information.
+  If consent is recorded in the config or planned with `install --dry-run --disable-d3cold`, it reports that consent as information.
   It reports the GPU's `runtime_status`, `power/control` and `d3cold_allowed`, and the bridge's `power/control`, as information.
-  It warns if NVIDIA's runtime power management is not off, system sleep is not blocked, [MSI-X](#msi-x) has become hidden again, or the GPU has lost its SR-IOV state.
+  It warns if NVIDIA's runtime power management is not off, system sleep is not blocked, or MSI-X is hidden with the module loaded.
+- After install, `status` runs the same host checks and also warns if the GPU has lost its SR-IOV state.
 
 These settings last only for the current boot.
-`activate` reapplies them each time it runs.
+`activate` applies them each time it brings the GPU up.
 
-### Costs
+### What it costs
 
 - Shorter battery life and a warmer laptop, because the GPU no longer powers off when idle.
 - The bridge above the GPU stays powered too.
-- The laptop **must not** suspend, because sleep powers the GPU off.
+- The laptop must not suspend, because sleep powers the GPU off.
 - With sleep blocked, the laptop keeps running with its lid closed.
 - Keep the laptop on mains power.
   With hibernation also masked, a laptop on battery may run out of charge and lose power while VMs are running.
 
-### Settings you make yourself
+### What you do yourself
 
-The package does **not** block system sleep or change NVIDIA's runtime power management setting.
-You need to set up both yourself.
-`doctor` warns about missing settings and reports OK once they are set.
+geforce-sriov does not block system sleep or change NVIDIA's runtime power management setting.
+You must configure both yourself.
+`install --dry-run` (before install) and `status` (after install) warn about missing settings and report OK once they are set.
 
 - Block system sleep, including on lid close and when idle.
-  For example, this command masks the sleep targets; geforce-sriov **never** runs it:
+  For example, this command masks the sleep targets; geforce-sriov never runs it:
 
   ```sh
   sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
   ```
 
-  `doctor` checks whether `sleep.target` is masked.
-- Disable NVIDIA's GPU runtime power management (the driver's idle power saving) with this setting in a `.conf` file in `/etc/modprobe.d/`, the folder of kernel module option files:
+  `install --dry-run` and `status` check whether `sleep.target` is masked.
+- Disable NVIDIA's GPU runtime power management with this setting in a `.conf` file in `/etc/modprobe.d/`:
 
   ```text
   options nvidia NVreg_DynamicPowerManagement=0
   ```
 
-For NVIDIA's setting, `doctor` checks only `/etc/modprobe.d/`.
+For NVIDIA's setting, `install --dry-run` and `status` check only `/etc/modprobe.d/`.
 The first file that sets the value to 0 satisfies the check, even if another file sets a different value.
 It does not read `/run/modprobe.d/` or `/lib/modprobe.d/`.
 
 ## MSI-X
 
-MSI-X is the way a PCIe device sends interrupts to the CPU.
-The GPU hides its MSI-X capability, and `msix=on` (the default) exposes it as it does on desktop cards ([Module parameters](configuration.md#module-parameters)).
-The livepatch module can only do this when it loads, so a power cut is expected to hide MSI-X again, as a reset of the physical function (the whole card) does, and that stops the GPU's interrupts ([Turn features off](recovery.md#turn-features-off)).
-`doctor` and `check` warn if MSI-X becomes hidden again after the livepatch module linked it on a laptop GPU.
+As on desktop cards, `msix=on` (the default) exposes the GPU's hidden MSI-X capability ([Module parameters](configuration.md#module-parameters)).
+`install --dry-run` and `status` report whether MSI-X is hidden on a laptop GPU (a warning once the module is loaded), and `check` warns if a laptop GPU powered off since its VFs were configured.
+After such a warning, power the machine off and on, then run `setup` again.
 
 ## ARI
 
-A PCI slot normally holds 8 functions, numbered 0 to 7.
-ARI (Alternative Routing-ID Interpretation) is a PCIe feature that lets a device have more than 8.
-It matters only for functions above 7; the default four VFs occupy functions 4 to 7, so ARI is optional.
+ARI is optional.
+It matters only for functions above 7; the default four VFs occupy functions 4 to 7.
 It stays off when:
 
 - The hidden ARI capability has next function number 0, as on most boards without an audio function.
-- The parent root port (the CPU's PCIe port the card hangs off) lacks ARI forwarding, the setting that lets the port pass such a device's traffic.
+- The parent root port lacks ARI forwarding.
 
 `activate` then prints a note, and activation continues.
-`doctor` warns about a bridge without ARI forwarding.
+`install --dry-run` and `status` warn about a bridge without ARI forwarding.
 
 ## VF counts
 
-The VF count a card reports depends on its generation, and the package presents 4 either way:
-
 - Ada laptop GPUs with dumps report 1 VF, as most Ada desktop cards do.
-  The livepatch module presents 4 VFs, and the VF-count patch in NVIDIA's module makes its driver accept them.
-  If the card does not accept 4, the livepatch module sets up no SR-IOV on it.
+  The geforce-sriov module presents 4 VFs, and the VF-count revision in NVIDIA's host module makes its driver accept them.
+  If the card does not accept 4, the module sets up no SR-IOV on it.
 - Ampere laptop GPUs with dumps report 16 VFs.
-  The package presents 4, as on desktop cards.
+  geforce-sriov presents 4, as on desktop cards.
 - IDs without dumps use the same handling as other cards of their generation.
 
 See [Capability positions per generation](devices.md#capability-positions-per-generation).
@@ -258,11 +239,11 @@ After changing the GPU identity, set it again as [Guests](installation.md#guests
 
 ## Recovery
 
-- If vGPUs stop or `doctor` reports hidden MSI-X or lost SR-IOV state, stop the VMs, shut the laptop down fully, power it on with the power button, then run `setup` again.
-  This needs a cold power cycle, **not** a reboot ([Reboot or power-off](recovery.md#reboot-or-power-off)).
+- If vGPUs stop or `status` reports hidden MSI-X or lost SR-IOV state, stop the VMs, shut the laptop down fully, power it on with the power button, then run `setup` again.
+  This requires a cold power cycle, not a reboot.
   A smart plug cannot power off a laptop running on its battery.
-- If the GPU disappears from `lspci` or the host cannot be reached, follow [the power-cycle rule](recovery.md#the-one-rule).
-- If `setup`, `activate` or `doctor` stops because D3cold consent is missing, run `setup` and answer yes, or run the `install` command shown in the message ([Consent](#consent)).
+- If the GPU disappears from `lspci` or the host cannot be reached, follow [the one rule](recovery.md#the-one-rule).
+- If `activate` or `setup` refuses a laptop GPU because D3cold consent is missing, run `setup` and answer yes, or run the `install` command shown in the refusal ([Consent](#consent)).
 - For other problems, see [Symptoms](recovery.md#symptoms).
 
 ## Reports

@@ -1,0 +1,15 @@
+# geforce-sriov @VERSION@: after a pacman transaction that installs or upgrades a kernel or its headers, build NVIDIA's module for
+# every installed kernel that has its headers and no build yet. DKMS's own hook (70-dkms-install.hook) triggers on the same
+# paths and runs first (hooks run in name order), so DKMS has built its modules. The hook returns at once when there is
+# nothing to build and never fails the transaction.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/modules/*/build/include/
+Target = usr/lib/modules/*/modules.order
+
+[Action]
+Description = Building NVIDIA's module for geforce-sriov
+When = PostTransaction
+Exec = @BINDIR@/geforce-sriov-kernel-hook --retry

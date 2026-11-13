@@ -22,27 +22,7 @@ case $dir in
 		;;
 esac
 [ -n "$modules" ] || modules='nvidia nvidia-vgpu-vfio'
-# The second build of a run, with the owner of the framebuffer slots in the tree: its own module,
-# when the fixture has one, and whatever else the fixture says that build leaves behind.
-owner=0
-if [ -f "$dir/nvidia/gs-fb-owner.c" ]; then
-	owner=1
-	if [ -f "$fx/owner-build-fails" ]; then
-		# A build that stops half way leaves what it had begun to write.
-		for half in "$dir"/*.ko; do
-			[ ! -f "$half" ] || printf 'half built\n' >"$half"
-		done
-		printf 'half written\n' >"$dir/Module.symvers"
-		printf 'make-stub: gs-fb-owner.c does not compile\n' >&2
-		exit 2
-	fi
-	[ ! -f "$fx/owner-extra-object" ] || printf 'changed\n' >"$dir/nvidia/os-interface.o"
-fi
 for name in $modules; do
-	if [ "$name" = nvidia ] && [ "$owner" -eq 1 ] && [ -f "$fx/modules/nvidia-owner.ko" ]; then
-		cp "$fx/modules/nvidia-owner.ko" "$dir/nvidia.ko"
-		continue
-	fi
 	[ -f "$fx/modules/$name.ko" ] || {
 		printf 'make-stub: no module %s\n' "$name" >&2
 		exit 1

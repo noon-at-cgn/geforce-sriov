@@ -44,7 +44,7 @@
 #ifndef GS_DEVICES_H
 #define GS_DEVICES_H
 
-#define GS_VERSION		"0.3.0"
+#define GS_VERSION		"0.4.0"
 #define GS_VENDOR_NVIDIA	0x10deu
 
 /*
@@ -59,8 +59,14 @@
 /* Largest VF count that can be configured: the largest totalvfs in the table. */
 #define GS_VFS_MAX		16u
 
-/* Most physical functions one module load / one config may list. */
-#define GS_MAX_PFS		8u
+/*
+ * Most physical functions one module load / one config may list. Big hosts carry 8 or 10 GPUs and
+ * the densest known boards 16; 32 is a ceiling no real host reaches. The arrays it sizes (kernel
+ * module, hook, CLI) total a few hundred bytes, and every text buffer derives from it. The kernel
+ * caps a charp module parameter at 1024 bytes (param_set_charp), so the list must stay below that:
+ * GS_BDF_LIST_STR_SIZE is 32 * 17 = 544 bytes; 64 cards would make 1088 and could not be passed.
+ */
+#define GS_MAX_PFS		32u
 
 /*
  * PCI addresses are written as Linux names them ("%04x:%02x:%02x.%d", see

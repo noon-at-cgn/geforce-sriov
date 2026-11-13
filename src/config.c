@@ -185,10 +185,10 @@ static int valid_key(const char *k, size_t n)
 }
 
 enum { K_BDFS, K_DISPLAY, K_HOST_CUDA, K_ARI, K_MSIX, K_VFS, K_IDENTITY, K_FORCE_HOST, K_SRIOV_MANAGE,
-       K_TYPE_ADA, K_TYPE_AMPERE, K_D3COLD, K_FB_SLOTS, K_COUNT };
+       K_TYPE_ADA, K_TYPE_AMPERE, K_D3COLD, K_FB_SLOTS, K_HOST_DESKTOP, K_COUNT };
 static const char *const keys[K_COUNT] = {
 	"bdfs", "display", "host_cuda", "ari", "msix", "vfs", "identity", "identity_force_host",
-	"sriov_manage", "type_ada", "type_ampere", "d3cold", "fb_slots",
+	"sriov_manage", "type_ada", "type_ampere", "d3cold", "fb_slots", "host_desktop",
 };
 
 int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *err, size_t errlen)
@@ -237,12 +237,6 @@ int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *e
 			snprintf(err, errlen, "line %u: key must match [a-z0-9_]+", lineno);
 			return -1;
 		}
-		if (klen == sizeof("boot_display_release") - 1 &&
-		    memcmp(line, "boot_display_release", klen) == 0) {
-			snprintf(err, errlen, "line %u: %.*s: boot_display_release is obsolete; delete this line; use display=auto|on|off",
-				 lineno, (int)n, line);
-			return -1;
-		}
 		if (vlen == 0 || vlen >= sizeof(value)) {
 			snprintf(err, errlen, "line %u: empty or overlong value", lineno);
 			return -1;
@@ -254,11 +248,7 @@ int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *e
 				break;
 		}
 		if (k == K_COUNT) {
-			/* Switches geforce-sriov does not have: the line is deleted, not converted. */
-			if ((klen == 16 && memcmp(line, "experimental_vfs", klen) == 0) ||
-			    (klen == 7 && memcmp(line, "twin_id", klen) == 0))
-				snprintf(err, errlen, "line %u: unknown key '%.*s'; delete this line", lineno, (int)klen, line);
-			else if (memmem(line, klen, "vf", 2))
+			if (memmem(line, klen, "vf", 2))
 				snprintf(err, errlen, "line %u: unknown key '%.*s'; the VF count key is vfs (vfs=1..%u, default %u)",
 					 lineno, (int)klen, line, GS_VFS_MAX, GS_DEFAULT_VFS);
 			else
@@ -291,17 +281,21 @@ int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *e
 				return -1;
 			}
 			break;
-		case K_FB_SLOTS:
+		case K_HOST_DESKTOP:
 			if (strcmp(value, "auto") == 0)
-				cfg->fb_slots = GS_FB_SLOTS_AUTO;
+				cfg->host_desktop = GS_DESKTOP_AUTO;
 			else if (strcmp(value, "on") == 0)
-				cfg->fb_slots = GS_FB_SLOTS_ON;
+				cfg->host_desktop = GS_DESKTOP_ON;
 			else if (strcmp(value, "off") == 0)
-				cfg->fb_slots = GS_FB_SLOTS_OFF;
+				cfg->host_desktop = GS_DESKTOP_OFF;
 			else {
-				snprintf(err, errlen, "line %u: fb_slots must be auto, on or off", lineno);
+				snprintf(err, errlen, "line %u: host_desktop must be auto, on or off", lineno);
 				return -1;
 			}
+			break;
+		case K_FB_SLOTS:
+			/* Removed in 0.4.0; a line left in a config is read and dropped, and the next install does not write it. */
+			cfg->fb_slots_ignored = 1;
 			break;
 		case K_ARI:
 		case K_MSIX:
@@ -420,9 +414,7 @@ int gs_config_render(const struct gs_config *cfg, char *buf, size_t len)
 	EMIT("display=%s\n", cfg->display == GS_DISPLAY_ON ? "on" :
 	     cfg->display == GS_DISPLAY_OFF ? "off" : "auto");
 	EMIT("host_cuda=%s\n", cfg->host_cuda == GS_SW_ON ? "on" : "off");
-	/* Written only when it was set: auto is what an absent key means. */
-	if (cfg->fb_slots != GS_FB_SLOTS_AUTO)
-		EMIT("fb_slots=%s\n", cfg->fb_slots == GS_FB_SLOTS_ON ? "on" : "off");
+	EMIT("host_desktop=%s\n", cfg->host_desktop == GS_DESKTOP_ON ? "on" : cfg->host_desktop == GS_DESKTOP_OFF ? "off" : "auto");
 	EMIT("msix=%s\n", cfg->msix == GS_SW_OFF ? "off" : "on");
 	if (cfg->vfs)
 		EMIT("vfs=%u\n", cfg->vfs);

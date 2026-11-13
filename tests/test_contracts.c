@@ -13,7 +13,7 @@ static struct gs_install_opts captured_install;
 static struct gs_activate_opts captured_activate;
 static struct gs_livepatch_opts captured_livepatch;
 int gs_cmd_devices(void) { return 0; }
-int gs_cmd_doctor(const struct gs_diag_opts *o) { (void)o; return 0; }
+int gs_hostcheck(const struct gs_diag_opts *o, enum gs_hostcheck_mode m) { (void)o; (void)m; return 0; }
 int gs_cmd_status(const struct gs_diag_opts *o) { (void)o; return 0; }
 int gs_cmd_install(const struct gs_install_opts *o) { captured_install = *o; return 0; }
 int gs_cmd_setup(const struct gs_install_opts *o, enum gs_prompt p)
@@ -35,12 +35,9 @@ static void test_cli(void)
 	char *setup[] = { "gs", "setup", "--display", "--host-cuda", "--companion-source",
 			  "/source", "--nvkms-source", "/nvkms", "--allow-unsupported-driver" };
 	char *activate[] = { "gs", "activate", "--clear-lock" };
-	char *activate_old[] = { "gs", "activate", "--clear-guard" };
 	char *activate_both[] = { "gs", "activate", "--clear-lock", "--dry-run" };
 	char *check[] = { "gs", "check", "--daemon-ready" };
 	char *conflict[] = { "gs", "setup", "--display", "--no-display" };
-	char *removed[] = { "gs", "prepare" };
-	char *oldopt[] = { "gs", "install", "--hold-nvidia" };
 	char *livepatch[] = { "gs", "livepatch", "--boot", "--config", "/cfg" };
 	char *livepatch_driver[] = { "gs", "livepatch", "--boot", "--load-driver", "--config", "/cfg" };
 	char *livepatch_plain[] = { "gs", "livepatch" };
@@ -50,26 +47,29 @@ static void test_cli(void)
 	char *rebuild_kernel[] = { "gs", "rebuild", "--kernel", "6.8.12-4-pve" };
 	char *rebuild_path[] = { "gs", "rebuild", "--kernel", "../6.8" };
 	char *rebuild_input[] = { "gs", "rebuild", "--companion-file", "/x" };
+	char *dry[] = { "gs", "install", "--dry-run", "--device", "0000:03:00.0", "--disable-d3cold" };
+	char *dry_vfs[] = { "gs", "install", "--dry-run", "--vfs", "4" };
+	char *dry_dest[] = { "gs", "install", "--dry-run", "--destdir", "/x" };
+	char *doctor[] = { "gs", "doctor" };
 	assert(gs_cli_main(9, setup) == 0);
 	assert(captured_install.display_set && captured_install.display == GS_DISPLAY_ON);
 	assert(captured_install.host_cuda_set && captured_install.host_cuda);
 	assert(!strcmp(captured_install.companion_source, "/source"));
 	assert(!strcmp(captured_install.nvkms_source, "/nvkms") && captured_install.allow_unsupported_driver);
 	assert(gs_cli_main(3, activate) == 0 && captured_activate.clear_guard);
-	/* The option's earlier name is refused with the new one, and nothing is cleared. */
-	captured_activate.clear_guard = 0;
-	assert(gs_cli_main(3, activate_old) == GS_EXIT_USAGE && !captured_activate.clear_guard);
 	assert(gs_cli_main(4, activate_both) == GS_EXIT_USAGE);
 	assert(gs_cli_main(3, check) == 0 && captured_activate.daemon_ready);
 	assert(gs_cli_main(4, conflict) == GS_EXIT_USAGE);
-	assert(gs_cli_main(2, removed) == GS_EXIT_USAGE);
-	assert(gs_cli_main(3, oldopt) == GS_EXIT_USAGE);
 	assert(gs_cli_main(5, livepatch) == 0 && captured_livepatch.boot &&
 	       !strcmp(captured_livepatch.config_path, "/cfg"));
 	assert(!captured_livepatch.load_driver);
 	assert(gs_cli_main(6, livepatch_driver) == 0 && captured_livepatch.boot && captured_livepatch.load_driver &&
 	       !strcmp(captured_livepatch.config_path, "/cfg"));
 	assert(gs_cli_main(2, livepatch_plain) == GS_EXIT_USAGE);
+	/* install --dry-run: the checks before install take install's selection and package options and nothing else. */
+	assert(gs_cli_main(6, dry) == 0 && captured_install.dry_run && captured_install.disable_d3cold && captured_install.ndevices == 1);
+	assert(gs_cli_main(5, dry_vfs) == GS_EXIT_USAGE && gs_cli_main(5, dry_dest) == GS_EXIT_USAGE);
+	assert(gs_cli_main(2, doctor) == GS_EXIT_USAGE);
 	/* setup's mark on the install it runs. */
 	assert(gs_cli_main(3, from_setup) == 0 && captured_install.from_setup);
 	assert(gs_cli_main(2, plain_install) == 0 && !captured_install.from_setup);
@@ -107,8 +107,6 @@ int main(void)
 	assert(gs_config_parse(input, strlen(input), &c, err, sizeof(err)) < 0 && strstr(err, "host_cuda must be on or off"));
 	input = "display=no\n";
 	assert(gs_config_parse(input, strlen(input), &c, err, sizeof(err)) < 0 && strstr(err, "display must be"));
-	input = "# old\nboot_display_release=0000:01:00.0\n";
-	assert(gs_config_parse(input, strlen(input), &c, err, sizeof(err)) < 0 && strstr(err, "line 2: boot_display_release=0000:01:00.0") && strstr(err, "display=auto|on|off"));
 	assert(gs_version_confirmed(GS_VERSION_HOST, "580.159.01"));
 	assert(!gs_version_confirmed(GS_VERSION_HOST, "580.159.03"));
 	assert(gs_version_confirmed(GS_VERSION_COMPANION, "580.159.03"));

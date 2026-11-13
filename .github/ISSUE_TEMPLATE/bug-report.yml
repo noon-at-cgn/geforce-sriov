@@ -27,15 +27,15 @@ body:
   - type: textarea
     id: output
     attributes:
-      label: Output of geforce-sriov doctor and status
-      description: "`sudo geforce-sriov doctor` and `sudo geforce-sriov status`, if they relate to the bug."
+      label: Output of geforce-sriov status
+      description: "`sudo geforce-sriov status`, and `sudo geforce-sriov install --dry-run` for a before-install report, if they relate to the bug."
       render: text
   - type: input
     id: versions
     attributes:
       label: Versions
       description: "`geforce-sriov --version`, `uname -r`, `modinfo -F version nvidia`"
-      placeholder: "geforce-sriov 0.3.0, kernel <kernel release>, NVIDIA 580.159.01"
+      placeholder: "geforce-sriov 0.4.0, kernel <kernel release>, NVIDIA 580.159.01"
     validations:
       required: true
   - type: checkboxes

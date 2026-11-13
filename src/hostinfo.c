@@ -22,10 +22,11 @@
 #include <sys/utsname.h>
 
 #include "gs_lifecycle.h"
+#include "gs_internal.h"
 
 const char *const gs_recovery_msg =
 	"Recovery: do not rescan again or restart in a loop. If not already done since the failure,\n"
-	"power the machine off and on. After the cold boot, run `geforce-sriov doctor` and, once the\n"
+	"power the machine off and on. After the cold boot, run `geforce-sriov status` and, once the\n"
 	"cards are known safe, `geforce-sriov activate --clear-lock`, then `geforce-sriov activate`.\n"
 	"The early livepatch can load on the recovery boot; activation remains blocked until cleared.";
 
@@ -109,7 +110,7 @@ int gs_note_build_id(const unsigned char *buf, size_t size, char *out, size_t le
 }
 
 /*
- * The sentence doctor, status and check add when the installed nvidia.ko in b is the driver step's
+ * The sentence status and check add when the installed nvidia.ko in b is the driver step's
  * build and the loaded nvidia module (its build-id note under sysroot/module) is not: 1 with line set;
  * 0 when the installed module is not the driver step's build, the module is not loaded, its build-id
  * is unknown, or they match.
@@ -134,7 +135,7 @@ int gs_loaded_line(const char *sysroot, const struct gs_build *b, char *line, si
 
 /*
  * The driver step's record against the nvidia.ko the kernel would load, found as the driver step finds it;
- * the one reading doctor, status, activate and check share. src NULL: the live host's when live, else
+ * the one reading status, activate and check share. src NULL: the live host's when live, else
  * nothing is judged (a fixture without sources). 1 with b set, 0 when not judged.
  */
 int gs_build_identity(const struct gs_build_src *src, int live, struct gs_build *b)
@@ -312,4 +313,343 @@ const char *gs_plugin_link(void)
 		if (gs_exists(plugins[k]))
 			return plugins[k];
 	return plugins[0];
+}
+
+/* ---- the selection record ----------------------------------------------------- */
+
+static int ident_listed(const struct gs_ident *ids, unsigned int n, const char *s)
+{
+	for (unsigned int i = 0; i < n; i++)
+		if (strcmp(ids[i].pf.str, s) == 0)
+			return 1;
+	return 0;
+}
+
+static const struct gs_ident *ident_for(const struct gs_ident *ids, unsigned int n, const char *s)
+{
+	for (unsigned int i = 0; i < n; i++)
+		if (strcmp(ids[i].pf.str, s) == 0)
+			return &ids[i];
+	return NULL;
+}
+
+int gs_selection_read(const char *state_dir, struct gs_ident *out, unsigned int *n)
+{
+	char p[GS_PATH_MAX], *data, *line, *save = NULL;
+	size_t len;
+	int r;
+
+	*n = 0;
+	if (gs_pathf(p, sizeof(p), "%s/" GS_SELECTION_NAME, state_dir))
+		return -ENAMETOOLONG;
+	if ((r = gs_read_whole(p, &data, &len, 1 << 16)))
+		return r;
+	for (line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+		char a[64], extra;
+		unsigned int v, d, sv, sd;
+
+		if (line[0] == '#')
+			continue;
+		if (sscanf(line, "%63s %4x:%4x %4x:%4x %c", a, &v, &d, &sv, &sd, &extra) != 5 ||
+		    *n == GS_CFG_MAX_BDFS || ident_listed(out, *n, a) || gs_addr_parse(a, &out[*n].pf)) {
+			free(data);
+			*n = 0;
+			return -EINVAL;
+		}
+		out[*n].vendor = v;
+		out[*n].device = d;
+		out[*n].subvendor = sv;
+		out[*n].subdevice = sd;
+		(*n)++;
+	}
+	free(data);
+	return 0;
+}
+
+int gs_selection_render(const struct gs_ident *ids, unsigned int n, char *buf, size_t len)
+{
+	int off = snprintf(buf, len, "# The GPUs install selected, as they were then. Written by install.\n"
+			   "# address vendor:device subsystem_vendor:subsystem_device\n");
+
+	for (unsigned int i = 0; i < n; i++) {
+		if (off < 0 || (size_t)off >= len)
+			return -1;
+		off += snprintf(buf + off, len - (size_t)off, "%s %04x:%04x %04x:%04x\n", ids[i].pf.str, ids[i].vendor,
+				ids[i].device, ids[i].subvendor, ids[i].subdevice);
+	}
+	return off < 0 || (size_t)off >= len ? -1 : off;
+}
+
+unsigned int gs_selection_collect(const char *sys, const struct gs_addr *bdfs, unsigned int n,
+				  const struct gs_ident *old, unsigned int nold, int refresh, struct gs_ident *out)
+{
+	unsigned int k = 0;
+
+	for (unsigned int i = 0; i < n; i++) {
+		const struct gs_ident *kept = refresh ? NULL : ident_for(old, nold, bdfs[i].str);
+		struct gs_card c;
+
+		if (kept) {
+			out[k++] = *kept;
+			continue;
+		}
+		gs_card_inspect(sys, &bdfs[i], &c);
+		if (!c.present || !c.entry)
+			continue;
+		out[k].pf = bdfs[i];
+		out[k].vendor = c.vendor;
+		out[k].device = c.device;
+		out[k].subvendor = c.subvendor;
+		out[k].subdevice = c.subdevice;
+		k++;
+	}
+	return k;
+}
+
+void gs_selection_command(const struct gs_addr *list, unsigned int n, int d3cold, const char *extra, char *out,
+			  size_t len)
+{
+	size_t off = (size_t)snprintf(out, len, "sudo geforce-sriov install");
+
+	for (unsigned int i = 0; i < n && off < len; i++)
+		off += (size_t)snprintf(out + off, len - off, " --device %s", list[i].str);
+	if (d3cold && off < len)
+		off += (size_t)snprintf(out + off, len - off, " --disable-d3cold");
+	if (extra && extra[0] && off < len)
+		snprintf(out + off, len - off, " %s", extra);
+}
+
+static void ident_text(unsigned int vendor, unsigned int device, unsigned int sv, unsigned int sd, char *out, size_t len)
+{
+	const struct gs_device *e = vendor == GS_VENDOR_NVIDIA ? gs_device_lookup(device) : NULL;
+
+	snprintf(out, len, "%s%s%04x:%04x (subsystem %04x:%04x)", e ? e->name : "", e ? " " : "", vendor, device, sv, sd);
+}
+
+static int ident_is(const struct gs_ident *id, const struct gs_card *c)
+{
+	return c->present && c->vendor == id->vendor && c->device == id->device && c->subvendor == id->subvendor &&
+	       c->subdevice == id->subdevice;
+}
+
+int gs_display_lacking(const struct gs_build_src *src, const char *sys, const struct gs_config *cfg)
+{
+	struct gs_build b;
+	char why[256];
+
+	return gs_build_identity(src, gs_is_live_root(sys), &b) && b.record_read && strcmp(b.rec_kernel, b.release) == 0 &&
+	       b.display == 0 && gs_display_effective(sys, cfg, why, sizeof(why));
+}
+
+int gs_display_forms(const struct gs_host *h, const char *selection_args, char *text, size_t len)
+{
+	char inputs[GS_PATH_MAX];
+
+	if (!gs_pathf(inputs, sizeof(inputs), "%s/" GS_INPUTS_NAME, h->state_dir) && gs_kept_input(inputs, "companion") &&
+	    gs_kept_input(inputs, "nvkms"))
+		return 0;
+	snprintf(text, len, "  sudo geforce-sriov install%s%s --no-display\n"
+		 "      (the host console stays on the firmware framebuffer; no display modules are built)\n"
+		 "  or, in the folder geforce-sriov was built in, with NVIDIA's second package and public kernel source:\n"
+		 "  sudo ./geforce-sriov install%s%s --companion-file PATH --nvkms-source PATH\n",
+		 selection_args[0] ? " " : "", selection_args, selection_args[0] ? " " : "", selection_args);
+	return 1;
+}
+
+/* How many PFs of this exact identity the host has outside the addresses in skip; first holds one of them. */
+static unsigned int ident_candidates(const char *sys, const struct gs_ident *id, const struct gs_addr *skip,
+				     unsigned int nskip, struct gs_addr *first)
+{
+	char p[GS_PATH_MAX];
+	struct dirent *de;
+	unsigned int n = 0;
+	DIR *d;
+
+	if (gs_pathf(p, sizeof(p), "%s/bus/pci/devices", sys) || !(d = opendir(p)))
+		return 0;
+	while ((de = readdir(d))) {
+		struct gs_addr a;
+		struct gs_card c;
+		char why[256];
+
+		if (gs_addr_parse(de->d_name, &a) || a.func != 0 || gs_addr_listed(skip, nskip, a.str))
+			continue;
+		gs_card_inspect(sys, &a, &c);
+		if (!ident_is(id, &c) || c.is_vf || gs_check_selectable(&c, why, sizeof(why)))
+			continue;
+		if (!n++)
+			*first = a;
+	}
+	closedir(d);
+	return n;
+}
+
+static void msg_add(char *msg, size_t len, size_t *off, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+
+static void msg_add(char *msg, size_t len, size_t *off, const char *fmt, ...)
+{
+	va_list ap;
+	int w;
+
+	va_start(ap, fmt);
+	w = vsnprintf(msg + *off, len - *off, fmt, ap);
+	va_end(ap);
+	if (w > 0 && (size_t)w < len - *off)
+		*off += (size_t)w;
+}
+
+int gs_selection_verdict(const struct gs_host *h, const struct gs_config *cfg, const struct gs_activate_opts *o,
+			 char *msg, size_t len)
+{
+	struct gs_ident rec[GS_CFG_MAX_BDFS];
+	struct gs_addr sel[GS_CFG_MAX_BDFS], good[GS_CFG_MAX_BDFS], laptops[GS_CFG_MAX_BDFS], moved;
+	unsigned int nrec = 0, nsel = 0, nbad = 0, ngood = 0;
+	int bad[GS_CFG_MAX_BDFS] = { 0 }, r;
+	char cmd[GS_SEL_CMD_MAX], args[GS_SEL_CMD_MAX], forms[GS_SEL_FORMS_MAX], here[160], want[160];
+	struct gs_config next;
+	size_t off = 0;
+
+	msg[0] = '\0';
+	r = gs_selection_read(h->state_dir, rec, &nrec);
+	if (r == -ENOENT)
+		return 0;
+	if (r) {
+		gs_selection_command(cfg->bdfs, cfg->nbdfs, cfg->d3cold_off, NULL, cmd, sizeof(cmd));
+		msg_add(msg, len, &off, "%s/%s cannot be read as the record of the selected GPUs, so they cannot be told from\n"
+			"other cards. To record them again, run:\n  %s\n", h->state_dir, GS_SELECTION_NAME, cmd);
+		return 1;
+	}
+	for (unsigned int i = 0; i < cfg->nbdfs; i++) {
+		const struct gs_ident *id;
+		struct gs_card c;
+
+		if (o && o->ndevices && !gs_addr_listed(o->devices, o->ndevices, cfg->bdfs[i].str))
+			continue;
+		if (!(id = ident_for(rec, nrec, cfg->bdfs[i].str)))
+			continue;
+		gs_card_inspect(h->sys, &cfg->bdfs[i], &c);
+		if (!ident_is(id, &c))
+			bad[i] = 1, nbad++;
+	}
+	/* A card is looked for outside the addresses that hold the card their record names. */
+	for (unsigned int i = 0; i < cfg->nbdfs; i++)
+		if (!bad[i])
+			good[ngood++] = cfg->bdfs[i];
+	if (!nbad)
+		return 0;
+
+	/* The selection that names the cards that are there: a moved card at its new address, a replacement where it sits. */
+	for (unsigned int i = 0; i < cfg->nbdfs; i++) {
+		const struct gs_addr *a = &cfg->bdfs[i];
+		struct gs_card c;
+		char why[256];
+
+		if (!bad[i]) {
+			sel[nsel++] = *a;
+			continue;
+		}
+		if (ident_candidates(h->sys, ident_for(rec, nrec, a->str), good, ngood, &moved) == 1 &&
+		    !gs_addr_listed(sel, nsel, moved.str)) {
+			sel[nsel++] = moved;
+			continue;
+		}
+		gs_card_inspect(h->sys, a, &c);
+		if (c.present && !gs_check_selectable(&c, why, sizeof(why)) && !gs_addr_listed(sel, nsel, a->str))
+			sel[nsel++] = *a;
+	}
+	/*
+	 * A card that moved into the address of another selected card must not reorder bdfs when the command runs: the
+	 * slots held by addresses of the current config are refilled with those addresses in the config's order.
+	 */
+	for (unsigned int i = 0; i < nsel; i++) {
+		for (unsigned int j = i + 1; j < nsel; j++) {
+			unsigned int pi = cfg->nbdfs, pj = cfg->nbdfs;
+
+			for (unsigned int k = 0; k < cfg->nbdfs; k++) {
+				if (strcmp(cfg->bdfs[k].str, sel[i].str) == 0)
+					pi = k;
+				if (strcmp(cfg->bdfs[k].str, sel[j].str) == 0)
+					pj = k;
+			}
+			if (pi < cfg->nbdfs && pj < cfg->nbdfs && pj < pi) {
+				struct gs_addr t = sel[i];
+
+				sel[i] = sel[j];
+				sel[j] = t;
+			}
+		}
+	}
+
+	for (unsigned int i = 0; i < cfg->nbdfs; i++) {
+		const struct gs_ident *id;
+		struct gs_card c;
+		struct gs_addr cand;
+		unsigned int nc;
+
+		if (!bad[i])
+			continue;
+		id = ident_for(rec, nrec, cfg->bdfs[i].str);
+		gs_card_inspect(h->sys, &cfg->bdfs[i], &c);
+		ident_text(id->vendor, id->device, id->subvendor, id->subdevice, want, sizeof(want));
+		if (c.present)
+			ident_text(c.vendor, c.device, c.subvendor, c.subdevice, here, sizeof(here));
+		else
+			snprintf(here, sizeof(here), "nothing");
+		nc = ident_candidates(h->sys, id, good, ngood, &cand);
+		msg_add(msg, len, &off, "%s is not the GPU that was selected.\n  selected:  %s\n  there now: %s\n",
+			cfg->bdfs[i].str, want, here);
+		if (nc == 1)
+			msg_add(msg, len, &off, "  the selected GPU is at %s now (the PCI addresses changed)\n", cand.str);
+		else if (nc > 1)
+			msg_add(msg, len, &off, "  %u cards of that kind are in the machine; which one was selected is not known\n", nc);
+	}
+	if (!nsel) {
+		msg_add(msg, len, &off, "No GPU that can be selected is at the selected addresses. `lspci -D -d 10de:` lists\n"
+			"the NVIDIA GPUs; select one with `sudo geforce-sriov install --device <BDF>`.\n"
+			"Nothing was written to any GPU.\n");
+		return 1;
+	}
+	next = *cfg;
+	memcpy(next.bdfs, sel, nsel * sizeof(sel[0]));
+	next.nbdfs = nsel;
+	gs_selection_command(sel, nsel, cfg->d3cold_off && gs_laptop_gpus(h->sys, sel, nsel, laptops) > 0, NULL, cmd,
+			     sizeof(cmd));
+	snprintf(args, sizeof(args), "%s", cmd + strlen("sudo geforce-sriov install "));
+	if (gs_display_lacking(h->build, h->sys, &next) && gs_display_forms(h, args, forms, sizeof(forms)))
+		msg_add(msg, len, &off, "Nothing was written to any GPU. The installed build has no display modules and that\n"
+			"selection has its boot display GPU. To select the GPUs that are there now, run one of:\n%s"
+			"then power the machine off and on. VMs that name VFs of a moved GPU must name its new VFs.\n", forms);
+	else
+		msg_add(msg, len, &off, "Nothing was written to any GPU. To select the GPUs that are there now, run:\n  %s\n"
+			"then power the machine off and on. VMs that name VFs of a moved GPU must name its new VFs.\n", cmd);
+	return 1;
+}
+
+int gs_selection_verify(const struct gs_host *h, const struct gs_config *cfg, const struct gs_activate_opts *o)
+{
+	char msg[GS_SEL_MSG_MAX];
+
+	if (!gs_selection_verdict(h, cfg, o, msg, sizeof(msg)))
+		return 0;
+	fprintf(stderr, "geforce-sriov: refused, nothing changed: %s", msg);
+	return GS_EXIT_REFUSED;
+}
+
+int gs_selection_unrecorded(const char *state_dir, const struct gs_config *cfg, char *line, size_t len)
+{
+	struct gs_ident rec[GS_CFG_MAX_BDFS];
+	unsigned int nrec = 0, i;
+	char cmd[GS_SEL_CMD_MAX];
+
+	if (gs_selection_read(state_dir, rec, &nrec) == -EINVAL)
+		return 0;
+	for (i = 0; i < cfg->nbdfs; i++)
+		if (!ident_listed(rec, nrec, cfg->bdfs[i].str))
+			break;
+	if (i == cfg->nbdfs)
+		return 0;
+	gs_selection_command(cfg->bdfs, cfg->nbdfs, cfg->d3cold_off, NULL, cmd, sizeof(cmd));
+	snprintf(line, len, "the card identities are not recorded yet, so a card that replaces a selected one is not noticed; "
+		 "run `%s` to record them", cmd);
+	return 1;
 }

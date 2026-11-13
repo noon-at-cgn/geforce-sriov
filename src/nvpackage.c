@@ -43,7 +43,7 @@ int gs_deps_step(void)
 	for (unsigned int d = 0; d < GS_DEP_COUNT; d++) {
 		if (gs_dep_present((enum gs_dep)d, rel))
 			continue;
-		fprintf(stderr, "geforce-sriov: refused, nothing changed: a prerequisite is missing; `geforce-sriov doctor`\n"
+		fprintf(stderr, "geforce-sriov: refused, nothing changed: a prerequisite is missing; `geforce-sriov install --dry-run`\n"
 			"names it. " GS_PREREQ_MSG "\n");
 		return GS_EXIT_REFUSED;
 	}
@@ -621,8 +621,7 @@ static void driver_line(const char *line, int filter, char *why, size_t len, enu
 	if (result && strncmp(line, key, strlen(key)) == 0) {
 		const char *v = line + strlen(key);
 
-		*result = strcmp(v, "unchanged") == 0 ? GS_DRIVER_UNCHANGED :
-			  strcmp(v, "record-only") == 0 ? GS_DRIVER_RECORD_ONLY : GS_DRIVER_CHANGED;
+		*result = strcmp(v, "unchanged") == 0 ? GS_DRIVER_UNCHANGED : GS_DRIVER_CHANGED;
 	}
 
 	for (size_t k = 0; k < sizeof(tags) / sizeof(tags[0]); k++)

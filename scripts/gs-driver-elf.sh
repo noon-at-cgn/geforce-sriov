@@ -12,12 +12,6 @@
 #   absent and 3 when it is defined more than once.
 # gs_elf_bytes FILE OFFSET COUNT
 #   Print COUNT bytes as lowercase hex, no separators.
-# gs_elf_closed_same OBJECT BEFORE AFTER
-#   Refuse unless every function that OBJECT (NVIDIA's closed nv-kernel.o) defines under a name
-#   that is unique has the same bytes in the module AFTER as in the module BEFORE. Prints how many
-#   functions were compared. Requires python3. Both modules are relocatable files: the bytes are
-#   those of the files, with every relocation field still empty. Where the relocations point and
-#   the object's data are not compared; the caller checks that OBJECT itself is unchanged.
 # gs_idx39_finished CORE FUNCTION OFFSET
 #   Refuse unless the five bytes at FUNCTION's recorded function-relative
 #   OFFSET in the finished module are 31 c0 90 90 90 and no relocation other
@@ -51,67 +45,6 @@ gs_elf_bytes() {
 	[ "$#" -eq 3 ] || { gs_elf_refuse 'byte read requires FILE OFFSET COUNT'; return 3; }
 	od -An -tx1 -j "$2" -N "$3" -- "$1" 2>/dev/null | tr -d ' \n'
 }
-
-gs_elf_closed_same() (
-	[ "$#" -eq 3 ] || { gs_elf_refuse 'the closed-code comparison requires OBJECT BEFORE AFTER'; exit 3; }
-	python3 - "$1" "$2" "$3" <<'PY'
-import struct, sys
-
-def refuse(msg):
-    print(msg)
-    sys.exit(3)
-
-def functions(path):
-    """name -> bytes of each function symbol that is defined once in an ELF64 little-endian relocatable file."""
-    try:
-        data = open(path, 'rb').read()
-    except OSError as e:
-        refuse('cannot read %s: %s' % (path, e))
-    if data[:6] != b'\x7fELF\x02\x01' or len(data) < 64:
-        refuse('%s is not a 64-bit little-endian ELF file' % path)
-    shoff, = struct.unpack_from('<Q', data, 0x28)
-    shentsize, shnum = struct.unpack_from('<HH', data, 0x3a)
-    if shentsize != 64 or shoff + shnum * 64 > len(data):
-        refuse('%s has no usable section table' % path)
-    sections = [struct.unpack_from('<IIQQQQIIQQ', data, shoff + i * 64) for i in range(shnum)]
-    found, twice = {}, set()
-    for sec in sections:
-        if sec[1] != 2:  # SHT_SYMTAB
-            continue
-        names = sections[sec[6]]
-        for at in range(sec[4], sec[4] + sec[5], 24):
-            name, info, _, shndx, value, size = struct.unpack_from('<IBBHQQ', data, at)
-            if info & 0xf != 2 or shndx == 0 or shndx >= 0xff00 or size == 0 or shndx >= shnum:
-                continue  # not a function with a body in this file
-            end = data.index(b'\0', names[4] + name)
-            text = data[names[4] + name:end].decode('latin-1')
-            home = sections[shndx]
-            if home[1] == 8 or value + size > home[5]:  # SHT_NOBITS, or outside its section
-                refuse('%s: function %s lies outside its section' % (path, text))
-            if text in found:
-                twice.add(text)
-            found[text] = data[home[4] + value:home[4] + value + size]
-    for text in twice:
-        del found[text]
-    return found
-
-closed, before, after = (functions(p) for p in sys.argv[1:4])
-if not closed:
-    refuse('%s defines no function' % sys.argv[1])
-compared = 0
-for name in closed:
-    if name not in before:
-        continue  # a name that is not unique in the module cannot be followed
-    if name not in after:
-        refuse('function %s of the closed object is not in the module that was built with the owner' % name)
-    if before[name] != after[name]:
-        refuse('function %s of the closed object differs between the two modules' % name)
-    compared += 1
-if compared == 0 or compared * 2 < len(closed):
-    refuse('only %d of the %d functions of the closed object could be followed into the modules' % (compared, len(closed)))
-print('the %d functions of the closed object that the modules name are the same bytes in both (%d defined); relocations and data are not compared' % (compared, len(closed)))
-PY
-)
 
 gs_idx39_finished() (
 	[ "$#" -eq 3 ] || { gs_elf_refuse 'idx 39 check requires CORE FUNCTION OFFSET'; exit 3; }

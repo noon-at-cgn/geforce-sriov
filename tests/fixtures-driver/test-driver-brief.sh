@@ -41,6 +41,7 @@ check() {
         printf 'FAIL: %s\n' "$description" >&2
     fi
 }
+not_contains() { ! contains "$@"; }
 
 contains() {
     case $1 in
@@ -53,15 +54,20 @@ exists() { [ -e "$1" ] || [ -L "$1" ]; }
 snapshot() { ( cd "$1" && find . -mindepth 1 \( -type f -o -type l \) -print 2>/dev/null | LC_ALL=C sort ); }
 
 # A .text image of the size the plain gate reads: zeros, with the eight recorded
-# offsets set when PATCHED is 1.
+# offsets set when PATCHED is 1, and the one that the Ada placement change adds when the
+# third argument is 1.
 fx_text() {
     path=$1
     patched=$2
+    ada=${3:-0}
     dd if=/dev/zero of="$path" bs=1 count=0 seek=$((0xd89671)) 2>/dev/null
     [ "$patched" -eq 0 ] && return 0
     for at in 0x14a7c4 0x14a7c5 0x14a7c6 0x14a7c7 0xa16708 0xa16709 0xd8966f 0xd89670; do
         printf 'P' | dd of="$path" bs=1 seek=$((at)) conv=notrunc 2>/dev/null
     done
+    [ "$ada" = 1 ] || return 0
+    at=0xf7c06
+    printf 'P' | dd of="$path" bs=1 seek=$((at)) conv=notrunc 2>/dev/null
 }
 
 # Every host path is under FX. The driver is copied with its sourced libraries
@@ -120,6 +126,7 @@ case \$key in
     gate-object) d=ce8a485bfaeebca3a9609f9415a6df81c160a0a53509aec093bc3361a6d12701 ;;
     vfcount-object) d=f5b788cdb3e06aed18860cc6cf950dcc13143bd831d90d8e9c4bf9e744426f12 ;;
     patched-object) d=946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29 ;;
+    placed-object) d=20eaebcac4f5220d21f64bcd5145143abe8f806a25cb9e249088a1b98df7d157 ;;
     patched39-object) d=83ce12abba0441812aa135d4f099636513d709090c3da8999cda9243bd3b67ff ;;
     stock-plugin) d=7e52b76dc7ca8490e7ffbc1fd724f5db07f3791a3a2ec07f2d595bf05abdcaa7 ;;
     mixed-plugin) d=7ddfad458bbfdb0c4d6902a9e045bd15c84f63aea19314f3d3a60967224b73c6 ;;
@@ -279,6 +286,7 @@ if [ -z "${stage:-}" ]; then
         scheduler) stage=scheduler ;;
         gate|module-gate) stage=module-gate ;;
         patched|vf-count) stage=vf-count ;;
+        placed|ada-placement) stage=ada-placement ;;
         patched39|display-idx39) stage=display-idx39 ;;
         patched-plugin.mixed|plugin-mixed) stage=plugin-mixed ;;
         patched-plugin|plugin-div4) stage=plugin-div4 ;;
@@ -297,6 +305,7 @@ case $stage in
     scheduler) printf 'gate-object\n' >"$output" ;;
     module-gate) printf 'vfcount-object\n' >"$output" ;;
     vf-count) printf 'patched-object\n' >"$output" ;;
+    ada-placement) printf 'placed-object\n' >"$output" ;;
     display-idx39) printf 'patched39-object\n' >"$output" ;;
     plugin-mixed) printf 'mixed-plugin\n' >"$output" ;;
     plugin-div4) printf 'patched-plugin-fixture\n' >"$output" ;;
@@ -375,6 +384,17 @@ case_dry_run() {
     fx_run --dry-run --display --host-cuda --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
     check "dry-run both: exits 0" test "$rc" -eq 0
     check "dry-run both: mutates nothing" test "$before" = "$(snapshot "$FX/root")"
+
+    # The plan names the end of the display chain: the one after idx 39 on the ada-placement object with
+    # an Ada card selected, the default display one otherwise.
+    printf 'known\n' >"$FX/sha-mode"
+    fx_run --dry-run --display --ada-selected --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+    check "dry-run display, Ada: exits 0" test "$rc" -eq 0
+    check "dry-run display, Ada: names the ada-placement chain end" contains "$out" 'object chain digest 48fd6ddd'
+    check "dry-run display, Ada: names the ada-placement step" contains "$out" "# ada-placement, with an Ada card selected"
+    fx_run --dry-run --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+    check "dry-run display, no Ada card: names the default chain end" contains "$out" 'object chain digest 83ce12ab'
+    check "dry-run display, no Ada card: no ada-placement step" not_contains "$out" 'ada-placement'
 }
 
 # Every refusal happens before the first installed-file change.
@@ -497,16 +517,21 @@ case_restore_plain() {
         "$FX/root/etc/modprobe.d/geforce-sriov-nvidia.conf"
     check "restore plain: a foreign file is untouched" test "$(cat "$FX/root/opt/foreign")" = 'foreign file'
 
-    # A foreign replacement of the installed core is kept, with a failed status.
+    # A changed copy of the installed build (same build-id, other bytes, as a signed module is) is kept,
+    # with a failed status.
     fx_run
-    printf 'foreign module\n' >"$(installed_module nvidia)"
+    printf 'foreign module\nid=%s\n' "$(sed -n 's/^module_build_id=//p' "$FX/root/var/lib/geforce-sriov/driver-build")" \
+        >"$(installed_module nvidia)"
     fx_run --restore
     check "restore plain: the foreign core is kept" test \
         "$(sed -n '1p' "$(installed_module nvidia)")" = 'foreign module'
     check "restore plain: the foreign core is reported" contains "$out" 'not the module this script installed'
+    check "restore plain: a foreign core is a failed restore (exit 1)" test "$rc" -eq 1
+    check "restore plain: the failure is reported as failed" contains "$out" \
+        "was kept: it is not the module this script installed"
     check "restore plain: the stock backup survives a foreign core" test -f \
         "$FX/root/var/lib/geforce-sriov/stock/$kernel/nvidia.ko"
-    check "restore plain: the record survives a foreign core" test -f \
+    check "restore plain: a failed restore keeps the record, so the restore can be run again" test -e \
         "$FX/root/var/lib/geforce-sriov/driver-build"
 }
 

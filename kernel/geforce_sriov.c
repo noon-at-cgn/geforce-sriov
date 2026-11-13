@@ -166,7 +166,8 @@ static_assert(GS_DEFAULT_VFS == 4 && GS_VFS_MAX == 16); /* the text above */
 
 static char *bdfs = "";
 module_param(bdfs, charp, 0444);
-MODULE_PARM_DESC(bdfs, "Required: 1-8 comma-separated PFs dddd:bb:ss.0 as named in /sys/bus/pci/devices (lowercase, function 0). Only these are changed; empty refuses to load");
+MODULE_PARM_DESC(bdfs, "Required: 1-32 comma-separated PFs dddd:bb:ss.0 as named in /sys/bus/pci/devices (lowercase, function 0). Only these are changed; empty refuses to load");
+static_assert(GS_MAX_PFS == 32 && GS_BDF_LIST_STR_SIZE <= 1024); /* the text above; charp limit */
 
 /*
  * Parsed bdfs and, per PF, the functions of its slot in use at load (bit n =

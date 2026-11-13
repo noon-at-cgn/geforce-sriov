@@ -19,10 +19,15 @@
 #include "gs_lifecycle.h"
 #include "gs_internal.h"
 
-/* ---- doctor ------------------------------------------------------------- */
+/*
+ * ---- host checks: gs_hostcheck, the checks `install --dry-run` and setup run before install (GS_HOSTCHECK_PRE) and
+ * status runs after it (GS_HOSTCHECK_POST). Rows that status prints itself are not repeated in POST. ----
+ */
 
 struct tally {
 	unsigned int fail, warn;
+	int post;          /* status's call: no OK lines, and none of the lines that only describe */
+	const char *head;  /* printed before the first line that is shown */
 };
 
 static void check(struct tally *t, const char *level, const char *fmt, ...)
@@ -36,6 +41,12 @@ static void check(struct tally *t, const char *level, const char *fmt, ...)
 		t->fail++;
 	else if (strcmp(level, "WARN") == 0)
 		t->warn++;
+	else if (t->post && strcmp(level, "OK") == 0)
+		return;
+	if (t->head) {
+		fputs(t->head, stdout);
+		t->head = NULL;
+	}
 	printf("[%-4s] ", level);
 	va_start(ap, fmt);
 	vprintf(fmt, ap);
@@ -43,7 +54,7 @@ static void check(struct tally *t, const char *level, const char *fmt, ...)
 	putchar('\n');
 }
 
-/* Each line of text, prefixed with indent (continuation lines of a doctor check). */
+/* Each line of text, prefixed with indent (continuation lines of a check). */
 static void print_indented(const char *indent, const char *text)
 {
 	while (*text) {
@@ -82,7 +93,7 @@ static void ada_stack_note(char *buf, size_t len)
 	versions[voff] = digests[doff] = 0;
 	snprintf(buf, len, "Ada needs your own NVIDIA host driver setup (%s, proprietary, CPU-RM mode with NVreg_EnableGpuFirmware=0): "
 		 "nvidia.ko rebuilt with the scheduler, Ada probe-gate and VF-count byte patches, and the patched plugin copy of "
-		 "libnvidia-vgpu.so, SHA-256 %s (docs/driver-patch.md#byte-patches). `install` builds both "
+		 "libnvidia-vgpu.so, SHA-256 %s (docs/driver-patch.md#revisions). `install` builds both "
 		 "with geforce-sriov-driver unless --driver=skip is given", versions, digests);
 }
 
@@ -95,10 +106,12 @@ static void entry_checks(struct tally *t, const struct gs_card *c, const struct 
 	const struct gs_device *e = c->entry;
 	char why[512];
 
-	printf("  %s (%s, %s) -> professional counterpart 10de:%04x %s\n", e->name, e->die, gs_generation_name(e->generation),
-	       gs_target_of(e)->device, gs_target_of(e)->name);
+	if (!t->post)
+		printf("  %s (%s, %s) -> professional counterpart 10de:%04x %s\n", e->name, e->die, gs_generation_name(e->generation),
+		       gs_target_of(e)->device, gs_target_of(e)->name);
 	gs_vfs_describe(e, cfg, why, sizeof(why));
-	printf("  VFs: %s\n", why);
+	if (!t->post)
+		printf("  VFs: %s\n", why);
 	switch (gs_vfs_check(e, cfg, why, sizeof(why))) {
 	case -1:
 		check(t, "FAIL", "%s: %s; activate refuses it", c->pf.str, why);
@@ -203,13 +216,13 @@ struct id_fn {
 	int display;
 };
 
-#define ID_SCAN_MAX 64u
+#define ID_SCAN_MAX (8u * GS_MAX_PFS)
 
 /*
  * The PCI scan the identity hook relies on, read as strictly as the hook reads it: every entry of
  * bus/pci/devices must be a canonical address with readable vendor and device, and every NVIDIA
  * physical function (no physfn) a readable class. Returns -1 and the offending entry in bad
- * otherwise; doctor then cannot confirm the mapping. Sorted by address.
+ * otherwise; the check then cannot confirm the mapping. Sorted by address.
  */
 static int scan_identity(const char *sysroot, struct id_fn *out, unsigned int *n, char *bad, size_t len)
 {
@@ -267,7 +280,7 @@ static int scan_identity(const char *sysroot, struct id_fn *out, unsigned int *n
  * those queries fail does it fall back to the device ID, and only for an ID that every NVIDIA
  * physical function having it (any class) is a mapped card. HOST is reported only for a mapped
  * card whose address query succeeds; the fallback never forces it. Whether the installed driver
- * answers those queries is unknown until nvidia-vgpud runs; doctor never issues them.
+ * answers those queries is unknown until nvidia-vgpud runs; the checks never issue them.
  */
 static void identity_checks(struct tally *t, const char *sysroot, const struct gs_addr *sel, unsigned int nsel,
 			    int force_host)
@@ -436,13 +449,8 @@ static void modprobe_checks(struct tally *t, const char *dir)
 		      !gs_pathf(own, sizeof(own), "%s/%s", dir, strrchr(GS_NVIDIA_MODPROBE, '/') + 1) && gs_exists(own) ?
 		      "; its own file stays until uninstall" : " and writes no file of its own");
 	if (!hold_files(&v, files, sizeof(files))) {
-		/* The old hold file goes as a whole; any other file may hold more than the two lines. */
-		const char *base = strrchr(v.blacklist, '/');
-		int whole = strcmp(v.blacklist, v.install_false) == 0 && base &&
-			    strcmp(base + 1, "nvidia-manual-load.conf") == 0;
-
-		check(t, "WARN", "nvidia is held back at boot by %s; activate loads the driver itself, so remove %s%s",
-		      files, whole ? "" : "the `blacklist nvidia` and `install nvidia /bin/false` lines from ", files);
+		check(t, "WARN", "nvidia is held back at boot by %s; activate loads the driver itself, so remove "
+		      "the `blacklist nvidia` and `install nvidia /bin/false` lines from %s", files, files);
 	}
 }
 
@@ -493,6 +501,43 @@ static void build_inputs(struct tally *t, const struct gs_diag_opts *o, int live
 	else if (host_cuda && !companion)
 		check(t, lvl, "host CUDA is selected, and its build needs NVIDIA's second package: pass --companion-file PATH\n"
 		      "       (or --companion-source DIR) to setup or install, or use --no-host-cuda");
+}
+
+/*
+ * The host desktop: NVIDIA's graphics libraries are complete, the loader takes them, the installed driver build
+ * accepts their version, and a display server that runs on them draws with them. Nothing here fails the checks for
+ * a host with host_desktop=off that has no such files.
+ */
+static void desktop_checks(struct tally *t, const struct gs_config *cfg, const struct gs_build *b, int want_display)
+{
+	char dir[GS_PATH_MAX], version[32], bad[GS_PATH_MAX], text[2 * GS_PATH_MAX], server[512], loaded[256];
+	int want = cfg->host_desktop != GS_DESKTOP_OFF && want_display;
+	int state = gs_nvlibs_state(&gs_nvset_desktop, GS_MANIFEST, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad));
+	int ret = gs_nvlibs_line(&gs_nvset_desktop, GS_MANIFEST, want, gs_run_capture, text, sizeof(text));
+
+	if (ret) {
+		const char *lvl = ret == 1 ? "OK" : ret == 2 ? "INFO" : state == 1 ? "WARN" :
+				  state == 0 && cfg->host_desktop == GS_DESKTOP_AUTO ? "INFO" : "FAIL";
+
+		check(t, lvl, "host desktop libraries: %s", text);
+	}
+	if (!state)
+		return;
+	if (b->driver_version[0] && strcmp(b->client_accept[0] ? b->client_accept : b->driver_version, version) != 0)
+		check(t, want ? "FAIL" : "WARN", "host desktop: the libraries are %s and the installed driver build accepts %s; programs will be "
+		      "refused by the driver. Run `sudo ./geforce-sriov install --companion-file PATH` again with NVIDIA's second package",
+		      version, b->client_accept[0] ? b->client_accept : b->driver_version);
+	else if (b->client_accept[0])
+		check(t, "OK", "host desktop: NVIDIA's driver accepts programs of version %s (this build)", b->client_accept);
+	if (want) {
+		char line[1024];
+		int stale = gs_loaded_line(GS_LIVE_SYSFS, b, loaded, sizeof(loaded));
+		int sv = gs_desktop_servers(GS_LIVE_PROC, server, sizeof(server));
+		int lv = gs_desktop_draw_line(sv, server, stale, loaded, line, sizeof(line));
+
+		if (lv)
+			check(t, lv == 3 ? "FAIL" : lv == 2 ? "WARN" : "INFO", "host desktop: %s", line);
+	}
 }
 
 /*
@@ -684,7 +729,7 @@ static void boot_checks(struct tally *t, const struct gs_diag_opts *o, int live,
 
 /*
  * 1 when install has not run on this host: no build record and no install manifest beside it
- * (GS_STATE_DIR). What install puts in place is then not missing, only not there yet, so doctor notes
+ * (GS_STATE_DIR). What install puts in place is then not missing, only not there yet, so the checks note
  * it instead of warning. After an install, and after `install --driver=skip`, the manifest is there.
  */
 static int host_fresh(const struct gs_diag_opts *o, int live)
@@ -762,7 +807,7 @@ static int sleep_masked(const char *dir)
 
 /*
  * A host with the laptop rows laptops (n) selected: nvidia's runtime power management and system sleep each power
- * the GPU off (D3cold), which resets its SR-IOV state and every vGPU. doctor only names the change, once per GPU
+ * the GPU off (D3cold), which resets its SR-IOV state and every vGPU. The checks only name the change, once per GPU
  * while it is missing; the package makes neither.
  */
 static void laptop_host_checks(struct tally *t, const struct gs_diag_opts *o, int live, const struct gs_addr *laptops,
@@ -788,35 +833,42 @@ static void laptop_host_checks(struct tally *t, const struct gs_diag_opts *o, in
 			      laptops[i].str);
 }
 
-int gs_cmd_doctor(const struct gs_diag_opts *o)
+int gs_hostcheck(const struct gs_diag_opts *o, enum gs_hostcheck_mode mode)
 {
 	const char *sysroot = o->sysroot ? o->sysroot : GS_LIVE_SYSFS;
 	int live = gs_is_live_root(sysroot);
 	struct gs_addr devs[GS_CFG_MAX_BDFS], laptops[GS_CFG_MAX_BDFS];
 	struct gs_module_state m;
 	struct gs_config cfg;
-	struct tally t = { 0, 0 };
+	struct tally t = { 0, 0, 0, NULL };
 	const char *cfg_path, *source, *isrc;
 	const struct gs_addr *isel;
-	char err[512], p[GS_PATH_MAX], act[GS_PATH_MAX], ver[64] = "";
+	char err[512], p[GS_PATH_MAX], ver[64] = "";
 	unsigned int n, i, nisel, nlaptops;
-	int id_on, id_force, activating = gs_activating_left(o, live, act, sizeof(act));
+	int id_on, id_force;
+	int pre = mode == GS_HOSTCHECK_PRE, post = !pre;
 
-	printf("geforce-sriov %s doctor (sysfs root %s%s)\n", GS_VERSION, sysroot,
-	       live ? "" : ", diagnostic fixture: host checks skipped");
+	t.post = post;
+	if (pre)
+		printf("geforce-sriov %s: checks before install (sysfs root %s%s)\n", GS_VERSION, sysroot,
+		       live ? "" : ", diagnostic fixture: host checks skipped");
+	else
+		t.head = "\nOther host checks (OK lines are not shown):\n";
 	if (gs_diag_config(o, &cfg, &cfg_path, err, sizeof(err))) {
-		check(&t, "FAIL", "config: %s", err);
+		if (pre)
+			check(&t, "FAIL", "config: %s", err);
 		gs_config_defaults(&cfg);
-	} else if (!cfg_path) {
+	} else if (pre && !cfg_path) {
 		check(&t, "INFO", "config: not read (fixture root; pass --config)");
-	} else if (!cfg.present) {
+	} else if (pre && !cfg.present) {
 		check(&t, "INFO", "config: %s absent; %s", cfg_path,
 		      o->ndevices ? "the selected devices come from --device" : "defaults apply and no device is selected");
-	} else {
-		check(&t, "OK", "config: %s: %u device(s) selected; display=%s host_cuda=%s ari=%s msix=%s vfs=%u%s identity=%s",
-		      cfg_path, cfg.nbdfs, gs_display_mode_name(cfg.display), gs_sw_name(cfg.host_cuda), gs_sw_name(cfg.ari), gs_sw_name(cfg.msix),
-		      gs_config_vfs(&cfg), cfg.vfs ? "" : " (default)", cfg.identity == GS_SW_ON ? "on" : "off");
-		if (live && gs_config_file_safe(cfg_path, err, sizeof(err)))
+	} else if (cfg_path && cfg.present) {
+		if (pre)
+			check(&t, "OK", "config: %s: %u device(s) selected; display=%s host_cuda=%s ari=%s msix=%s vfs=%u%s identity=%s",
+			      cfg_path, cfg.nbdfs, gs_display_mode_name(cfg.display), gs_sw_name(cfg.host_cuda), gs_sw_name(cfg.ari), gs_sw_name(cfg.msix),
+			      gs_config_vfs(&cfg), cfg.vfs ? "" : " (default)", cfg.identity == GS_SW_ON ? "on" : "off");
+		if (post && live && gs_config_file_safe(cfg_path, err, sizeof(err)))
 			check(&t, "FAIL", "config: %s; activate refuses it", err);
 	}
 	n = gs_selected_devices(o, &cfg, sysroot, devs, &source);
@@ -844,9 +896,9 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 		check(&t, "OK", "kernel livepatch support present");
 	else
 		check(&t, "FAIL", "kernel: no %s/kernel/livepatch (CONFIG_LIVEPATCH is required)", sysroot);
-	if (live && gs_cmdline_noari(GS_LIVE_PROC))
+	if (post && live && gs_cmdline_noari(GS_LIVE_PROC))
 		check(&t, "INFO", "kernel command line has pci=noari: activate loads %s with ari=0", GS_MODULE_NAME);
-	if (!gs_pathf(p, sizeof(p), "%s/kernel/iommu_groups", sysroot)) {
+	if (post && !gs_pathf(p, sizeof(p), "%s/kernel/iommu_groups", sysroot)) {
 		DIR *d = opendir(p);
 		int any = 0;
 		struct dirent *de;
@@ -859,9 +911,9 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 		check(&t, any ? "OK" : "WARN", "IOMMU groups %s", any ? "present" : "absent: VFs cannot be assigned to VMs");
 	}
 	gs_read_module_state(sysroot, &m);
-	if (!m.loaded)
+	if (!m.loaded && pre)
 		check(&t, "INFO", "module %s not loaded (activate loads it)", GS_MODULE_NAME);
-	else
+	else if (m.loaded)
 		check(&t, m.lp_ok ? "OK" : "WARN",
 		      "module %s loaded: ari=%s msix=%s vfs=%s bdfs=%s; livepatch %s",
 		      GS_MODULE_NAME, m.ari, m.msix, m.vfs[0] ? m.vfs : "(none)",
@@ -880,15 +932,17 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 		int deps_ok = 1;
 		static const char *const deps[] = { "lspci", "setpci" };
 
-		if (getuid() != 0)
+		if (post && getuid() != 0)
 			check(&t, "INFO", "not root: config space beyond 64 bytes is unreadable; bridge ARI support unknown");
-		if (!mod && host_fresh(o, live))
-			check(&t, "INFO", "livepatch module geforce_sriov for the running kernel is not built yet; install builds it with DKMS");
-		else
-			check(&t, mod ? "OK" : "WARN", "livepatch module geforce_sriov for the running kernel %s",
-			      mod ? "installed" : "not found under /lib/modules/$(uname -r) (geforce-sriov install builds it with DKMS)");
+		if (post) {
+			if (!mod && host_fresh(o, live))
+				check(&t, "INFO", "livepatch module geforce_sriov for the running kernel is not built yet; install builds it with DKMS");
+			else
+				check(&t, mod ? "OK" : "WARN", "livepatch module geforce_sriov for the running kernel %s",
+				      mod ? "installed" : "not found under /lib/modules/$(uname -r) (geforce-sriov install builds it with DKMS)");
+		}
 		/* What the driver step needs: headers for the running kernel, a C compiler and make. */
-		{
+		if (pre) {
 			char rel[64] = "", hp[GS_PATH_MAX];
 			const char *lvl = mod ? "WARN" : "FAIL";
 			const char *why = mod ? ": only a later `install` needs it (the livepatch module is installed for this kernel)"
@@ -937,7 +991,7 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 			}
 		}
 		/* A kernel that NVIDIA's module was built for and that has no livepatch module boots with no VFs. */
-		{
+		if (post) {
 			char kernels[512];
 
 			if (gs_kernels_without_livepatch("", GS_STATE_DIR, kernels, sizeof(kernels)))
@@ -946,6 +1000,7 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 				      kernels, GS_MODULE_NAME);
 		}
 		/* What the later steps need: a live install (dkms, systemctl). */
+		if (pre) {
 		if (dkms && sysctl)
 			check(&t, "OK", "dkms and systemctl found (a live install needs both)");
 		else if (!dkms && sysctl)
@@ -965,15 +1020,12 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 			if (missing)
 				check(&t, "INFO", "%s", GS_PREREQ_MSG);
 		}
-		if (gs_exists(GS_ATTEMPT_MARKER)) {
+		}
+		if (post && gs_exists(GS_ATTEMPT_MARKER)) {
 			check(&t, "FAIL", "activation lock %s is set: an activation attempt did not finish.", GS_ATTEMPT_MARKER);
 			print_indented("       ", gs_recovery_msg);
-		} else if (!activating) {
-			check(&t, "OK", "no unfinished activation attempt");
 		}
-		if (gs_unit_file_present("geforce-sriov-prepare.service"))
-			check(&t, "WARN", "%s is obsolete; replace it with the livepatch-only early unit (%s) and %s",
-			      "geforce-sriov-prepare.service", GS_UNIT_LIVEPATCH, GS_UNIT_ACTIVATE);
+		if (post)
 		switch (gs_nvidia_autoload(where, sizeof(where))) {
 		case 1:
 		case 2:
@@ -1017,37 +1069,27 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 		}
 		if (deps_ok)
 			check(&t, "OK", "lspci and setpci found (sriov-manage needs them for `activate`)");
-		gs_nvidia_version(GS_LIVE_PROC, ver, sizeof(ver));
-		if (ver[0]) {
-			char line[256];
-			int known = 0;
+		if (post) {
+			gs_nvidia_version(GS_LIVE_PROC, ver, sizeof(ver));
+			if (ver[0]) {
+				int known = 0;
 
-			/* The confirmed version gets no warning; every other version is a warning that names it. */
-			if (gs_version_confirmed(GS_VERSION_HOST, ver)) {
-				gs_version_format(GS_VERSION_MSG_CONFIRMED, ver, line, sizeof(line));
-				check(&t, "OK", "%s", line);
-			} else {
-				gs_version_format(GS_VERSION_MSG_DOCTOR_WARNING, ver, line, sizeof(line));
-				printf("%s\n", line);
-				t.warn++;
+				for (i = 0; i < GS_HOOK_DRIVER_VERSION_COUNT; i++)
+					known |= strcmp(ver, gs_hook_driver_versions[i]) == 0;
+				check(&t, known || !id_on ? "INFO" : "WARN",
+				      "NVIDIA driver %s loaded%s", ver,
+				      known ? "; the identity hook acts on this version" :
+				      "; the identity hook passes this version through unchanged");
 			}
-			for (i = 0; i < GS_HOOK_DRIVER_VERSION_COUNT; i++)
-				known |= strcmp(ver, gs_hook_driver_versions[i]) == 0;
-			check(&t, known || !id_on ? "INFO" : "WARN",
-			      "NVIDIA driver %s loaded%s", ver,
-			      known ? "; the identity hook acts on this version" :
-			      "; the identity hook passes this version through unchanged");
 		}
 	}
-	if (activating)
-		check(&t, "WARN", "%s exists: geforce-sriov activate is running or did not finish; check reports NOT READY until activate succeeds",
-		      act);
-	if (o->unit_dir || live)
+	if (post && (o->unit_dir || live))
 		dropin_checks(&t, o->unit_dir);
-	boot_checks(&t, o, live, host_fresh(o, live));
+	if (post)
+		boot_checks(&t, o, live, host_fresh(o, live));
 	if (o->modprobe_dir || live)
 		modprobe_checks(&t, o->modprobe_dir ? o->modprobe_dir : "/etc/modprobe.d");
-	if (o->plugin || live)
+	if (post && (o->plugin || live))
 		plugin_checks(&t, o->plugin ? o->plugin : gs_plugin_link(),
 			      o->build && o->build->record ? o->build->record : GS_DRIVER_BUILD);
 	{
@@ -1062,6 +1104,8 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 			cfg.display = o->display;
 		if (o->host_cuda_set)
 			cfg.host_cuda = o->host_cuda ? GS_SW_ON : GS_SW_OFF;
+		if (o->host_desktop_set)
+			cfg.host_desktop = o->host_desktop ? GS_DESKTOP_ON : GS_DESKTOP_OFF;
 		for (i = 0; i < n; i++) {
 			struct gs_card c;
 
@@ -1072,9 +1116,9 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 		}
 		/* What the config asks for against what the installed build provides. */
 		want_display = cfg.display != GS_DISPLAY_OFF && boot_display;
-		if (!o->skip_driver)
+		if (pre && !o->skip_driver)
 			build_inputs(&t, o, live, want_display, cfg.host_cuda == GS_SW_ON, boot_bdf, cfg.nbdfs || o->ndevices);
-		if (gs_build_identity(o->build, live, &b)) {
+		if (post && gs_build_identity(o->build, live, &b)) {
 			/*
 			 * No record and no install manifest beside it (GS_STATE_DIR): install has not run here, or
 			 * uninstall removed it, and install runs the driver step. After `install --driver=skip` the
@@ -1112,79 +1156,33 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 				      lp.state == GS_LOADED_MISMATCH ? "MISMATCH" : "UNKNOWN",
 				      lp.why[0] ? ": " : "", lp.why);
 			}
-			/* No record: there is nothing a record could name. */
-			if (b.record_read && (b.display < 0 || b.host_cuda < 0))
-				check(&t, "INFO", "the build record does not name the installed features (not recorded)");
-			else if (b.record_read)
-				check(&t, "INFO", "installed build: display=%s host_cuda=%s",
-				      b.display ? "on" : "off", b.host_cuda ? "on" : "off");
 			if (b.display >= 0) {
 				if (want_display && !b.display)
 					check(&t, "FAIL", "display=%s asks for the display build, and the installed build has none; "
 					      "run `sudo geforce-sriov install` again with --companion-file and --nvkms-source", gs_display_mode_name(cfg.display));
-				else if (!want_display && b.display)
-					check(&t, "INFO", "the installed build has the display stack; display=%s keeps it off",
-					      gs_display_mode_name(cfg.display));
 			} else if (want_display && b.record_read) {
 				check(&t, "WARN", "display is requested and the build record does not say whether the display "
 				      "stack is installed; run `sudo geforce-sriov install` again to record it");
 			}
-			if (b.host_cuda >= 0) {
-				if (cfg.host_cuda && !b.host_cuda)
-					check(&t, "FAIL", "host_cuda=on asks for host CUDA, and the installed build has no nvidia-uvm; "
-					      "run `sudo geforce-sriov install` again with --companion-file");
-				else if (!cfg.host_cuda && b.host_cuda)
-					check(&t, "INFO", "the installed build carries nvidia-uvm; host_cuda=off keeps it unloaded");
-			}
-			/* Host CUDA needs NVIDIA's CUDA library as well as nvidia-uvm; the loader is asked which one programs get. */
-			if (live) {
-				char cuda[2 * GS_PATH_MAX];
-				int libs = gs_cuda_libs_line(GS_MANIFEST, cfg.host_cuda == GS_SW_ON, gs_run_capture, cuda, sizeof(cuda));
-
-				if (libs)
-					check(&t, libs == 1 ? "OK" : libs == 2 ? "INFO" : "WARN", "host CUDA libraries: %s", cuda);
-			}
-			/* The running driver against the one the record names. */
-			if (b.driver_version[0]) {
-				if (ver[0] && strcmp(ver, b.driver_version))
-					check(&t, "WARN", "the installed build record names NVIDIA's driver %s; the running driver is %s",
-					      b.driver_version, ver);
-				if (b.driver_version_confirmed == 0 && gs_version_confirmed(GS_VERSION_HOST, b.driver_version)) {
-					gs_combination_line(&b, line, sizeof(line));
-					check(&t, "WARN", "%s", line);
-				} else if (b.driver_version_confirmed == 0) {
-					gs_version_format(GS_VERSION_MSG_DOCTOR_WARNING, b.driver_version, line, sizeof(line));
-					printf("%s (the installed build record)\n", line);
-					t.warn++;
-				} else if (b.driver_version_confirmed < 0) {
-					line[0] = '\0';
-					gs_version_format(gs_version_confirmed(GS_VERSION_HOST, b.driver_version) ?
-							  GS_VERSION_MSG_CONFIRMED : GS_VERSION_MSG_STATUS,
-							  b.driver_version, line, sizeof(line));
-					check(&t, "INFO", "the build record does not record the driver's classification; "
-					      "the current policy says: %s", line);
-				}
-			}
-			{
-				char conf[64];
-
-				if (gs_record_value(b.record, "confirmation", conf, sizeof(conf)))
-					check(&t, "INFO", "build record: confirmation=%s", conf);
-				else if (b.record_read)
-					check(&t, "INFO", "build record: no confirmation line (not recorded)");
-			}
+			if (b.host_cuda >= 0 && cfg.host_cuda && !b.host_cuda)
+				check(&t, "FAIL", "host_cuda=on asks for host CUDA, and the installed build has no nvidia-uvm; "
+				      "run `sudo geforce-sriov install` again with --companion-file");
+			/* NVIDIA's graphics libraries for the host desktop, and the driver build that has to accept them. */
+			if (live)
+				desktop_checks(&t, &cfg, &b, want_display);
 		}
 	}
 
-	if (n == 0)
+	if (pre && n == 0)
 		check(&t, "WARN", "no NVIDIA display function found (%s)", source);
 
 	for (i = 0; i < n; i++) {
 		struct gs_card c;
 
-		printf("\n%s (%s)\n", devs[i].str, source);
+		if (pre)
+			printf("\n%s (%s)\n", devs[i].str, source);
 		/*
-		 * A laptop row's power state, read only: doctor writes nothing. A sysfs config read resumes a
+		 * A laptop row's power state, read only: the checks write nothing. A sysfs config read resumes a
 		 * runtime-suspended device by itself, so activation's config-read gate is a plain read here.
 		 */
 		{
@@ -1206,11 +1204,11 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 			} else if (pe && pe->laptop) {
 				char why[GS_D3COLD_WHY_SIZE];
 
-				gs_d3cold_why(why, sizeof(why), &devs[i], 1, devs, n, NULL, 0, "       ");
+				gs_d3cold_why(why, sizeof(why), &devs[i], 1, devs, n, "       ");
 				check(&t, "FAIL", "%s", why);
 			}
 			if (pe && pe->laptop && live && getuid() != 0) {
-				check(&t, "INFO", "%s: laptop GPU: run doctor as root to check that it answers", devs[i].str);
+				check(&t, "INFO", "%s: laptop GPU: run as root to check that it answers", devs[i].str);
 			} else if (pe && pe->laptop && !gs_pathf(dir, sizeof(dir), "%s/bus/pci/devices/%s", sysroot, devs[i].str)) {
 				gs_pf_runtime_status(sysroot, &devs[i], rt, sizeof(rt));
 				if (gs_config_gate(dir, dev, gate, sizeof(gate))) {
@@ -1232,28 +1230,16 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 			}
 		}
 		gs_card_inspect(sysroot, &devs[i], &c);
-		/* Ada: the framebuffer slots of its VFs, once it has VFs. Not held is a warning, never a failure. */
-		if (live && c.present && c.entry && c.entry->generation == GS_ADA && c.numvfs) {
-			struct gs_build fb_build;
-			char slots[768], running[32] = "";
-			int have, held;
-
-			gs_nvidia_version(GS_LIVE_PROC, running, sizeof(running));
-			have = gs_build_identity(o->build, live, &fb_build);
-			held = gs_fb_line(GS_LIVE_PROC, &cfg, have ? fb_build.record : NULL, c.pf.str, running, slots, sizeof(slots));
-			check(&t, held > 0 ? "OK" : held == -1 ? "WARN" : "INFO", "framebuffer slots: %s", slots);
-			if (held > 0)
-				check(&t, "INFO", "framebuffer slots: a held slot is given only to nvidia-vgpu-mgr running in the host's PID namespace; "
-				      "under systemd PrivatePIDs= or in a container its VM starts are refused while slots are held");
-		}
 		if (c.present) {
-			printf("  id 10de:%04x subsystem %04x:%04x class 0x%06x driver %s boot_vga %d iommu_group %s\n",
-			       c.device, c.subvendor, c.subdevice, c.class_code, c.driver[0] ? c.driver : "none",
-			       c.boot_vga, c.iommu_group[0] ? c.iommu_group : "none");
-			printf("  display: boot_vga=%d, requested=%s, effective=%s\n", c.boot_vga, gs_display_mode_name(cfg.display),
-			       gs_display_kms(&cfg, &c) ? "on (the boot display)" :
-			       cfg.display == GS_DISPLAY_ON ? "off (display=on puts the console on the boot display GPU only)" :
-			       "off");
+			if (pre) {
+				printf("  id 10de:%04x subsystem %04x:%04x class 0x%06x driver %s boot_vga %d iommu_group %s\n",
+				       c.device, c.subvendor, c.subdevice, c.class_code, c.driver[0] ? c.driver : "none",
+				       c.boot_vga, c.iommu_group[0] ? c.iommu_group : "none");
+				printf("  display: boot_vga=%d, requested=%s, effective=%s\n", c.boot_vga, gs_display_mode_name(cfg.display),
+				       gs_display_kms(&cfg, &c) ? "on (the boot display)" :
+				       cfg.display == GS_DISPLAY_ON ? "off (display=on puts the console on the boot display GPU only)" :
+				       "off");
+			}
 			if (c.entry)
 				entry_checks(&t, &c, &cfg);
 			if (c.entry && c.entry->laptop) {
@@ -1263,12 +1249,12 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 				for (unsigned int k = 0; k < nlost; k++)
 					check(&t, "WARN", "%s", lost[k]);
 			}
-			if (c.bridge_is_pci)
+			if (pre && c.bridge_is_pci)
 				printf("  bridge %s power/control=%s runtime_status=%s ARI forwarding supported=%s\n",
 				       c.bridge.str, c.bridge_pm[0] ? c.bridge_pm : "?", c.bridge_rt[0] ? c.bridge_rt : "?",
 				       c.bridge_ari_fwd_supported < 0 ? "unknown" :
 				       c.bridge_ari_fwd_supported ? "yes" : "no");
-			if (c.has_sriov)
+			if (pre && c.has_sriov)
 				printf("  sriov_totalvfs=%u sriov_numvfs=%u ari_enabled=%d\n", c.totalvfs, c.numvfs,
 				       c.ari_enabled);
 			if (c.bridge_ari_fwd_supported == 0 && cfg.ari != GS_SW_OFF)
@@ -1299,10 +1285,11 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 				int r = gs_display_inspect(sysroot, live ? GS_LIVE_PROC : NULL, &c, &disp);
 
 				if (r == 0) {
-					printf("  display/KMS: %s%s%s%s, %u fb/DRM device(s) on it\n",
-					       disp.fw[0] ? disp.fw : "no firmware framebuffer", disp.fw[0] ? " (" : "",
-					       disp.fw[0] ? (disp.fw_driver[0] ? disp.fw_driver : "unbound: released") : "",
-					       disp.fw[0] ? ")" : "", disp.nconsumers);
+					if (pre)
+						printf("  display/KMS: %s%s%s%s, %u fb/DRM device(s) on it\n",
+						       disp.fw[0] ? disp.fw : "no firmware framebuffer", disp.fw[0] ? " (" : "",
+						       disp.fw[0] ? (disp.fw_driver[0] ? disp.fw_driver : "unbound: released") : "",
+						       disp.fw[0] ? ")" : "", disp.nconsumers);
 					if (disp.nconsumers)
 						check(&t, "INFO", "%s: display clients hold the card; activation needs them gone (and asks "
 						      "before it stops a display manager)", c.pf.str);
@@ -1335,7 +1322,7 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 			if (c.has_sriov && gs_check_presented(&c, &cfg, err, sizeof(err)) == 0 && c.numvfs > 0)
 				check(&t, "OK", "%s: SR-IOV presented, VF resources assigned, %u VF(s) enabled", c.pf.str,
 				      c.numvfs);
-			else
+		else if (pre)
 				check(&t, "INFO", "%s: activation plan: check and stop display clients as needed, load the "
 				      "livepatch and the driver, remove and rescan the empty bus when needed, enable VFs and "
 				      "configure them", c.pf.str);
@@ -1343,7 +1330,7 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 	}
 	if (nlaptops)
 		laptop_host_checks(&t, o, live, laptops, nlaptops);
-	if (live && n) {
+	if (post && live && n) {
 		struct gs_host h = { .sys = sysroot, .proc = GS_LIVE_PROC, .run = gs_run, .capture = gs_run_capture };
 		struct gs_display_plan dp;
 
@@ -1372,9 +1359,11 @@ int gs_cmd_doctor(const struct gs_diag_opts *o)
 		check(&t, "INFO", "identity: off (%s): the hook passes every call through, so nvidia-vgpud sees the GeForce IDs and registers no vGPU types for them",
 		      isrc);
 	} else if (nisel) {
-		printf("\nidentity (%s)\n", isrc);
+		if (pre)
+			printf("\nidentity (%s)\n", isrc);
 		identity_checks(&t, sysroot, isel, nisel, id_force);
 	}
-	printf("\n%u failure(s), %u warning(s)\n", t.fail, t.warn);
+	if (pre)
+		printf("\n%u failure(s), %u warning(s)\n", t.fail, t.warn);
 	return t.fail ? GS_EXIT_REFUSED : GS_EXIT_OK;
 }

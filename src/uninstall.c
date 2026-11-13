@@ -26,7 +26,7 @@ static int any_active_vfs(char *which, size_t len)
 	struct gs_addr list[2 * GS_CFG_MAX_BDFS];
 	unsigned int n = 0, k;
 	struct gs_config cfg;
-	char param[256], err[512];
+	char param[GS_BDF_LIST_STR_SIZE], err[512];
 
 	if (gs_read_attr(GS_LIVE_SYSFS "/module/" GS_MODULE_NAME "/parameters/bdfs", param, sizeof(param)) ||
 	    gs_parse_addr_list("bdfs", param, list, &n, err, sizeof(err))) {
@@ -215,7 +215,8 @@ static void package_left(const char *state)
 		return;
 	n = scandir(state, &names, NULL, alphasort);
 	for (int i = 0; i < n; i++) {
-		others += names[i]->d_name[0] != '.' && strcmp(names[i]->d_name, "nvidia") != 0;
+		others += names[i]->d_name[0] != '.' && strcmp(names[i]->d_name, "nvidia") != 0 &&
+			  strcmp(names[i]->d_name, GS_FORMAT_NAME) != 0;
 		free(names[i]);
 	}
 	if (n >= 0)
@@ -284,15 +285,30 @@ int gs_uninstall_files(const char *path, const char *modprobe_dir, const char *c
 		else
 			rc = GS_EXIT_FAIL;
 	}
-	for (i = 0; i < m->n; i++) {
-		size_t k = 0;
+	/*
+	 * The EGL vendor and platform files of the desktop set (the GBM link went above) before the others, and its
+	 * output-class file last: NVIDIA's EGL is never reachable while X is not on NVIDIA's driver.
+	 */
+	for (int pass = 0; pass < 3; pass++) {
+		for (i = 0; i < m->n; i++) {
+			size_t k = 0;
+			const char *base = strrchr(m->e[i].path, '/');
+			int xconf = base && strcmp(base + 1, GS_XCONF_NAME) == 0;
+			int egl = 0;
 
-		if (m->e[i].type != 'f' || (!restored && strcmp(m->e[i].path, driver) == 0))
-			continue;
-		while (keep && keep[k] && strcmp(keep[k], m->e[i].path) != 0)
-			k++;
-		if ((!keep || !keep[k]) && gs_uninstall_file(m->e[i].path, m->e[i].sha) < 0)
-			rc = GS_EXIT_FAIL;
+			if (base && !xconf) {
+				size_t dn = (size_t)(base - m->e[i].path);
+
+				egl = (strlen(gs_nvgl.etc_vendor) == dn && strncmp(m->e[i].path, gs_nvgl.etc_vendor, dn) == 0) ||
+				      (strlen(gs_nvgl.etc_platform) == dn && strncmp(m->e[i].path, gs_nvgl.etc_platform, dn) == 0);
+			}
+			if (m->e[i].type != 'f' || (!restored && strcmp(m->e[i].path, driver) == 0) || (xconf ? 2 : egl ? 0 : 1) != pass)
+				continue;
+			while (keep && keep[k] && strcmp(keep[k], m->e[i].path) != 0)
+				k++;
+			if ((!keep || !keep[k]) && gs_uninstall_file(m->e[i].path, m->e[i].sha) < 0)
+				rc = GS_EXIT_FAIL;
+		}
 	}
 	for (i = m->n; i-- > 0;)
 		if (m->e[i].type == 'd' && rmdir(m->e[i].path) == 0)
@@ -378,25 +394,57 @@ int gs_uninstall_files(const char *path, const char *modprobe_dir, const char *c
 	return GS_EXIT_FAIL;
 }
 
+/* dkms remove of this version, every kernel: GS_EXIT_OK, or GS_EXIT_FAIL with the failure said. */
+static int dkms_remove(void)
+{
+	const char *argv[] = { "dkms", "remove", DKMS_ID, "--all", NULL };
+
+	if (gs_run(argv) == 0)
+		return GS_EXIT_OK;
+	fprintf(stderr, "geforce-sriov: dkms remove %s failed\n", DKMS_ID);
+	return GS_EXIT_FAIL;
+}
+
+/*
+ * The version stamp in state_dir goes only with an uninstall that finished (rc is GS_EXIT_OK): while anything is
+ * left that a run again would remove (a restore, a unit, the DKMS registration), the stamp stays, so that the
+ * install of the same version is not refused over it. The state directory goes with it when it is empty.
+ */
+void gs_format_release(const char *state_dir, int rc)
+{
+	char p[GS_PATH_MAX];
+
+	if (rc != GS_EXIT_OK || gs_pathf(p, sizeof(p), "%s/" GS_FORMAT_NAME, state_dir))
+		return;
+	if ((unlink(p) == 0 || errno == ENOENT) && rmdir(state_dir) == 0)
+		printf("removed %s/\n", state_dir);
+}
+
 int gs_cmd_uninstall(int unload)
 {
-	static const char *const units[] = { GS_UNIT_LIVEPATCH, GS_UNIT_ACTIVATE, GS_LEGACY_UNIT_PREPARE };
-	static const char *const files[] = { UNIT_DIR "/" GS_UNIT_LIVEPATCH, UNIT_DIR "/" GS_UNIT_ACTIVATE,
-					     UNIT_DIR "/" GS_LEGACY_UNIT_PREPARE };
+	static const char *const units[] = { GS_UNIT_LIVEPATCH, GS_UNIT_ACTIVATE };
+	static const char *const files[] = { UNIT_DIR "/" GS_UNIT_LIVEPATCH, UNIT_DIR "/" GS_UNIT_ACTIVATE };
 	const char *keep[3] = { NULL, NULL, NULL };
 	unsigned int nkeep = 0;
 	struct manifest *m;
 	char prog[GS_PATH_MAX];
-	int r, rc = GS_EXIT_OK, cuda;
+	int r, rc = GS_EXIT_OK, cuda, desktop;
 
 	if (geteuid() != 0) {
 		fprintf(stderr, "geforce-sriov: uninstall must run as root\n");
 		return GS_EXIT_REFUSED;
 	}
+	/* Another version's installation is removed by that version's own uninstall, never through its manifest by this one. */
+	{
+		char why[512], fixes[1024];
+
+		if (gs_other_install("", GS_DEFAULT_PREFIX "/bin", why, sizeof(why), fixes, sizeof(fixes))) {
+			gs_other_install_refusal("", why, fixes);
+			return GS_EXIT_REFUSED;
+		}
+	}
 	if ((r = gs_lock()))
 		return r;
-	/* The owner of the Ada framebuffer slots lets go first: it has the GPU open while it holds one. */
-	gs_fb_release(&gs_host_live);
 	/*
 	 * Unload first: after `dkms remove` the module is gone from the modprobe index and
 	 * `modprobe -r` can no longer find it. livepatch_unload() refuses with active VFs or a
@@ -417,10 +465,16 @@ int gs_cmd_uninstall(int unload)
 	r = m->n;
 	/* NVIDIA's CUDA libraries have a file that names their directory to the loader: its cache is made again below. */
 	cuda = gs_manifest_find(m, 'f', GS_CUDA_CONF) != NULL;
+	desktop = gs_manifest_find(m, 'f', GS_GL_CONF) != NULL;
 	free(m);
 	if (r == 0) {
-		printf("nothing installed by geforce-sriov (%s absent)\n", GS_MANIFEST);
-		return GS_EXIT_OK;
+		/* An uninstall that failed at DKMS left no manifest: the registration is still removed here, and the stamp stays until it is. */
+		if (gs_exists("/var/lib/dkms/" GS_DKMS_NAME))
+			rc = dkms_remove();
+		else
+			printf("nothing installed by geforce-sriov (%s absent)\n", GS_MANIFEST);
+		gs_format_release(GS_STATE_DIR, rc);
+		return rc;
 	}
 
 	/* A unit whose disable failed keeps its file, so that uninstall run again still finds it to disable. */
@@ -434,33 +488,42 @@ int gs_cmd_uninstall(int unload)
 		keep[nkeep++] = files[u];
 		rc = GS_EXIT_FAIL;
 	}
-	if (gs_exists("/var/lib/dkms/" GS_DKMS_NAME)) {
-		const char *argv[] = { "dkms", "remove", DKMS_ID, "--all", NULL };
+	if (gs_exists("/var/lib/dkms/" GS_DKMS_NAME) && dkms_remove() != GS_EXIT_OK)
+		rc = GS_EXIT_FAIL;
+	/* NVIDIA's CUDA and graphics libraries that a driver step left for an install that did not finish. */
+	for (size_t s = 0; s < 2; s++) {
+		const char *stage = s ? GS_GL_STAGE : GS_CUDA_STAGE;
+		const char *argv[] = { "rm", "-rf", "--", stage, NULL };
 
-		if (gs_run(argv) != 0) {
-			fprintf(stderr, "geforce-sriov: dkms remove %s failed\n", DKMS_ID);
-			rc = GS_EXIT_FAIL;
-		}
-	}
-	/* NVIDIA's CUDA libraries that a driver step left for an install that did not finish. */
-	if (gs_exists(GS_CUDA_STAGE)) {
-		const char *argv[] = { "rm", "-rf", "--", GS_CUDA_STAGE, NULL };
-
-		if (gs_run(argv) == 0)
-			printf("removed %s/\n", GS_CUDA_STAGE);
+		if (gs_exists(stage) && gs_run(argv) == 0)
+			printf("removed %s/\n", stage);
 	}
 	/* The driver step's log is not an installed file; it goes with the rest. */
 	if (unlink(GS_DRIVER_LOG) == 0)
 		printf("removed %s\n", GS_DRIVER_LOG);
+	/* The kernel hook itself is an installed file; what it left (its log and its failure reports) goes here. */
+	if (gs_exists(GS_KERNEL_HOOK_LOGS)) {
+		const char *argv[] = { "rm", "-rf", "--", GS_KERNEL_HOOK_LOGS, NULL };
+
+		if (gs_run(argv) == 0)
+			printf("removed %s/\n", GS_KERNEL_HOOK_LOGS);
+	}
+	if (gs_exists(GS_KERNEL_HOOK_FAILED)) {
+		const char *argv[] = { "rm", "-rf", "--", GS_KERNEL_HOOK_FAILED, NULL };
+
+		if (gs_run(argv) == 0)
+			printf("removed %s/\n", GS_KERNEL_HOOK_FAILED);
+	}
 	if (gs_uninstall_files(GS_MANIFEST, "/etc/modprobe.d", keep) != GS_EXIT_OK)
 		rc = GS_EXIT_FAIL;
-	if (cuda && !gs_exists(GS_CUDA_CONF)) {
+	if ((cuda && !gs_exists(GS_CUDA_CONF)) || (desktop && !gs_exists(GS_GL_CONF))) {
 		const char *argv[] = { "ldconfig", NULL };
 
 		if (gs_run(argv) != 0)
-			fprintf(stderr, "geforce-sriov: warning: ldconfig failed. Run `ldconfig` as root, so that the loader forgets NVIDIA's CUDA\n"
-				"libraries, which are removed.\n");
+			fprintf(stderr, "geforce-sriov: warning: ldconfig failed. Run `ldconfig` as root, so that the loader forgets NVIDIA's %s\n"
+				"libraries, which are removed.\n", desktop && !cuda ? "graphics" : desktop ? "CUDA and graphics" : "CUDA");
 	}
+	gs_format_release(GS_STATE_DIR, rc);
 	/* The preparation guard is not an installed file: a reinstall must still see it. */
 	if (gs_exists(GS_ATTEMPT_MARKER))
 		printf("kept activation lock %s: an activation did not finish, so power the machine off and on.\n"

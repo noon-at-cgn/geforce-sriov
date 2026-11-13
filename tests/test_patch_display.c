@@ -51,11 +51,15 @@ int main(void)
  b[1500]^=1;CHECK(!gs_display_inspect_in(b,sizeof(b),&row,1,&info,err,sizeof(err))&&!info.digest&&!info.confirmed);b[1500]^=1;
  { const struct gs_display_recipe *rows;size_t count;
   rows=gs_display_recipes(&count);
-  CHECK(count==1);
+  CHECK(count==2);
   CHECK(rows[0].output_sha!=NULL);
   CHECK(!strcmp(rows[0].input_sha,"946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29"));
   CHECK(!strcmp(rows[0].output_sha,"83ce12abba0441812aa135d4f099636513d709090c3da8999cda9243bd3b67ff"));
   CHECK(rows[0].function_offset==0x4f);
+  /* The display revision after the ada-placement row (an Ada card selected). */
+  CHECK(!strcmp(rows[1].input_sha,"20eaebcac4f5220d21f64bcd5145143abe8f806a25cb9e249088a1b98df7d157"));
+  CHECK(!strcmp(rows[1].output_sha,"48fd6ddd2df13a1131a98facd4a80be1d6d17877eb900f3c945dfa483347627b"));
+  CHECK(rows[1].function_offset==rows[0].function_offset);
  }
  fixture(1024,100);CHECK(!gs_display_inspect(b,sizeof(b),&info,err,sizeof(err))&&info.file_offset==1124&&info.function_offset==100);
  fixture(512,79);b[512+79]=0xff;CHECK(gs_display_inspect(b,sizeof(b),&info,err,sizeof(err))<0);

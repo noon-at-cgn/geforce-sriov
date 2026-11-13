@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 /*
- * CLI and lifecycle tests for geforce-sriov 0.3.0.
+ * CLI and lifecycle tests for geforce-sriov 0.4.0.
  *
  * Fixture sysfs trees are built in a temporary directory; only read-only commands and DESTDIR
  * staging run against them. The activation flow is exercised in-process against a simulated
@@ -22,6 +22,9 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <stddef.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -269,7 +272,7 @@ static void trace_put(const char *kind, int rc, const char *text)
 static int run_cli(char **out, const char *destdir, const char *const args[]) __attribute__((unused));
 static int run_cli(char **out, const char *destdir, const char *const args[])
 {
-	const char *argv[32];
+	const char *argv[8 + 2 * GS_MAX_PFS + 8];
 	int pipefd[2];
 	size_t n;
 	pid_t pid;
@@ -655,6 +658,8 @@ static struct {
 	const char *lock_holder;
 	int mgr_active;            /* nvidia-vgpu-mgr is active after its restart */
 	int vgpud_active;          /* vgpud is active (a oneshot may stay inactive) */
+	int is_active_delay_ms;    /* each `systemctl is-active` takes this long */
+	int mgr_stays_down;        /* nvidia-vgpu-mgr is not active after its restart */
 	int manager_active;        /* the display manager is active */
 	int msix_hidden_after_rescan;
 	int no_sriov_after_rescan;
@@ -790,6 +795,9 @@ static int systemctl_is_active(const char *unit)
 	return 1;
 }
 
+/* 1: the VFs have the fixed slots of a module without the Ada placement change (placement_id 0, 2, 4, 6). */
+static int sim_placement_ids;
+
 /* Create one VF: its device dir, driver link, physfn link and nvidia attributes. */
 static void sim_make_vf(const char *pf, const char *vf, unsigned int generation)
 {
@@ -820,9 +828,19 @@ static void sim_make_vf(const char *pf, const char *vf, unsigned int generation)
 	writef(p, "active\n");
 	gs_pathf(p, sizeof(p), "%s/nvidia/current_vgpu_type", dev);
 	writef(p, "0\n");
+	gs_pathf(p, sizeof(p), "%s/nvidia/placement_id", dev);
+	{
+		struct gs_addr a;
+
+		if (sim_placement_ids && gs_addr_parse(vf, &a) == 0)
+			writef(p, "%u\n", 2 * (a.func - 4));
+		else
+			writef(p, "Not Applicable\n");
+	}
 	gs_pathf(p, sizeof(p), "%s/nvidia/creatable_vgpu_types", dev);
-	writef(p, "ID    : vGPU Name\n%u   : %s\n", generation == GS_ADA ? GS_VGPU_TYPE_ADA : GS_VGPU_TYPE_AMPERE,
-	       generation == GS_ADA ? "NVIDIA RTX6000-Ada-2Q" : "NVIDIA RTXA6000-2Q");
+	writef(p, "ID    : vGPU Name\n%u   : %s\n%s", generation == GS_ADA ? GS_VGPU_TYPE_ADA : GS_VGPU_TYPE_AMPERE,
+	       generation == GS_ADA ? "NVIDIA RTX6000-Ada-2Q" : "NVIDIA RTXA6000-2Q",
+	       generation == GS_ADA ? "941   : NVIDIA RTX6000-Ada-1Q\n" : "");
 	put_resource(dev, 0);
 	put_config(dev, 1, 0);
 	gs_pathf(p, sizeof(p), "%s/physfn", dev);
@@ -1082,54 +1100,6 @@ static void sim_hook(void)
 	}
 }
 
-/* The owner of the framebuffer slots in the simulated nvidia.ko: what a command leaves in its file. */
-static unsigned long long sim_fb_busy = ~0ull; /* a slot at this offset is in use: its hold fails */
-static int sim_fb_command(const char *path, const char *value)
-{
-	unsigned long long offset, size, align, o, s;
-	char bdf[32], other[32], *have = NULL, *line, *save = NULL, *copy;
-	size_t len = 0;
-
-	if (strcmp(value, "release all") == 0) {
-		writef(path, "abi 1\n");
-		return 0;
-	}
-	if (sscanf(value, "release %31s", bdf) == 1) {
-		char kept[4096] = "";
-
-		if (gs_read_whole(path, &have, &len, 1 << 16))
-			return -EIO;
-		for (line = strtok_r(have, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
-			if (!(sscanf(line, "slot %31s", other) == 1 && strcmp(other, bdf) == 0))
-				snprintf(kept + strlen(kept), sizeof(kept) - strlen(kept), "%s\n", line);
-		writef(path, "%s", kept);
-		free(have);
-		return 0;
-	}
-	if (sscanf(value, "hold %31s %llx %llx %llx", bdf, &offset, &size, &align) != 4)
-		return -EINVAL;
-	if (gs_read_whole(path, &have, &len, 1 << 16))
-		return -EIO;
-	/* As the owner does: a held range that overlaps the one asked for without being it is in the way. */
-	copy = strdup(have);
-	for (line = strtok_r(copy, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
-		if (sscanf(line, "slot %31s 0x%llx 0x%llx held", other, &o, &s) == 3 && strstr(line, " held") && strcmp(other, bdf) == 0 &&
-		    o < offset + size && offset < o + s) {
-			int same = o == offset && s == size;
-
-			free(copy);
-			free(have);
-			return same ? 0 : -EEXIST;
-		}
-	free(copy);
-	if (offset == sim_fb_busy)
-		writef(path, "%sslot %s 0x%llx 0x%llx failed 0x51\n", have, bdf, offset, size);
-	else
-		writef(path, "%sslot %s 0x%llx 0x%llx held dups 0 answered 0\n", have, bdf, offset, size);
-	free(have);
-	return 0;
-}
-
 static int sim_write_impl(const char *path, const char *value)
 {
 	size_t n = strlen(sim.root);
@@ -1139,8 +1109,6 @@ static int sim_write_impl(const char *path, const char *value)
 	sim_log("W %s %s\n", r, value);
 	if (sim.write_fail && ends_with(r, sim.write_fail))
 		return -EIO;
-	if (ends_with(r, GS_FB_PROC))
-		return sim_fb_command(path, value);
 	if (!sim.write_timeout_after && sim_timeout_hit(r, value)) {
 		sim.write_timeout = NULL;
 		return -ETIMEDOUT;
@@ -1670,10 +1638,13 @@ static int sim_run_impl(const char *const argv[])
 	if (strcmp(argv[0], "systemctl") == 0 && n > 1) {
 		const char *verb = argv[1], *unit = argv[n - 1];
 
-		if (strcmp(verb, "is-active") == 0)
+		if (strcmp(verb, "is-active") == 0) {
+			if (sim.is_active_delay_ms)
+				gs_sleep_ms((unsigned int)sim.is_active_delay_ms);
 			return systemctl_is_active(unit) ? 0 : 3;
+		}
 		if (strcmp(verb, "restart") == 0 && strcmp(unit, "nvidia-vgpu-mgr.service") == 0) {
-			sim.mgr_active = 1;
+			sim.mgr_active = !sim.mgr_stays_down;
 			sim_clear_types();
 			return 0;
 		}
@@ -1810,28 +1781,6 @@ static int sim_prereq(const struct gs_config *cfg, char *why, size_t len)
 	return snprintf(why, len, "%.300s: No such file or directory (install NVIDIA's vGPU host driver)", cfg->sriov_manage), -1;
 }
 
-/*
- * What the simulated NVIDIA driver answers about the framebuffers of a card's VFs: for an Ada card
- * one slot of 2016 MiB per VF from the bottom of 12 GiB, as measured; for an Ampere card none.
- */
-static int sim_fb_fail, sim_fb_overlap;
-static int sim_fb_query(const struct gs_host *h, const struct gs_vgpu_card *c, struct gs_fb_query *q, char *why, size_t len)
-{
-	(void)h;
-	memset(q, 0, sizeof(*q));
-	sim_log("Q framebuffers of %s type %u\n", c->pf.str, c->type);
-	if (sim_fb_fail)
-		return snprintf(why, len, "cannot open /dev/nvidiactl: No such file or directory"), -1;
-	q->ram_size = 12ull << 30;
-	q->segment = 0x2000000;
-	for (unsigned int i = 0; i < c->nvf; i++) {
-		q->vf[i].placement = c->generation == GS_ADA ? 2 * i : GS_FB_NO_PLACEMENT;
-		q->vf[i].length = c->generation == GS_ADA ? 0x7e000000ull : 0;
-		q->vf[i].offset = c->generation == GS_ADA ? (sim_fb_overlap && i ? 0x2000000ull : i * 0x7e000000ull) : 0;
-	}
-	return 0;
-}
-
 static struct gs_host sim_host(void)
 {
 	struct gs_host h;
@@ -1848,7 +1797,6 @@ static struct gs_host sim_host(void)
 	h.run_deadline = sim_run_deadline;
 	h.root = sim.root;
 	h.enable_prereq = sim_prereq;
-	h.fb_query = sim_fb_query;
 	return h;
 }
 
@@ -1923,9 +1871,6 @@ static void test_config(void)
 	struct gs_config c, back;
 	char err[512], text[4096];
 	const char *bad[] = {
-		"bdfs=0000:03:00.0\nboot_display_release=0000:03:00.0\n",
-		"experimental_vfs=8\n",
-		"twin_id=on\n",
 		"max_vfs=8\n",
 		"display=sometimes\n",
 		"host_cuda=maybe\n",
@@ -1969,12 +1914,8 @@ static void test_config(void)
 	for (unsigned int i = 0; bad[i]; i++)
 		CHECK(gs_config_parse(bad[i], strlen(bad[i]), &c, err, sizeof(err)) != 0, "rejected: %s", bad[i]);
 	gs_config_defaults(&c);
-	CHECK(gs_config_parse("boot_display_release=0000:03:00.0\n",
-			      strlen("boot_display_release=0000:03:00.0\n"), &c, err, sizeof(err)) != 0 &&
-	      contains(err, "boot_display_release is obsolete; delete this line; use display=auto|on|off"),
-	      "obsolete key: %s", err);
-	CHECK(gs_config_parse("experimental_vfs=8\n", strlen("experimental_vfs=8\n"), &c, err, sizeof(err)) != 0 &&
-	      contains(err, "unknown key 'experimental_vfs'; delete this line"), "experimental_vfs: %s", err);
+	CHECK(gs_config_parse("max_vfs=8\n", strlen("max_vfs=8\n"), &c, err, sizeof(err)) != 0 &&
+	      contains(err, "unknown key 'max_vfs'; the VF count key is vfs"), "vf key hint: %s", err);
 	CHECK(gs_config_parse("vfs=4 \n", strlen("vfs=4 \n"), &c, err, sizeof(err)) != 0 &&
 	      contains(err, "whitespace is not allowed"), "whitespace: %s", err);
 	CHECK(gs_config_parse("display=auto", strlen("display=auto"), &c, err, sizeof(err)) == 0 &&
@@ -3034,6 +2975,296 @@ static void test_livepatch_load_driver(void)
 	}
 }
 
+/* A datagram socket standing in for systemd's $NOTIFY_SOCKET: a path under tmp, or "@name" (abstract). */
+static int notify_bind(const char *name)
+{
+	struct sockaddr_un sa = { .sun_family = AF_UNIX };
+	size_t n = strlen(name);
+	socklen_t len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1);
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+
+	if (fd < 0 || n >= sizeof(sa.sun_path))
+		die("notify socket");
+	memcpy(sa.sun_path, name, n);
+	if (name[0] == '@') {
+		sa.sun_path[0] = '\0';
+		len--;
+	}
+	if (bind(fd, (struct sockaddr *)&sa, len))
+		die("bind notify socket");
+	return fd;
+}
+
+/* Every datagram waiting, each followed by ';'. */
+static void notify_drain(int fd, char *out, size_t len)
+{
+	char m[256];
+	ssize_t n;
+
+	out[0] = '\0';
+	while ((n = recv(fd, m, sizeof(m) - 1, 0)) > 0) {
+		m[n] = '\0';
+		snprintf(out + strlen(out), len - strlen(out), "%s;", m);
+	}
+}
+
+static void test_notify(void)
+{
+	char path[GS_PATH_MAX], got[16384], root[GS_PATH_MAX], *out, *unit;
+	int fd;
+
+	/* The wire message: the step's own limit plus the margin, in microseconds. */
+	unsetenv("NOTIFY_SOCKET");
+	gs_pathf(path, sizeof(path), "%s/notify.sock", tmp);
+	unlink(path);
+	fd = notify_bind(path);
+	gs_notify_extend(5000);
+	notify_drain(fd, got, sizeof(got));
+	CHECK(got[0] == '\0', "without $NOTIFY_SOCKET nothing is sent: %s", got);
+	setenv("NOTIFY_SOCKET", path, 1);
+	gs_notify_extend(5000);
+	gs_notify_extend(60000);
+	gs_notify_extend(0);
+	notify_drain(fd, got, sizeof(got));
+	CHECK(strcmp(got, "EXTEND_TIMEOUT_USEC=35000000;EXTEND_TIMEOUT_USEC=90000000;EXTEND_TIMEOUT_USEC=30000000;") == 0,
+	      "path socket: %s", got);
+	/* A name that is neither a path nor an abstract name is ignored, as sd_notify does. */
+	setenv("NOTIFY_SOCKET", "notify.sock", 1);
+	gs_notify_extend(5000);
+	setenv("NOTIFY_SOCKET", "", 1);
+	gs_notify_extend(5000);
+	notify_drain(fd, got, sizeof(got));
+	CHECK(got[0] == '\0', "a relative or empty name sends nothing: %s", got);
+	close(fd);
+	setenv("NOTIFY_SOCKET", path, 1);
+	gs_notify_extend(5000); /* nobody listens: no error, no hang */
+	unlink(path);
+
+	snprintf(got, sizeof(got), "@gs-notify-test-%d", (int)getpid());
+	fd = notify_bind(got);
+	setenv("NOTIFY_SOCKET", got, 1);
+	gs_notify_extend(10000);
+	notify_drain(fd, got, sizeof(got));
+	CHECK(strcmp(got, "EXTEND_TIMEOUT_USEC=40000000;") == 0, "abstract socket: %s", got);
+	close(fd);
+
+	/* An activation sends one message per waiting step, each well formed and none shorter than the margin. */
+	gs_pathf(path, sizeof(path), "%s/notify-act.sock", tmp);
+	unlink(path);
+	fd = notify_bind(path);
+	setenv("NOTIFY_SOCKET", path, 1);
+	act_host("act-notify", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	set_bridge_windows(root, &topo_default, 18, 128);
+	set_root_windows(root, 64, 8192);
+	sim.grow_windows = 1;
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK, "activate: %s", out);
+	free(out);
+	unsetenv("NOTIFY_SOCKET");
+	notify_drain(fd, got, sizeof(got));
+	close(fd);
+	unlink(path);
+	{
+		unsigned int n = 0;
+		const char *p = got;
+
+		for (; *p; n++) {
+			unsigned long long usec;
+			int used = 0;
+
+			CHECK(sscanf(p, "EXTEND_TIMEOUT_USEC=%llu;%n", &usec, &used) == 1 && used > 0 &&
+			      usec >= GS_NOTIFY_MARGIN_MS * 1000ull, "a well-formed extension at: %.60s", p);
+			if (used <= 0)
+				break;
+			p += used;
+		}
+		CHECK(n >= 10 && contains(got, "EXTEND_TIMEOUT_USEC=40000000;"),
+		      "the activation extended the timeout before its waiting steps (%u messages): %.200s", n, got);
+	}
+
+	/* The unit: a modest base timeout and the permission to extend it from the main process. */
+	gs_pathf(path, sizeof(path), "%s/systemd/geforce-sriov-activate.service.in", srcdir);
+	unit = slurp(path);
+	CHECK(unit && count_of(unit, "\nType=oneshot\n") == 1 && count_of(unit, "\nNotifyAccess=main\n") == 1 &&
+	      count_of(unit, "\nTimeoutStartSec=@START_TIMEOUT@\n") == 1 && count_of(unit, "TimeoutStartSec=") == 1 &&
+	      !contains(unit, "TimeoutSec="), "the activation unit extends its own timeout: %s", unit ? unit : "(missing)");
+	free(unit);
+}
+
+/* GS_MAX_PFS cards are accepted by the config, one more is not. */
+static void test_many_cards(void)
+{
+	char text[GS_BDF_LIST_STR_SIZE + 64], err[256];
+	struct gs_config c;
+	size_t len = 0;
+
+	len += (size_t)snprintf(text + len, sizeof(text) - len, "bdfs=");
+	for (unsigned int i = 0; i < GS_MAX_PFS; i++)
+		len += (size_t)snprintf(text + len, sizeof(text) - len, "%s0000:%02x:00.0", i ? "," : "", i + 1);
+	len += (size_t)snprintf(text + len, sizeof(text) - len, "\n");
+	CHECK(gs_config_parse(text, len, &c, err, sizeof(err)) == 0 && c.nbdfs == GS_MAX_PFS &&
+	      strcmp(c.bdfs[GS_MAX_PFS - 1].str, "0000:20:00.0") == 0, "%u cards: %s", GS_MAX_PFS, err);
+	len--;
+	len += (size_t)snprintf(text + len, sizeof(text) - len, ",0000:%02x:00.0\n", GS_MAX_PFS + 1);
+	CHECK(gs_config_parse(text, len, &c, err, sizeof(err)) != 0 && contains(err, "more than 32 devices"),
+	      "one card more: %s", err);
+	/* Every buffer that holds the card list or one entry per card is sized from GS_MAX_PFS. */
+	{
+		struct gs_module_state m;
+		struct gs_dev_nodes dn;
+
+		CHECK(sizeof(m.bdfs) >= GS_BDF_LIST_STR_SIZE, "the loaded module's bdfs fits the longest list");
+		CHECK(sizeof("bdfs=") - 1 + GS_BDF_LIST_STR_SIZE > GS_BDF_LIST_STR_SIZE, "modprobe option has room for its prefix");
+		CHECK(GS_DEV_NODES_MAX >= GS_MAX_PFS + 8, "device nodes: every GPU plus the seven others");
+		CHECK(sizeof(dn.core) >= 15 + 7 * GS_DEV_NODES_MAX, "the nvidia-modprobe -c list fits %u nodes", GS_DEV_NODES_MAX);
+	}
+}
+
+/*
+ * The selection texts at the most cards the module takes: the command that names all of them, in the
+ * verdict, in the display forms and in the line status prints, is whole (the 32nd address is
+ * in it and the text ends as it should), not cut at a fixed buffer.
+ */
+static void test_selection_many(void)
+{
+	char root[GS_PATH_MAX], bdfs[GS_BDF_LIST_STR_SIZE + 16] = "bdfs=", last[64], cmd[GS_SEL_CMD_MAX];
+	char tail[96], msg[GS_SEL_MSG_MAX], line[GS_SEL_LINE_MAX], forms[GS_SEL_FORMS_MAX], args[GS_SEL_ARGS_MAX];
+	struct gs_config c;
+	struct gs_host h;
+
+	for (unsigned int i = 0; i < GS_MAX_PFS; i++)
+		snprintf(bdfs + strlen(bdfs), sizeof(bdfs) - strlen(bdfs), "%s0000:%02x:00.0", i ? "," : "", i + 1);
+	strcat(bdfs, "\n");
+	snprintf(last, sizeof(last), "--device 0000:%02x:00.0", GS_MAX_PFS);
+	snprintf(tail, sizeof(tail), "0000:%02x:00.0` to record them", GS_MAX_PFS);
+	act_host("sel-many", &topo_default, gpu_ampere, 0, "0/4", root, sizeof(root));
+	config_of(&c, bdfs);
+	CHECK(c.nbdfs == GS_MAX_PFS, "%u cards in the config", c.nbdfs);
+	h = sim_host();
+	gs_selection_command(c.bdfs, c.nbdfs, 1, NULL, cmd, sizeof(cmd));
+	CHECK(strlen(cmd) < sizeof(cmd) - 1 && strlen(cmd) < GS_SEL_ARGS_MAX && contains(cmd, last) &&
+	      contains(cmd, " --disable-d3cold") && !strstr(cmd, "--disable-d3cold --disable-d3cold"),
+	      "the command names all %u cards and the option: %s", GS_MAX_PFS, cmd);
+	/* The record cannot be read: the verdict names the whole command. */
+	sim_writef("state/" GS_SELECTION_NAME, "not a record\n");
+	CHECK(gs_selection_verdict(&h, &c, NULL, msg, sizeof(msg)) == 1 && contains(msg, last) &&
+	      contains(msg, "--device 0000:01:00.0") && strstr(msg, last)[strlen(last)] == '\n',
+	      "the verdict has the whole command with the %uth address: %s", GS_MAX_PFS, msg);
+	/* No record of some card: the line says the whole command and ends with its sentence. */
+	sim_remove("state/" GS_SELECTION_NAME);
+	CHECK(gs_selection_unrecorded(sim.state, &c, line, sizeof(line)) == 1 && contains(line, last) &&
+	      contains(line, tail), "the unrecorded line has the whole command: %s", line);
+	/* The two display forms each repeat the options. */
+	gs_selection_command(c.bdfs, c.nbdfs, 0, NULL, args, sizeof(args));
+	CHECK(gs_display_forms(&h, args + strlen("sudo geforce-sriov install "), forms, sizeof(forms)) == 1 &&
+	      count_of(forms, last) == 2 && contains(forms, "--no-display\n") && contains(forms, "--nvkms-source PATH\n") &&
+	      contains(forms, "sudo ./geforce-sriov install --device"),
+	      "both forms carry all cards: %s", forms);
+}
+
+/*
+ * The start timeout is an upper bound built from activation's own limits (include/gs_lifecycle.h).
+ * This fails when a limit or the number of waiting calls in src/activate.c changes without the sum
+ * following: update the limits and counts in gs_lifecycle.h, then the expected numbers here.
+ */
+static void test_start_timeout(void)
+{
+	static const struct { const char *name; unsigned int value, expect; } limits[] = {
+		{ "POLL_MS", POLL_MS, 50 }, { "LIVEPATCH_WAIT_MS", LIVEPATCH_WAIT_MS, 10000 },
+		{ "VF_BIND_WAIT_MS", VF_BIND_WAIT_MS, 30000 }, { "MGR_ACTIVE_WAIT_MS", MGR_ACTIVE_WAIT_MS, 30000 },
+		{ "MGR_SETTLE_MS", MGR_SETTLE_MS, 2000 }, { "PF_REBIND_WAIT_MS", PF_REBIND_WAIT_MS, 10000 },
+		{ "VF_ACTIVE_WAIT_MS", VF_ACTIVE_WAIT_MS, 5000 }, { "VF_TYPES_WAIT_MS", VF_TYPES_WAIT_MS, 15000 },
+		{ "REMOVE_WAIT_MS", REMOVE_WAIT_MS, 5000 }, { "RETURN_WAIT_MS", RETURN_WAIT_MS, 15000 },
+		{ "SRIOV_ATTR_WAIT_MS", SRIOV_ATTR_WAIT_MS, 5000 }, { "FN_RETURN_WAIT_MS", FN_RETURN_WAIT_MS, 5000 },
+		{ "BRIDGE_WAKE_MS", BRIDGE_WAKE_MS, 5000 }, { "PF_WAKE_MS", PF_WAKE_MS, 5000 },
+		{ "DM_ACTIVE_WAIT_MS", DM_ACTIVE_WAIT_MS, 10000 }, { "SYSFS_DEADLINE_MS", SYSFS_DEADLINE_MS, 10000 },
+		{ "RELEASE_WAIT_MS", RELEASE_WAIT_MS, 5000 }, { "GS_BOOT_BIND_WAIT_MS", GS_BOOT_BIND_WAIT_MS, 30000 },
+		{ "GS_MODULE_DEADLINE_MS", GS_MODULE_DEADLINE_MS, 60000 }, { "GS_CAPTURE_TIMEOUT_MS", GS_CAPTURE_TIMEOUT_MS, 5000 },
+		{ "GS_SLOT_FNS", GS_SLOT_FNS, 8 }, { "GS_ACT_CARD_WRITES", GS_ACT_CARD_WRITES, 43 },
+		{ "GS_ACT_MODULE_RUNS", GS_ACT_MODULE_RUNS, 27 }, { "GS_ACTIVATE_CARD_MS", GS_ACTIVATE_CARD_MS, 690000 },
+		{ "GS_ACTIVATE_VF_MS", GS_ACTIVATE_VF_MS, 55000 }, { "GS_ACTIVATE_BASE_MS", GS_ACTIVATE_BASE_MS, 1682000 },
+	};
+	/* How often src/activate.c calls what the sum counts: a new waiting call needs a new term. */
+	static const struct { const char *token; int expect; } sites[] = {
+		{ "sysfs_write(h,", 23 }, { "wait_exists(", 8 }, { "wait_attr_eq(", 3 }, { "gs_host_run(", 9 },
+		{ "gs_module_load(", 6 }, { "gs_module_unload(", 6 }, { "daemon_start(", 2 }, { "daemon_restart(", 3 },
+		{ "ensure_livepatch(", 3 }, { "gs_sleep_ms(", 13 }, { "h->capture(", 1 },
+	};
+	static const struct { unsigned int cards, vfs, seconds; } rows[] = {
+		{ 0, 4, 1851 }, { 1, 4, 2852 }, { 8, 4, 9859 }, { 32, 4, 33883 }, { 1, 16, 3578 },
+	};
+	char path[GS_PATH_MAX], *src;
+
+	for (unsigned int i = 0; i < sizeof(limits) / sizeof(limits[0]); i++)
+		CHECK(limits[i].value == limits[i].expect, "%s is %u; the start timeout was built for %u", limits[i].name,
+		      limits[i].value, limits[i].expect);
+	gs_pathf(path, sizeof(path), "%s/src/activate.c", srcdir);
+	src = slurp(path);
+	CHECK(src != NULL, "src/activate.c is readable");
+	for (unsigned int i = 0; src && i < sizeof(sites) / sizeof(sites[0]); i++)
+		CHECK(count_of(src, sites[i].token) == sites[i].expect,
+		      "activate.c has %d uses of %s; the start timeout was built for %d", count_of(src, sites[i].token),
+		      sites[i].token, sites[i].expect);
+	free(src);
+	for (unsigned int r = 0; r < sizeof(rows) / sizeof(rows[0]); r++)
+		CHECK(gs_activate_start_timeout_s(rows[r].cards, rows[r].vfs) == rows[r].seconds,
+		      "%u cards with %u VFs: %u s, got %u", rows[r].cards, rows[r].vfs, rows[r].seconds,
+		      gs_activate_start_timeout_s(rows[r].cards, rows[r].vfs));
+	/* install writes it for 1, 8 and 32 cards (the default VF count). */
+	for (unsigned int r = 1; r < sizeof(rows) / sizeof(rows[0]); r++) {
+		unsigned int n = rows[r].cards;
+		char stage[GS_PATH_MAX], p[GS_PATH_MAX], addr[GS_MAX_PFS][24], want[64], *out, *unit;
+		const char *args[8 + 2 * GS_MAX_PFS + 1];
+		unsigned int k = 0;
+
+		if (rows[r].vfs != GS_DEFAULT_VFS)
+			continue;
+		snprintf(stage, sizeof(stage), "%s/stage-timeout-%u", tmp, n);
+		args[k++] = "install";
+		args[k++] = "--destdir";
+		args[k++] = stage;
+		args[k++] = "--source";
+		args[k++] = srcdir;
+		args[k++] = "--prefix";
+		args[k++] = "/usr";
+		for (unsigned int i = 0; i < n; i++) {
+			snprintf(addr[i], sizeof(addr[i]), "0000:%02x:00.0", i + 1);
+			args[k++] = "--device";
+			args[k++] = addr[i];
+		}
+		args[k] = NULL;
+		CHECK(run_cli(&out, NULL, args) == GS_EXIT_OK, "staged install of %u cards: %s", n, out);
+		free(out);
+		gs_pathf(p, sizeof(p), "%s/etc/systemd/system/geforce-sriov-activate.service", stage);
+		unit = slurp(p);
+		snprintf(want, sizeof(want), "\nTimeoutStartSec=%u\n", rows[r].seconds);
+		CHECK(unit && count_of(unit, want) == 1 && !contains(unit, "@START_TIMEOUT@"),
+		      "%u cards write %s: %s", n, want, unit ? unit : "(missing)");
+		free(unit);
+	}
+}
+
+/*
+ * The polling loops end on elapsed time: a `systemctl is-active` that takes 1 s per call and never
+ * says active ends the manager wait after MGR_ACTIVE_WAIT_MS (30 s) plus one call, not after 600
+ * iterations of 1 s.
+ */
+static void test_poll_elapsed(void)
+{
+	char root[GS_PATH_MAX], *out;
+	long t0, took;
+
+	act_host("act-poll-elapsed", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	sim.mgr_stays_down = 1;
+	sim.is_active_delay_ms = 1000;
+	t0 = now_ms();
+	CHECK(run_host(activate_host, &out) != GS_EXIT_OK, "the manager never becomes active: %s", out);
+	took = now_ms() - t0;
+	CHECK(contains(out, "nvidia-vgpu-mgr.service is not active 30000 ms after its restart"),
+	      "the wait names its limit: %s", out);
+	CHECK(took >= 30000 && took < 45000, "the wait ended on elapsed time, after %ld ms", took);
+	free(out);
+}
+
 static void test_activate_rescan(void)
 {
 	char root[GS_PATH_MAX], *out, *log;
@@ -3388,8 +3619,6 @@ static void test_activate_display(void)
 	act_host("act-client", &topo_display, gpu_display, 1, NULL, root, sizeof(root));
 	sim.manager_active = 1;
 	act_opts.stop_display_manager = 1;
-	/* Framebuffer slots that are held stay held on this way out: no command to their owner is in the log below. */
-	sim_writef("proc/" GS_FB_PROC, "abi 1\nslot 0000:01:00.0 0x0 0x7e000000 held dups 0 answered 0\n");
 	{
 		char fd[GS_PATH_MAX], link[GS_PATH_MAX];
 
@@ -3939,284 +4168,145 @@ static void test_activate_nodes(void)
 	act_opts.dry_run = 0;
 }
 
-/* One Ada card whose VFs activation has to enable, on a host whose nvidia.ko carries the owner of the slots. */
-static void ada_host(const char *name, char *root, size_t len)
+/* One card whose VFs activation has to enable. */
+static void one_card_host(const char *name, const struct fx_fn *fns, char *root, size_t len)
 {
-	act_host(name, &topo_default, gpu_ada, 0, "0/4", root, len);
+	act_host(name, &topo_default, fns, 0, "0/4", root, len);
 	set_vf_bars(root, &topo_default, "0000:03:00.0", 1);
 	sim_writef("bus/pci/devices/0000:03:00.0/power/control", "on\n");
 	sim_writef("bus/pci/devices/0000:03:00.0/power/runtime_status", "active\n");
-	sim_writef("proc/" GS_FB_PROC, "abi 1\n");
-	sim_fb_fail = sim_fb_overlap = 0;
-	sim_fb_busy = ~0ull;
 }
 
 /*
- * The framebuffer slots of Ada VFs: activation asks where they are once the vGPU types are set,
- * has them held before anything else can allocate, lets go of them before it touches a GPU, and
- * never fails because of them.
+ * The Ada slot hint names VFs whose fixed slot ends near the top of the card. A card whose VFs read placement_id
+ * Not Applicable (the module carries the Ada placement change) has no slots and gets no line.
  */
-static void test_activate_fb(void)
+static void test_slot_hint(void)
 {
-	static const char held4[] = "abi 1\nslot 0000:03:00.0 0x0 0x7e000000 held dups 0 answered 0\n"
-				    "slot 0000:03:00.0 0x7e000000 0x7e000000 held dups 1 answered 3\n"
-				    "slot 0000:03:00.0 0xfc000000 0x7e000000 held dups 0 answered 0\n"
-				    "slot 0000:03:00.0 0x17a000000 0x7e000000 held dups 0 answered 0\n";
-	char root[GS_PATH_MAX], *out, *log, *text;
+	char root[GS_PATH_MAX], xml[GS_PATH_MAX], *out;
 
-	/* An Ada card with host CUDA: the slots are held after the types and before nvidia_uvm. */
-	ada_host("fb-ada", root, sizeof(root));
-	act_cfg.host_cuda = GS_SW_ON;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
-	      contains(out, "0000:03:00.0: 4 framebuffer slots are held, so that a host program cannot take the memory of a stopped VM") &&
-	      !contains(out, "not guaranteed to work") && !contains(out, "framebuffer slots: released"), "Ada: the slots are held: %s", out);
-	CHECK(contains(out, "INFO 0000:03:00.0: framebuffer slots: 4 held (0 in use, 4 free)\n"), "Ada: check says so: %s", out);
-	log = sim_text("sim.log");
-	CHECK(contains(log, "W proc/" GS_FB_PROC " hold 0000:03:00.0 0 7e000000 2000000\n") &&
-	      contains(log, "W proc/" GS_FB_PROC " hold 0000:03:00.0 7e000000 7e000000 2000000\n") &&
-	      contains(log, "W proc/" GS_FB_PROC " hold 0000:03:00.0 fc000000 7e000000 2000000\n") &&
-	      contains(log, "W proc/" GS_FB_PROC " hold 0000:03:00.0 17a000000 7e000000 2000000\n"), "Ada: one hold per VF: %s", log);
-	CHECK(pos_of_last(log, "nvidia/current_vgpu_type 942") < pos_of(log, "Q framebuffers of 0000:03:00.0 type 942") &&
-	      pos_of(log, "Q framebuffers of") < pos_of(log, "W proc/" GS_FB_PROC " hold") &&
-	      pos_of_last(log, "W proc/" GS_FB_PROC " hold") < pos_of(log, "R modprobe nvidia_uvm"),
-	      "Ada: asked after the types, held before nvidia_uvm: %s", log);
-	CHECK(pos_of(log, "R nvidia-modprobe -c 255") < pos_of(log, "Q framebuffers of"), "Ada: the GPU's device node is made first: %s", log);
-	CHECK(!contains(log, "release all"), "Ada: nothing was held, so nothing is released: %s", log);
-	free(log);
-	free(out);
+	for (int fixed = 0; fixed < 2; fixed++) {
+		char name[32];
 
-	/* A run with nothing else to do holds what is not held, and neither releases nor restarts anything. */
-	sim_writef("proc/" GS_FB_PROC, "abi 1\nslot 0000:03:00.0 0x0 0x7e000000 held dups 1 answered 1\n"
-		   "slot 0000:03:00.0 0x7e000000 0x7e000000 given-up the manager's request has other flags than the plugin's\n");
-	sim_remove("sim.log");
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "there is nothing to do"), "Ada, again: %s", out);
-	log = sim_text("sim.log");
-	CHECK(contains(log, "hold 0000:03:00.0 7e000000 7e000000 2000000") && !contains(log, "release all") && !contains(log, "systemctl restart"),
-	      "Ada, again: held again, nothing released: %s", log);
-	free(log);
-	free(out);
-
-	/*
-	 * What is held is from another layout (the types were changed by hand): the owner answers "it
-	 * exists" to the first hold, and the GPU's slots are released and held again. A VM that runs
-	 * keeps its memory.
-	 */
-	sim_writef("proc/" GS_FB_PROC, "abi 1\nslot 0000:03:00.0 0x0 0xfc000000 held dups 1 answered 1\n"
-		   "slot 0000:03:00.0 0xfc000000 0xfc000000 held dups 0 answered 0\n");
-	sim_remove("sim.log");
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "there is nothing to do") &&
-	      contains(out, "0000:03:00.0: the framebuffer slots that are held are not where NVIDIA's driver places the VFs now; they are released and held again") &&
-	      contains(out, "4 framebuffer slots are held") && !contains(out, "refused the command"), "slots of another layout: %s", out);
-	log = sim_text("sim.log");
-	CHECK(pos_of(log, "hold 0000:03:00.0 0 7e000000 2000000") < pos_of(log, "W proc/" GS_FB_PROC " release 0000:03:00.0\n") &&
-	      pos_of(log, "W proc/" GS_FB_PROC " release 0000:03:00.0\n") < pos_of_last(log, "hold 0000:03:00.0 0 7e000000 2000000") &&
-	      !contains(log, "release all"), "slots of another layout: one release of that GPU, then the holds again: %s", log);
-	free(log);
-	free(out);
-
-	/* fb_slots=off: what an earlier run held is let go of, and nothing is asked or held. */
-	act_cfg.fb_slots = GS_FB_SLOTS_OFF;
-	sim_remove("sim.log");
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "framebuffer slots: released") &&
-	      contains(out, "INFO 0000:03:00.0: framebuffer slots: not held (fb_slots=off in the config); a VM may fail to start while host programs use this GPU"),
-	      "fb_slots=off: %s", out);
-	log = sim_text("sim.log");
-	CHECK(contains(log, "release all") && !contains(log, " hold ") && !contains(log, "Q framebuffers"), "fb_slots=off: released, not held: %s", log);
-	free(log);
-	free(out);
-	sim_remove("sim.log");
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && !contains(out, "framebuffer slots: released"), "fb_slots=off, again: %s", out);
-	free(out);
-
-	/* Before a GPU is touched again, the owner lets go: it has the GPU open. */
-	ada_host("fb-quiesce", root, sizeof(root));
-	sim_writef("proc/" GS_FB_PROC, held4);
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "framebuffer slots: released") &&
-	      contains(out, "4 framebuffer slots are held"), "slots from before: %s", out);
-	log = sim_text("sim.log");
-	CHECK(pos_of(log, "W proc/" GS_FB_PROC " release all") < pos_of(log, "sriov-manage -e 0000:03:00.0") &&
-	      pos_of(log, "W bus/pci/drivers/nvidia/unbind 0000:03:00.0") < pos_of(log, "W proc/" GS_FB_PROC " hold"),
-	      "released before the VFs are enabled and the GPU is re-probed, held again after: %s", log);
-	free(log);
-	free(out);
-
-	/* Nothing about the slots fails an activation. Each case ends as it would without the owner. */
-	ada_host("fb-no-owner", root, sizeof(root));
-	sim_remove("proc/" GS_FB_PROC);
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished") &&
-	      contains(out, "warning: the framebuffer slots of the Ada VFs are not held: the nvidia module that is loaded does not carry their owner.") &&
-	      contains(out, "INFO 0000:03:00.0: framebuffer slots: not held (the nvidia module that is loaded does not carry their owner; "
-			    "`sudo geforce-sriov install` builds it in); a VM may fail to start while host programs use this GPU"),
-	      "a module without the owner: %s", out);
-	free(out);
-	ada_host("fb-no-answer", root, sizeof(root));
-	sim_fb_fail = 1;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished") &&
-	      contains(out, "warning: 0000:03:00.0: the framebuffer slots are not held: NVIDIA's driver could not be asked\n"
-			    "where they are (cannot open /dev/nvidiactl: No such file or directory)."), "the driver cannot be asked: %s", out);
-	log = sim_text("sim.log");
-	CHECK(!contains(log, " hold "), "the driver cannot be asked: nothing is held: %s", log);
-	free(log);
-	free(out);
-	ada_host("fb-bad-answer", root, sizeof(root));
-	sim_fb_overlap = 1;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
-	      contains(out, "warning: 0000:03:00.0: the framebuffer slots are not held: the answer of NVIDIA's driver is\n"
-			    "not usable (VF 1: placement 2, offset 0x2000000, length 0x7e000000: it overlaps the range of another VF)."),
-	      "an answer that does not hold together: %s", out);
-	log = sim_text("sim.log");
-	CHECK(!contains(log, " hold "), "an answer that does not hold together: no slot of that GPU is held: %s", log);
-	free(log);
-	free(out);
-	ada_host("fb-busy", root, sizeof(root));
-	sim_fb_busy = 0xfc000000ull;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
-	      contains(out, "warning: 0000:03:00.0: 3 of 4 framebuffer slots are held; a VM on another one may fail to\n"
-			    "start while a host program uses this GPU. `geforce-sriov status` names the reason for each.") &&
-	      contains(out, "INFO 0000:03:00.0: framebuffer slots: 3 held (0 in use, 3 free), 1 not held: it was in use by a VM or a host "
-			    "program when activation asked for it; `sudo geforce-sriov activate` holds it again"), "a slot that is in use: %s", out);
-	free(out);
-	ada_host("fb-refused", root, sizeof(root));
-	sim.write_fail = GS_FB_PROC;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished") &&
-	      contains(out, "the framebuffer slot at 0x0 is not held: the owner in nvidia.ko\nrefused the command (Input/output error).") &&
-	      contains(out, "warning: 0000:03:00.0: 0 of 4 framebuffer slots are held"), "commands that are refused: %s", out);
-	free(out);
-	sim.write_fail = NULL;
-
-	/* A driver version this is not confirmed for: used all the same, with one note. */
-	ada_host("fb-version", root, sizeof(root));
-	sim_writef("proc/driver/nvidia/version", "NVRM version: NVIDIA UNIX x86_64 Kernel Module  999.1.2  Release Build\n");
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
-	      contains(out, "note: holding framebuffer slots is confirmed for the supported driver only; with NVIDIA's driver 999.1.2 it is\n"
-			    "not guaranteed to work. fb_slots=off in /etc/geforce-sriov/config turns it off.") &&
-	      contains(out, "4 framebuffer slots are held") &&
-	      contains(out, "framebuffer slots: 4 held (0 in use, 4 free); not guaranteed to work with this driver build"),
-	      "another driver version: %s", out);
-	free(out);
-
-	/* The dry run names the step for an Ada card, and not for an Ampere one. */
-	ada_host("fb-dry", root, sizeof(root));
-	act_opts.dry_run = 1;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
-	      contains(out, "  0000:03:00.0: hold the framebuffer slot of each VF (NVIDIA's driver is asked where it is)\n"), "dry run, Ada: %s", out);
-	text = sim_text("proc/" GS_FB_PROC);
-	CHECK(text && strcmp(text, "abi 1\n") == 0, "dry run, Ada: nothing is held");
-	free(text);
-	free(out);
-	enable_host("fb-ampere", root, sizeof(root));
-	sim_writef("proc/" GS_FB_PROC, "abi 1\n");
-	act_opts.dry_run = 1;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && !contains(out, "framebuffer"), "dry run, Ampere: %s", out);
-	free(out);
-	act_opts.dry_run = 0;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && !contains(out, "framebuffer"), "Ampere: nothing about slots: %s", out);
-	log = sim_text("sim.log");
-	CHECK(!contains(log, GS_FB_PROC) && !contains(log, "Q framebuffers"), "Ampere: nothing is asked or written: %s", log);
-	free(log);
-	free(out);
+		snprintf(name, sizeof(name), "slot-hint-%d", fixed);
+		one_card_host(name, gpu_ada, root, sizeof(root));
+		sim_placement_ids = fixed;
+		sim_writef("nvidia-smi.out", "00000000:03:00.0, 10000\n");
+		gs_pathf(xml, sizeof(xml), "%s/vgpuConfig.xml", root);
+		writef(xml, "<vgpuTypes><vgpuType id=\"942\" name=\"RTX6000-Ada-2Q\"><profileSize>0x80000000</profileSize></vgpuType></vgpuTypes>\n");
+		act_opts.vgpu_config = xml;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished") &&
+		      contains(out, "0000:03:00.0: with type 942 the VF 0000:03:00.7 may not start: its framebuffer slot ends near the top of the card's 10000 MiB. "
+				    "Put VMs on the lower VFs, or choose a smaller type.\n") == fixed,
+		      "slot hint with %s: %s", fixed ? "fixed slots" : "the Ada placement change", out);
+		free(out);
+		sim_placement_ids = 0;
+	}
 }
 
-/* The checks on what NVIDIA's driver answers, the reading of the owner's state, and the sentence about it. */
-static void test_fb_slots(void)
+/* fb_slots= was removed in 0.4.0: a line left in a config is read and dropped, and the config is never written with it. */
+static void test_fb_slots_ignored(void)
 {
-	struct gs_fb_query q;
-	struct gs_fb_range range[GS_VFS_MAX];
-	struct gs_fb_state st;
 	struct gs_config c;
-	char why[512], line[768], err[256], dir[GS_PATH_MAX], p[GS_PATH_MAX], rec[GS_PATH_MAX];
-	unsigned int n;
+	char err[256], line[768];
 
-	memset(&q, 0, sizeof(q));
-	q.ram_size = 12ull << 30;
-	q.segment = 0x2000000;
-	for (unsigned int i = 0; i < 4; i++)
-		q.vf[i] = (struct gs_fb_answer){ 0, 2 * i, i * 0x7e000000ull, 0x7e000000ull };
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == 0 && n == 4 && range[3].offset == 0x17a000000ull &&
-	      range[3].size == 0x7e000000ull, "four answers, as measured");
-	q.vf[2].status = 0x57;
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == 0 && n == 3 && range[2].offset == 0x17a000000ull,
-	      "a VF without a vGPU type has no slot; the others keep theirs");
-	q.vf[2].status = 0;
-	for (unsigned int i = 0; i < 4; i++)
-		q.vf[i] = (struct gs_fb_answer){ 0, GS_FB_NO_PLACEMENT, 0, 0 };
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == 0 && n == 0, "an Ampere card: no placement, no slot");
-	for (unsigned int i = 0; i < 4; i++)
-		q.vf[i] = (struct gs_fb_answer){ 0, 2 * i, i * 0x7e000000ull, 0x7e000000ull };
-	q.vf[1].placement = GS_FB_NO_PLACEMENT;
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == -1 && n == 0 && contains(why, "VF 1: ") &&
-	      contains(why, "a placement without a length, or a length without a placement"), "a length without a placement: %s", why);
-	q.vf[1].placement = 2;
-	q.vf[1].length = 0;
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == -1, "a placement without a length");
-	q.vf[1].length = 0x7e000000ull;
-	q.vf[3].offset += 0x1000;
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == -1 && contains(why, "not a whole number of the driver's memory segments"),
-	      "an offset that is no multiple of the segment: %s", why);
-	q.vf[3].offset = 6 * 0x7e000000ull;
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == -1 && contains(why, "beyond the end of the GPU's memory"),
-	      "a range past the memory: %s", why);
-	q.vf[3].offset = 0x7e000000ull + 0x2000000;
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == -1 && contains(why, "it overlaps the range of another VF"), "overlap: %s", why);
-	q.vf[3].offset = 3 * 0x7e000000ull;
-	q.vf[3].length = 0x40000000ull;
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == -1 && contains(why, "another length than another VF"), "unequal lengths: %s", why);
-	q.vf[3].length = 0x7e000000ull;
-	q.ram_size = 0;
-	CHECK(gs_fb_validate(&q, 4, range, &n, why, sizeof(why)) == -1, "an unknown memory size");
-
-	/* The owner's state, and what status, doctor and check say about one GPU. */
 	gs_config_defaults(&c);
-	gs_pathf(dir, sizeof(dir), "%s/fb-state", tmp);
-	gs_pathf(p, sizeof(p), "%s/" GS_FB_PROC, dir);
-	CHECK(gs_fb_state_read(dir, &st) == -ENOENT, "no owner in the loaded module");
-	CHECK(gs_fb_line(dir, &c, NULL, "0000:03:00.0", "580.159.01", line, sizeof(line)) == -1 &&
-	      contains(line, "not held (the nvidia module that is loaded does not carry their owner; `sudo geforce-sriov install` builds it in)"),
-	      "no owner, no record: %s", line);
-	gs_pathf(rec, sizeof(rec), "%s/fb-record", tmp);
-	writef(rec, "kernel=x\nfb_owner=0\nfb_owner_reason=it did not compile (the lines above say why)\n");
-	CHECK(gs_fb_line(dir, &c, rec, "0000:03:00.0", "580.159.01", line, sizeof(line)) == -1 &&
-	      strcmp(line, "not held (the installed driver was built without their owner: it did not compile (the lines above say why)); "
-			   "a VM may fail to start while host programs use this GPU") == 0, "a build without the owner: %s", line);
-	writef(rec, "kernel=x\nfb_owner=1\n");
-	CHECK(gs_fb_line(dir, &c, rec, "0000:03:00.0", "580.159.01", line, sizeof(line)) == -1 &&
-	      contains(line, "the installed one does, and is loaded at the next boot"), "installed, not loaded yet: %s", line);
-	writef(p, "abi 1\ngpu 0000:03:00.0 device 0 client 0xc1d00044 slots 4\n"
-	       "slot 0000:03:00.0 0x0 0x7e000000 held dups 1 answered 2\nslot 0000:03:00.0 0x7e000000 0x7e000000 held dups 1 answered 9\n"
-	       "slot 0000:03:00.0 0xfc000000 0x7e000000 held dups 0 answered 0\nslot 0000:03:00.0 0x17a000000 0x7e000000 held dups 0 answered 1\n"
-	       "gpu 0000:05:00.0 device 1 client 0xc1d00045 slots 1\nslot 0000:05:00.0 0x0 0x7e000000 failed 0x51\n");
-	CHECK(gs_fb_state_read(dir, &st) == 0 && st.present && st.abi == 1 && st.n == 5 && st.slot[1].dups == 1 &&
-	      st.slot[3].answered == 1 && st.slot[4].state == GS_FB_FAILED && st.slot[4].status == 0x51 && st.slot[3].offset == 0x17a000000ull,
-	      "the state is read: %u slots", st.n);
-	CHECK(gs_fb_line(dir, &c, NULL, "0000:03:00.0", "580.159.01", line, sizeof(line)) == 1 &&
-	      strcmp(line, "4 held (2 in use, 2 free)") == 0, "held: %s", line);
-	CHECK(gs_fb_line(dir, &c, NULL, "0000:03:00.0", "999.1.2", line, sizeof(line)) == 1 &&
-	      strcmp(line, "4 held (2 in use, 2 free); not guaranteed to work with this driver build") == 0, "held, another driver: %s", line);
-	CHECK(gs_fb_line(dir, &c, NULL, "0000:05:00.0", "580.159.01", line, sizeof(line)) == -1 &&
-	      strcmp(line, "not held (it was in use by a VM or a host program when activation asked for it); `sudo geforce-sriov activate` "
-			   "holds them again; a VM may fail to start while host programs use this GPU") == 0, "none held: %s", line);
-	CHECK(gs_fb_line(dir, &c, NULL, "0000:07:00.0", "580.159.01", line, sizeof(line)) == -1 &&
-	      contains(line, "not held (activation has not held them; `sudo geforce-sriov activate` does)"), "nothing known: %s", line);
-	writef(p, "abi 1\nslot 0000:03:00.0 0x0 0x7e000000 held dups 0 answered 0\n"
-	       "slot 0000:03:00.0 0x7e000000 0x7e000000 given-up the manager asked with a client or a device that was not seen being made\n"
-	       "slot 0000:03:00.0 0xfc000000 0x7e000000 failed 0x1f\n");
-	CHECK(gs_fb_line(dir, &c, NULL, "0000:03:00.0", "580.159.01", line, sizeof(line)) == -1 &&
-	      strcmp(line, "1 held (0 in use, 1 free), 2 not held: given up: the manager asked with a client or a device that was not seen "
-			   "being made; `sudo geforce-sriov activate` holds them again") == 0, "given up: %s", line);
-	c.fb_slots = GS_FB_SLOTS_OFF;
-	CHECK(gs_fb_line(dir, &c, NULL, "0000:03:00.0", "580.159.01", line, sizeof(line)) == 0 &&
-	      contains(line, "not held (fb_slots=off in the config)"), "off: %s", line);
-
-	/* The config key. */
-	CHECK(gs_config_parse("fb_slots=off\n", 13, &c, err, sizeof(err)) == 0 && c.fb_slots == GS_FB_SLOTS_OFF, "fb_slots=off");
-	CHECK(gs_config_parse("fb_slots=on\n", 12, &c, err, sizeof(err)) == 0 && c.fb_slots == GS_FB_SLOTS_ON, "fb_slots=on");
-	CHECK(gs_config_parse("fb_slots=auto\n", 14, &c, err, sizeof(err)) == 0 && c.fb_slots == GS_FB_SLOTS_AUTO, "fb_slots=auto");
-	CHECK(gs_config_parse("fb_slots=yes\n", 13, &c, err, sizeof(err)) != 0 && contains(err, "line 1: fb_slots must be auto, on or off"),
-	      "fb_slots=yes: %s", err);
+	CHECK(gs_config_parse("fb_slots=off\n", 13, &c, err, sizeof(err)) == 0 && c.fb_slots_ignored, "fb_slots=off is read and ignored: %s", err);
+	CHECK(gs_config_parse("fb_slots=on\nari=on\n", 19, &c, err, sizeof(err)) == 0 && c.fb_slots_ignored, "fb_slots=on is read and ignored: %s", err);
+	CHECK(gs_config_render(&c, line, sizeof(line)) > 0 && !contains(line, "fb_slots"), "the config is written without it");
 	gs_config_defaults(&c);
-	CHECK(gs_config_render(&c, line, sizeof(line)) > 0 && !contains(line, "fb_slots"), "the default is not written");
-	c.fb_slots = GS_FB_SLOTS_OFF;
-	CHECK(gs_config_render(&c, line, sizeof(line)) > 0 && contains(line, "\nfb_slots=off\n"), "off is written");
+	CHECK(gs_config_parse("ari=on\n", 7, &c, err, sizeof(err)) == 0 && !c.fb_slots_ignored, "no key, no note");
+}
+
+/* The removed fb_placement key, host_desktop, which Ada card is selected, and the VM video memory line of status and check. */
+static void test_ada_placement(void)
+{
+#define FP_PARSE(text) gs_config_parse(text, sizeof(text) - 1, &c, err, sizeof(err))
+	struct gs_config c, back;
+	char line[768], text[4096], err[256], sys[GS_PATH_MAX], p[GS_PATH_MAX], q[GS_PATH_MAX];
+
+	/* fb_placement was never released: every value of it is an unknown key, and the message is the existing one. */
+	CHECK(FP_PARSE("fb_placement=auto\n") != 0 && strcmp(err, "line 1: unknown key 'fb_placement'") == 0, "fb_placement=auto: %s", err);
+	CHECK(FP_PARSE("fb_placement=top\n") != 0 && strcmp(err, "line 1: unknown key 'fb_placement'") == 0, "fb_placement=top: %s", err);
+	CHECK(FP_PARSE("fb_placement=default\n") != 0 && strcmp(err, "line 1: unknown key 'fb_placement'") == 0, "fb_placement=default: %s", err);
+	CHECK(FP_PARSE("ari=on\nfb_placement=auto\n") != 0 && strcmp(err, "line 2: unknown key 'fb_placement'") == 0, "fb_placement after another key: %s", err);
+	/* The written config has no placement line, and what it writes reads back. */
+	gs_config_defaults(&c);
+	CHECK(gs_config_render(&c, text, sizeof(text)) > 0 && !contains(text, "fb_placement") && !contains(text, "placement"),
+	      "the rendered config has no placement line: %s", text);
+	CHECK(gs_config_parse(text, strlen(text), &back, err, sizeof(err)) == 0, "the written config reads back: %s", err);
+	/* host_desktop: auto, on or off; auto, which is what an absent key means, is written back as auto. */
+	CHECK(FP_PARSE("host_desktop=auto\n") == 0 && c.host_desktop == GS_DESKTOP_AUTO, "host_desktop=auto");
+	CHECK(FP_PARSE("host_desktop=on\n") == 0 && c.host_desktop == GS_DESKTOP_ON, "host_desktop=on");
+	CHECK(FP_PARSE("host_desktop=off\n") == 0 && c.host_desktop == GS_DESKTOP_OFF, "host_desktop=off");
+	CHECK(FP_PARSE("host_desktop=maybe\n") != 0 && contains(err, "line 1: host_desktop must be auto, on or off"), "host_desktop=maybe: %s", err);
+	CHECK(FP_PARSE("host_desktop=on\nhost_desktop=off\n") != 0, "host_desktop twice: %s", err);
+	gs_config_defaults(&c);
+	CHECK(c.host_desktop == GS_DESKTOP_AUTO, "host_desktop: auto by default, also for a config of 0.3.0 that has no such line");
+	CHECK(gs_config_render(&c, text, sizeof(text)) > 0 && contains(text, "\nhost_cuda=off\nhost_desktop=auto\n"), "auto is written after host_cuda: %s", text);
+	c.host_desktop = GS_DESKTOP_OFF;
+	CHECK(gs_config_render(&c, text, sizeof(text)) > 0 && contains(text, "\nhost_desktop=off\n"), "off is written: %s", text);
+	CHECK(gs_config_parse(text, strlen(text), &back, err, sizeof(err)) == 0 && back.host_desktop == GS_DESKTOP_OFF, "and read back: %s", err);
+
+	/* Which selection asks for the Ada placement change: one selected GPU that is Ada. */
+	{
+		struct gs_addr ampere[1], ada[1], mixed[2], none[1];
+
+		gs_pathf(sys, sizeof(sys), "%s/fp-sys", tmp);
+		gs_pathf(p, sizeof(p), "%s/bus/pci/devices/0000:01:00.0/device", sys);
+		writef(p, "0x2206\n");
+		gs_pathf(p, sizeof(p), "%s/bus/pci/devices/0000:02:00.0/device", sys);
+		writef(p, "0x2684\n");
+		CHECK(gs_parse_addr_list("bdfs", "0000:01:00.0", ampere, &(unsigned int){ 0 }, err, sizeof(err)) == 0 &&
+		      gs_parse_addr_list("bdfs", "0000:02:00.0", ada, &(unsigned int){ 0 }, err, sizeof(err)) == 0 &&
+		      gs_parse_addr_list("bdfs", "0000:01:00.0,0000:02:00.0", mixed, &(unsigned int){ 0 }, err, sizeof(err)) == 0 &&
+		      gs_parse_addr_list("bdfs", "0000:09:00.0", none, &(unsigned int){ 0 }, err, sizeof(err)) == 0, "fixture addresses: %s", err);
+		CHECK(!gs_fb_ada_selected(sys, ampere, 1), "Ampere only: no Ada card");
+		CHECK(gs_fb_ada_selected(sys, ada, 1), "Ada only: an Ada card");
+		CHECK(gs_fb_ada_selected(sys, mixed, 2), "Ampere and Ada: an Ada card");
+		CHECK(!gs_fb_ada_selected(sys, none, 1) && !gs_fb_ada_selected(sys, ampere, 0), "a GPU that is absent or no GPU selected: no Ada card");
+	}
+
+	/* The VM video memory line, from a fixture sysfs: a card 0000:02:00.0 with two VFs. */
+	{
+		static const char *const vfs[2] = { "0000:02:00.4", "0000:02:00.5" };
+		struct gs_addr pf;
+		const char *set[3][2] = { { "Not Applicable", "Not Applicable" }, { "0", "2" }, { "Not Applicable", "4" } };
+
+		CHECK(gs_addr_parse("0000:02:00.0", &pf) == 0, "pf address");
+		for (unsigned int i = 0; i < 2; i++) {
+			gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/nvidia/placement_id", sys, vfs[i]);
+			writef(p, "%s\n", set[0][i]);
+			gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/physfn", sys, vfs[i]);
+			link_to("../0000:02:00.0", p);
+			gs_pathf(p, sizeof(p), "%s/bus/pci/devices/0000:02:00.0/virtfn%u", sys, i);
+			snprintf(q, sizeof(q), "../%s", vfs[i]);
+			link_to(q, p);
+		}
+		CHECK(gs_ada_placement_line(sys, &pf, 2, line, sizeof(line)) == 1 &&
+		      strcmp(line, "VM video memory: taken from free memory when a VM starts (placement_id: Not Applicable)") == 0,
+		      "every VF Not Applicable: %s", line);
+		for (unsigned int k = 1; k < 3; k++) {
+			for (unsigned int i = 0; i < 2; i++) {
+				gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/nvidia/placement_id", sys, vfs[i]);
+				writef(p, "%s\n", set[k][i]);
+			}
+			CHECK(gs_ada_placement_line(sys, &pf, 2, line, sizeof(line)) == 0 &&
+			      contains(line, k == 1 ? "VM video memory: fixed slots (placement_id 0, 2): the loaded nvidia.ko does not carry the Ada placement change. "
+						      "Run sudo geforce-sriov install, then power the machine off and on" :
+						      "VM video memory: fixed slots (placement_id 4): the loaded nvidia.ko does not carry the Ada placement change. "
+						      "Run sudo geforce-sriov install, then power the machine off and on"),
+			      "a VF reads a number (%u): %s", k, line);
+		}
+		gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/nvidia/placement_id", sys, vfs[1]);
+		unlink(p);
+		CHECK(gs_ada_placement_line(sys, &pf, 2, line, sizeof(line)) == 0 &&
+		      strcmp(line, "VM video memory: placement_id could not be read") == 0, "a file that cannot be read: %s", line);
+		writef(p, "n/a\n");
+		CHECK(gs_ada_placement_line(sys, &pf, 2, line, sizeof(line)) == 0 &&
+		      strcmp(line, "VM video memory: placement_id could not be read") == 0, "a value that is neither: %s", line);
+	}
+#undef FP_PARSE
 }
 
 /*
@@ -4511,7 +4601,6 @@ static void test_driver_result(void)
 		enum gs_driver_result want;
 	} c[] = {
 		{ "install_result=unchanged", GS_DRIVER_UNCHANGED },
-		{ "install_result=record-only", GS_DRIVER_RECORD_ONLY },
 		{ "install_result=changed", GS_DRIVER_CHANGED },
 		{ "install_result=something-new", GS_DRIVER_CHANGED },
 		/* A message is not the result, whatever it says. */
@@ -4524,7 +4613,7 @@ static void test_driver_result(void)
 	gs_pathf(script, sizeof(script), "%s/driver-result.sh", tmp);
 	gs_pathf(log, sizeof(log), "%s/driver-result.log", tmp);
 	for (size_t i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
-		enum gs_driver_result got = GS_DRIVER_RECORD_ONLY;
+		enum gs_driver_result got = (enum gs_driver_result)-1;
 
 		writef(script, "#!/bin/sh\nprintf '%%s\\n' \"%s\"\n", c[i].line);
 		chmod(script, 0755);
@@ -4546,7 +4635,6 @@ static void test_cli_smoke(void)
 {
 	char root[GS_PATH_MAX], cfg[GS_PATH_MAX], *out;
 	const char *devices[] = { "devices", NULL }, *uninstall[] = { "uninstall", NULL };
-	const char *doctor[] = { "doctor", "--sysfs-root", root, "--config", cfg, NULL };
 	const char *status[] = { "status", "--sysfs-root", root, "--config", cfg, NULL };
 
 	CHECK(run_cli(&out, NULL, devices) == GS_EXIT_OK && contains(out, "10de:2204 Ampere  GA102  GeForce RTX 3090") &&
@@ -4559,10 +4647,18 @@ static void test_cli_smoke(void)
 	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
 	writef(cfg, "bdfs=0000:03:00.0\n");
 	CHECK(run_cli(&out, NULL, status) == GS_EXIT_FAIL && contains(out, "0 of 1 selected GPU(s) have every VF ready.") &&
-	      contains(out, "next: "), "status on a host that is not activated: %s", out);
+	      contains(out, "next: ") && contains(out, "\nhost desktop: requested=auto\n"), "status on a host that is not activated: %s", out);
 	free(out);
-	run_cli(&out, NULL, doctor);
-	CHECK(contains(out, "0000:03:00.0") && contains(out, "failure(s)"), "doctor reports the selected GPU and a summary: %s", out);
+	{
+		const char *gone[] = { "doctor", NULL };
+		const char *dry_stage[] = { "install", "--dry-run", "--destdir", root, NULL };
+
+		CHECK(run_cli(&out, NULL, gone) == GS_EXIT_USAGE && contains(out, "unknown command 'doctor'"),
+		      "doctor is not a command: %s", out);
+		free(out);
+		CHECK(run_cli(&out, NULL, dry_stage) == GS_EXIT_USAGE && contains(out, "--dry-run checks this host"),
+		      "install --dry-run takes no --destdir: %s", out);
+	}
 	free(out);
 }
 
@@ -4755,10 +4851,10 @@ static void test_activate_refusals(void)
 	free(out);
 }
 
-/* ---- activate --clear-guard ------------------------------------------- */
+/* ---- activate --clear-lock -------------------------------------------- */
 
 /*
- * gs_cmd_activate's clear-guard branch uses the live paths (GS_STATE_DIR, gs_host_live) and
+ * gs_cmd_activate's clear-lock branch uses the live paths (GS_STATE_DIR, gs_host_live) and
  * requires root, so it can only be exercised hermetically in a private mount namespace: tmpfs
  * over /run and /var/lib, uid 0 inside a user namespace mapped to this user.
  */
@@ -4822,15 +4918,6 @@ static void test_clear_guard(void)
 	}
 	free(probe);
 
-	/* The option's 0.2.x name is refused with the new one, and the lock stays. */
-	snprintf(script, sizeof(script),
-		 NS_PREFIX "printf 'boot_id=x\\n' > " GUARD "; '%s' activate --clear-guard; echo RC=$?; "
-		 "if [ -e " GUARD " ]; then echo STILL-THERE; fi; rm -f " GUARD, cli);
-	CHECK(run_in_ns(script, &out) == 0 && contains(out, "RC=2") && contains(out, "STILL-THERE") &&
-	      contains(out, "--clear-guard was renamed to --clear-lock in 0.3.0; run `geforce-sriov activate --clear-lock`"),
-	      "the old option name is refused and names the new one: %s", out);
-	free(out);
-
 	/* No guard: idempotent, exit 0, nothing created. */
 	snprintf(script, sizeof(script), NS_PREFIX "'%s' activate --clear-lock; echo RC=$?", cli);
 	CHECK(run_in_ns(script, &out) == 0 &&
@@ -4887,6 +4974,16 @@ static void test_clear_guard(void)
 	      contains(out, "geforce-sriov: cannot remove " GUARD) && contains(out, "CLEAR-RC=1") &&
 	      contains(out, "STILL-THERE") && !contains(out, "modprobe") && !contains(out, "sriov-manage"),
 	      "an unremovable guard fails loudly: %s", out);
+	free(out);
+
+	/* uninstall of this version stops on another version's DKMS registration, and names the way out. */
+	snprintf(script, sizeof(script),
+		 NS_PREFIX "mkdir -p /var/lib/dkms/" GS_DKMS_NAME "/0.3.0; '%s' uninstall; echo RC=$?; "
+		 "if [ -d /var/lib/dkms/" GS_DKMS_NAME "/0.3.0 ]; then echo DKMS-STILL-THERE; fi", cli);
+	CHECK(run_in_ns(script, &out) == 0 && contains(out, "RC=3") && contains(out, "DKMS-STILL-THERE") &&
+	      contains(out, "another version of geforce-sriov than " GS_VERSION " is installed") &&
+	      contains(out, "dkms remove " GS_DKMS_NAME "/0.3.0 --all"),
+	      "uninstall stops on another installed version and names the manual way out: %s", out);
 	free(out);
 }
 
@@ -5075,7 +5172,7 @@ static void test_version_record(void)
 
 /*
  * gs_setup on a fixture host: the steps are logged by setup_run and never run. install writes the
- * config the test names (a staged install would, in the real binary); doctor/activate/check return
+ * config the test names (a staged install would, in the real binary); install --dry-run/activate/check return
  * setup_rc.
  */
 static char setup_log[GS_PATH_MAX];
@@ -5184,7 +5281,7 @@ static void test_dkms_ensure(void)
 	      contains(out, "warning: DKMS does not hold geforce-sriov/" GS_VERSION " on this host"), "not managed by DKMS: %s", out);
 	free(out);
 
-	/* doctor: the kernels NVIDIA's module was built for that are installed and have no livepatch module. */
+	/* The host checks: the kernels NVIDIA's module was built for that are installed and have no livepatch module. */
 	gs_pathf(root, sizeof(root), "%s/dkms-root", tmp);
 	gs_pathf(state, sizeof(state), "%s/var/lib/geforce-sriov", root);
 	gs_pathf(p, sizeof(p), "%s/driver-builds", state);
@@ -5263,10 +5360,12 @@ static int cu_capture(const char *const argv[], char *out, size_t len)
 	snprintf(out, len, "%s", cu_loader);
 	return 0;
 }
-static const struct gs_cuda_io cu_io = { cu_run, cu_capture };
+static const struct gs_nvlibs_io cu_io = { cu_run, cu_capture };
 static int cu_apply(void)
 {
-	return gs_cuda_libs_apply(cu_manifest, cu_dir, cu_conf, cu_stage, cu_want, &cu_io);
+	const struct gs_nvdest d = { cu_dir, cu_conf, cu_stage, NULL };
+
+	return gs_nvlibs_apply(&gs_nvset_cuda, cu_manifest, &d, cu_want, &cu_io);
 }
 static int cu_uninstall(void)
 {
@@ -5333,9 +5432,9 @@ static void test_cuda_libs(void)
 	      contains(out, "Run `sudo ./geforce-sriov install --host-cuda --companion-file PATH` in the source folder with that package."),
 	      "nothing staged, nothing installed: %s", out);
 	free(out);
-	CHECK(gs_cuda_libs_line(cu_manifest, 1, NULL, line, sizeof(line)) == -1 && contains(line, "not installed, so CUDA programs on the host cannot start"),
+	CHECK(gs_nvlibs_line(&gs_nvset_cuda, cu_manifest, 1, NULL, line, sizeof(line)) == -1 && contains(line, "not installed, so CUDA programs on the host cannot start"),
 	      "status says so: %s", line);
-	CHECK(gs_cuda_libs_line(cu_manifest, 0, NULL, line, sizeof(line)) == 0 && !line[0], "and nothing when host CUDA is off");
+	CHECK(gs_nvlibs_line(&gs_nvset_cuda, cu_manifest, 0, NULL, line, sizeof(line)) == 0 && !line[0], "and nothing when host CUDA is off");
 
 	/* An index that does not fit its files is not installed from. */
 	cu_stage_make("580.159.03");
@@ -5371,10 +5470,10 @@ static void test_cuda_libs(void)
 	CHECK(text && contains(text, "l libcuda.so.580.159.03 ") && contains(text, "/cuda/libcuda.so.1\n") && contains(text, cu_conf),
 	      "the manifest lists the files, the links and the loader's file: %s", text ? text : "(none)");
 	free(text);
-	CHECK(gs_cuda_libs_state(cu_manifest, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad)) == 1 &&
+	CHECK(gs_nvlibs_state(&gs_nvset_cuda, cu_manifest, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad)) == 1 &&
 	      strcmp(dir, cu_dir) == 0 && strcmp(version, "580.159.03") == 0, "the manifest says what is installed: %s %s", dir, version);
 	snprintf(want_line, sizeof(want_line), "libcuda 580.159.03 is installed in %s", cu_dir);
-	CHECK(gs_cuda_libs_line(cu_manifest, 1, cu_capture, line, sizeof(line)) == 1 && strcmp(line, want_line) == 0, "status and doctor: %s", line);
+	CHECK(gs_nvlibs_line(&gs_nvset_cuda, cu_manifest, 1, cu_capture, line, sizeof(line)) == 1 && strcmp(line, want_line) == 0, "status and doctor: %s", line);
 
 	/* Again, with nothing handed over: nothing is written and ldconfig is not run. */
 	CHECK(run_host(cu_apply, &out) == 0 && !contains(out, "R ") && !contains(out, "installed") && !contains(out, "warning"),
@@ -5394,11 +5493,11 @@ static void test_cuda_libs(void)
 	text = slurp(foreign);
 	CHECK(text && strcmp(text, "another libcuda\n") == 0, "the other libcuda is untouched");
 	free(text);
-	CHECK(gs_cuda_libs_line(cu_manifest, 1, cu_capture, line, sizeof(line)) == -1 && contains(line, "but programs load another one first: ") &&
+	CHECK(gs_nvlibs_line(&gs_nvset_cuda, cu_manifest, 1, cu_capture, line, sizeof(line)) == -1 && contains(line, "but programs load another one first: ") &&
 	      contains(line, foreign), "doctor says so: %s", line);
 	/* A 32-bit entry before it is not the one a 64-bit program gets. */
 	snprintf(cu_loader, sizeof(cu_loader), "\tlibcuda.so.1 (libc6) => /usr/lib32/libcuda.so.1\n\tlibcuda.so.1 (libc6,x86-64) => %s/libcuda.so.1\n", cu_dir);
-	CHECK(gs_cuda_libs_line(cu_manifest, 1, cu_capture, line, sizeof(line)) == 1, "a 32-bit libcuda does not count: %s", line);
+	CHECK(gs_nvlibs_line(&gs_nvset_cuda, cu_manifest, 1, cu_capture, line, sizeof(line)) == 1, "a 32-bit libcuda does not count: %s", line);
 
 	/* A second package of another version: its libraries replace the installed ones. */
 	cu_stage_make("580.159.05");
@@ -5411,7 +5510,7 @@ static void test_cuda_libs(void)
 	/* A library that was changed since install: incomplete, and said. */
 	gs_pathf(p, sizeof(p), "%s/libnvidia-nvvm.so.580.159.05", cu_dir);
 	writef(p, "changed\n");
-	CHECK(gs_cuda_libs_line(cu_manifest, 1, NULL, line, sizeof(line)) == -1 && contains(line, "incomplete: ") && contains(line, p),
+	CHECK(gs_nvlibs_line(&gs_nvset_cuda, cu_manifest, 1, NULL, line, sizeof(line)) == -1 && contains(line, "incomplete: ") && contains(line, p),
 	      "a changed library: %s", line);
 	CHECK(run_host(cu_apply, &out) == 0 && contains(out, "warning: NVIDIA's CUDA libraries are incomplete: ") && contains(out, p),
 	      "install says so too: %s", out);
@@ -5419,7 +5518,7 @@ static void test_cuda_libs(void)
 
 	/* Host CUDA off: what this package installed goes, what was changed stays, the other libcuda stays. */
 	cu_want = 0;
-	CHECK(gs_cuda_libs_line(cu_manifest, 0, NULL, line, sizeof(line)) == 2 && contains(line, "although host_cuda=off"), "off, still installed: %s", line);
+	CHECK(gs_nvlibs_line(&gs_nvset_cuda, cu_manifest, 0, NULL, line, sizeof(line)) == 2 && contains(line, "although host_cuda=off"), "off, still installed: %s", line);
 	CHECK(run_host(cu_apply, &out) == 0 && !cu_has("libcuda.so.580.159.05") && !cu_has("libcuda.so.1") && !cu_has("libcuda.so") &&
 	      !gs_exists(cu_conf) && gs_exists(p) && gs_exists(foreign) && contains(out, ": host CUDA is off\n") &&
 	      contains(out, "(changed since install)") && contains(out, "R ldconfig\n"), "host CUDA off removes them: %s", out);
@@ -5446,6 +5545,653 @@ static void test_cuda_libs(void)
 	      text ? text : "(none)");
 	free(text);
 }
+
+/* The paths of the desktop fixtures are far shorter than the buffers; GCC cannot know that. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+/*
+ * NVIDIA's graphics libraries for the host desktop: the CUDA mechanism with the X modules, the small
+ * files of /etc and /usr/share, the GBM backend link in libgbm's directory and the output-class file.
+ * A tree of a Debian host is made by hand; its files must come out of every run as they went in.
+ */
+static char dt_root[GS_PATH_MAX], dt_manifest[GS_PATH_MAX], dt_dir[GS_PATH_MAX], dt_conf[GS_PATH_MAX], dt_stage[GS_PATH_MAX];
+static char dt_loader[3 * GS_PATH_MAX];
+static int dt_want;
+static const char *dt_accept;     /* the version the installed nvidia.ko accepts; NULL: not known */
+static const char *dt_xconf_text; /* NVIDIA's output-class file in the stage; NULL: a usual one */
+static int dt_capture(const char *const argv[], char *out, size_t len)
+{
+	(void)argv;
+	snprintf(out, len, "%s", dt_loader);
+	return 0;
+}
+static const struct gs_nvlibs_io dt_io = { cu_run, dt_capture };
+static int dt_apply(void)
+{
+	const struct gs_nvdest d = { dt_dir, dt_conf, dt_stage, dt_accept };
+
+	return gs_nvlibs_apply(&gs_nvset_desktop, dt_manifest, &d, dt_want, &dt_io);
+}
+static int dt_uninstall(void)
+{
+	return gs_uninstall_files(dt_manifest, dt_root, NULL);
+}
+static char dt_sha[65];
+/* One file of the staging directory; its digest is in dt_sha. */
+static const char *dt_new(const char *name, const char *content)
+{
+	char p[GS_PATH_MAX];
+
+	gs_pathf(p, sizeof(p), "%s/%s", dt_stage, name);
+	writef(p, "%s", content);
+	gs_sha256_file(p, dt_sha);
+	return dt_sha;
+}
+/* What the driver step leaves for the desktop set: libraries, X modules, small files, the GBM backend, one index. */
+static void dt_stage_make(const char *v)
+{
+	/* Library, and the soname the loader asks for (none: the file name is its own soname). */
+	static const char *const libs[][2] = {
+		{ "libEGL_nvidia", "libEGL_nvidia.so.0" }, { "libGLX_nvidia", "libGLX_nvidia.so.0" },
+		{ "libnvidia-glcore", NULL }, { "libnvidia-allocator", "libnvidia-allocator.so.1" },
+	};
+	const char *const rm[] = { "rm", "-rf", "--", dt_stage, NULL };
+	char *index = calloc(1, 8192), name[96], link[96], p[GS_PATH_MAX];
+	size_t at = 0;
+
+	gs_run(rm);
+	gs_mkdir_p(dt_stage, 0755);
+	at += (size_t)snprintf(index + at, 8192 - at, "version=%s\n", v);
+	for (unsigned int i = 0; i < 4; i++) {
+		snprintf(name, sizeof(name), "%s.so.%s", libs[i][0], v);
+		snprintf(link, sizeof(link), "%s", libs[i][1] ? libs[i][1] : name);
+		at += (size_t)snprintf(index + at, 8192 - at, "lib=%s %s %s\n", name, dt_new(name, name), link);
+	}
+	at += (size_t)snprintf(index + at, 8192 - at, "lib=libnvidia-egl-gbm.so.1.1.3 %s libnvidia-egl-gbm.so.1\n",
+			       dt_new("libnvidia-egl-gbm.so.1.1.3", "egl gbm\n"));
+	at += (size_t)snprintf(index + at, 8192 - at, "xmod=drivers/nvidia_drv.so %s\n", dt_new("nvidia_drv.so", "x driver\n"));
+	snprintf(name, sizeof(name), "libglxserver_nvidia.so.%s", v);
+	at += (size_t)snprintf(index + at, 8192 - at, "xmod=extensions/%s %s libglxserver_nvidia.so\n", name, dt_new(name, "glx module\n"));
+	at += (size_t)snprintf(index + at, 8192 - at, "etc=egl_vendor 10_nvidia.json %s\n", dt_new("10_nvidia.json", "{ \"library_path\" : \"libEGL_nvidia.so.0\" }\n"));
+	at += (size_t)snprintf(index + at, 8192 - at, "etc=egl_platform 15_nvidia_gbm.json %s\n", dt_new("15_nvidia_gbm.json", "gbm platform\n"));
+	at += (size_t)snprintf(index + at, 8192 - at, "etc=egl_platform 10_nvidia_wayland.json %s\n", dt_new("10_nvidia_wayland.json", "wayland platform\n"));
+	at += (size_t)snprintf(index + at, 8192 - at, "etc=vulkan_icd nvidia_icd.json %s\n", dt_new("nvidia_icd.json", "{ \"library_path\": \"libGLX_nvidia.so.0\" }\n"));
+	snprintf(name, sizeof(name), "nvidia-application-profiles-%s-rc", v);
+	at += (size_t)snprintf(index + at, 8192 - at, "etc=profile %s %s\n", name, dt_new(name, "profiles\n"));
+	snprintf(name, sizeof(name), "nvidia-application-profiles-%s-key-documentation", v);
+	at += (size_t)snprintf(index + at, 8192 - at, "etc=profile %s %s\n", name, dt_new(name, "profile keys\n"));
+	at += (size_t)snprintf(index + at, 8192 - at, "etc=xconf nvidia-drm-outputclass.conf %s\n",
+			       dt_new("nvidia-drm-outputclass.conf", dt_xconf_text ? dt_xconf_text : "# NVIDIA's own words.\n\nSection \"OutputClass\"\n"
+				      "    Identifier     \"nvidia\"\n    MatchDriver    \"nvidia-drm\"\n    Driver         \"nvidia\"\nEndSection\n"));
+	at += (size_t)snprintf(index + at, 8192 - at, "gbm=libnvidia-allocator.so.1\n");
+	gs_pathf(p, sizeof(p), "%s/index", dt_stage);
+	writef(p, "%s", index);
+	free(index);
+}
+static int dt_has(const char *rel)
+{
+	char p[GS_PATH_MAX];
+	struct stat st;
+
+	return !gs_pathf(p, sizeof(p), "%s/%s", dt_root, rel) && lstat(p, &st) == 0;
+}
+static int dt_link_is(const char *rel, const char *to)
+{
+	char p[GS_PATH_MAX], have[GS_PATH_MAX];
+	ssize_t n;
+
+	gs_pathf(p, sizeof(p), "%s/%s", dt_root, rel);
+	n = readlink(p, have, sizeof(have) - 1);
+	return n > 0 && (have[n] = '\0', strcmp(have, to) == 0);
+}
+/* Every file, directory and link below dir with its digest or target, in name order, except skip. */
+static void dt_dump(const char *dir, const char *skip, char *out, size_t cap)
+{
+	struct dirent **names;
+	int n = scandir(dir, &names, NULL, alphasort);
+
+	for (int i = 0; i < n; i++) {
+		char p[GS_PATH_MAX], sha[65], to[GS_PATH_MAX];
+		struct stat st;
+		size_t at = strlen(out);
+		ssize_t k;
+
+		if (strcmp(names[i]->d_name, ".") && strcmp(names[i]->d_name, "..") &&
+		    !gs_pathf(p, sizeof(p), "%s/%s", dir, names[i]->d_name) && !(skip && strcmp(p, skip) == 0) && lstat(p, &st) == 0) {
+			if (S_ISDIR(st.st_mode)) {
+				snprintf(out + at, cap - at, "d %s\n", p);
+				dt_dump(p, skip, out, cap);
+			} else if (S_ISLNK(st.st_mode)) {
+				k = readlink(p, to, sizeof(to) - 1);
+				to[k > 0 ? k : 0] = '\0';
+				snprintf(out + at, cap - at, "l %s -> %s\n", p, to);
+			} else {
+				gs_sha256_file(p, sha);
+				snprintf(out + at, cap - at, "f %s %s\n", p, sha);
+			}
+		}
+		free(names[i]);
+	}
+	free(names);
+}
+static void test_host_desktop(void)
+{
+	static const char v[] = "580.159.03";
+	const struct gs_nvgl_paths saved = gs_nvgl;
+	char p[GS_PATH_MAX], q[GS_PATH_MAX], state[GS_PATH_MAX], line[2 * GS_PATH_MAX], dir[GS_PATH_MAX], version[32], bad[GS_PATH_MAX];
+	char *before = calloc(1, 1 << 17), *after = calloc(1, 1 << 17), *out, *text, *deb_before = calloc(1, 1 << 16), *deb_after = calloc(1, 1 << 16);
+	char libdir[GS_PATH_MAX], gbm[GS_PATH_MAX], xconf[GS_PATH_MAX], foreign[GS_PATH_MAX];
+	struct stat st;
+
+	gs_pathf(dt_root, sizeof(dt_root), "%s/desktop", tmp);
+	gs_pathf(state, sizeof(state), "%s/state", dt_root);
+	gs_mkdir_p(state, 0755);
+	gs_pathf(dt_manifest, sizeof(dt_manifest), "%s/installed-files", state);
+	gs_pathf(dt_dir, sizeof(dt_dir), "%s/usr/local/lib/geforce-sriov/gl", dt_root);
+	gs_pathf(dt_conf, sizeof(dt_conf), "%s/etc/ld.so.conf.d/geforce-sriov-gl.conf", dt_root);
+	gs_pathf(dt_stage, sizeof(dt_stage), "%s/host-desktop", state);
+	gs_pathf(libdir, sizeof(libdir), "%s/usr/lib/x86_64-linux-gnu", dt_root);
+	gs_pathf(gbm, sizeof(gbm), "%s/gbm/nvidia-drm_gbm.so", libdir);
+	gs_pathf(xconf, sizeof(xconf), "%s/etc/X11/xorg.conf.d/geforce-sriov-nvidia-drm-outputclass.conf", dt_root);
+	snprintf(gs_nvgl.etc_vendor, sizeof(gs_nvgl.etc_vendor), "%s/etc/glvnd/egl_vendor.d", dt_root);
+	snprintf(gs_nvgl.etc_platform, sizeof(gs_nvgl.etc_platform), "%s/etc/egl/egl_external_platform.d", dt_root);
+	snprintf(gs_nvgl.etc_vulkan, sizeof(gs_nvgl.etc_vulkan), "%s/etc/vulkan/icd.d", dt_root);
+	snprintf(gs_nvgl.share_nvidia, sizeof(gs_nvgl.share_nvidia), "%s/usr/share/nvidia", dt_root);
+	snprintf(gs_nvgl.xconf, sizeof(gs_nvgl.xconf), "%s/etc/X11/xorg.conf.d", dt_root);
+	snprintf(gs_nvgl.share_vendor, sizeof(gs_nvgl.share_vendor), "%s/usr/share/glvnd/egl_vendor.d", dt_root);
+	snprintf(gs_nvgl.share_platform, sizeof(gs_nvgl.share_platform), "%s/usr/share/egl/egl_external_platform.d", dt_root);
+	snprintf(gs_nvgl.xorg_drivers, sizeof(gs_nvgl.xorg_drivers), "%s/usr/lib/xorg/modules/drivers", dt_root);
+	/* The files a Debian host has: Mesa's libglvnd, libgbm with its backend directory, Mesa's EGL vendor file, an X configuration directory. */
+	gs_pathf(p, sizeof(p), "%s/libEGL.so.1", libdir);
+	writef(p, "libglvnd's libEGL\n");
+	gs_pathf(p, sizeof(p), "%s/libgbm.so.1", libdir);
+	writef(p, "libgbm\n");
+	gs_pathf(p, sizeof(p), "%s/gbm/dri_gbm.so", libdir);
+	writef(p, "mesa's gbm backend\n");
+	gs_pathf(p, sizeof(p), "%s/usr/share/glvnd/egl_vendor.d/50_mesa.json", dt_root);
+	writef(p, "mesa\n");
+	gs_pathf(p, sizeof(p), "%s/usr/share/X11/xorg.conf.d/10-quirks.conf", dt_root);
+	writef(p, "quirks\n");
+	gs_pathf(p, sizeof(p), "%s/usr/lib/xorg/modules/drivers/modesetting_drv.so", dt_root);
+	writef(p, "modesetting\n");
+	gs_pathf(p, sizeof(p), "%s/etc/ld.so.conf.d/x86_64-linux-gnu.conf", dt_root);
+	writef(p, "/usr/lib/x86_64-linux-gnu\n");
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/libgbm.so.1\n", libdir);
+	gs_pathf(p, sizeof(p), "%s/usr", dt_root);
+	dt_dump(dt_root, state, before, 1 << 17);
+	dt_dump(p, NULL, deb_before, 1 << 16);
+
+	/* Host desktop is on and nothing was handed over: one warning, nothing installed. */
+	dt_want = GS_NVLIBS_ON;
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local/lib/geforce-sriov/gl") &&
+	      contains(out, "warning: host_desktop=on, but NVIDIA's graphics libraries are not installed, so the desktop\nis drawn by the CPU.") &&
+	      contains(out, "Run `sudo ./geforce-sriov install --host-desktop --companion-file PATH` in the source folder with that package."),
+	      "nothing staged, nothing installed: %s", out);
+	free(out);
+	/* With auto it is a line, not a warning. */
+	dt_want = GS_NVLIBS_AUTO;
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "host desktop: not installed (host_desktop=auto): NVIDIA's graphics libraries were not taken") &&
+	      !contains(out, "warning"), "auto says it on stdout: %s", out);
+	free(out);
+	CHECK(gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 1, NULL, line, sizeof(line)) == -1 && contains(line, "the desktop is drawn by the CPU"),
+	      "status says so: %s", line);
+	CHECK(gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 0, NULL, line, sizeof(line)) == 0 && !line[0], "and nothing when it is off");
+
+	/* An index that does not fit its files is not installed from. */
+	dt_want = GS_NVLIBS_ON;
+	dt_stage_make(v);
+	gs_pathf(p, sizeof(p), "%s/nvidia_drv.so", dt_stage);
+	writef(p, "not the file the index names\n");
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local/lib/geforce-sriov/gl") &&
+	      contains(out, "does not hold what the driver step recorded there; NVIDIA's graphics libraries\nare not installed from it."),
+	      "a staging directory that was changed: %s", out);
+	free(out);
+
+	/* A file of someone else in a place the set writes to is kept, named, and nothing is installed. */
+	dt_stage_make(v);
+	gs_pathf(foreign, sizeof(foreign), "%s/etc/glvnd/egl_vendor.d/10_nvidia.json", dt_root);
+	writef(foreign, "somebody else's\n");
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "warning: NVIDIA's graphics libraries are not installed: ") && contains(out, foreign) &&
+	      contains(out, "exists and was not installed by\ngeforce-sriov, and is kept as it is.") && !dt_has("usr/local/lib/geforce-sriov/gl") &&
+	      !contains(out, "R ldconfig") && gs_exists(dt_stage), "a foreign file: %s", out);
+	free(out);
+	text = slurp(foreign);
+	CHECK(text && strcmp(text, "somebody else's\n") == 0, "the foreign file is as it was");
+	free(text);
+	unlink(foreign);
+	gs_pathf(p, sizeof(p), "%s/etc/glvnd/egl_vendor.d", dt_root);
+	rmdir(p);
+	gs_pathf(p, sizeof(p), "%s/etc/glvnd", dt_root);
+	rmdir(p);
+	/* So is a link of someone else where the GBM backend goes. */
+	writef(gbm, "a backend of someone else\n");
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, gbm) && contains(out, "is kept as it is.") && !dt_has("usr/local/lib/geforce-sriov/gl"),
+	      "a foreign GBM backend: %s", out);
+	free(out);
+	unlink(gbm);
+	/* Another NVIDIA graphics driver on the host: the two would be mixed. */
+	gs_pathf(foreign, sizeof(foreign), "%s/usr/share/glvnd/egl_vendor.d/10_nvidia.json", dt_root);
+	writef(foreign, "another driver\n");
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "belongs to another NVIDIA graphics\ndriver, and the two would be mixed.") &&
+	      contains(out, foreign) && !dt_has("usr/local/lib/geforce-sriov/gl"), "another NVIDIA graphics driver: %s", out);
+	free(out);
+	unlink(foreign);
+	gs_pathf(foreign, sizeof(foreign), "%s/usr/lib/xorg/modules/drivers/nvidia_drv.so", dt_root);
+	writef(foreign, "another X driver\n");
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "belongs to another NVIDIA graphics") && contains(out, foreign) &&
+	      !dt_has("usr/local/lib/geforce-sriov/gl"), "another NVIDIA X driver: %s", out);
+	free(out);
+	unlink(foreign);
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/libgbm.so.1\n\tlibEGL_nvidia.so.0 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0\n", libdir);
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "belongs to another NVIDIA graphics") && contains(out, "/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0") &&
+	      !dt_has("usr/local/lib/geforce-sriov/gl"), "another libEGL_nvidia the loader finds: %s", out);
+	free(out);
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/libgbm.so.1\n", libdir);
+
+	/* Install: libraries, X modules, small files, the backend link, the loader's file, ldconfig, then the output-class file. */
+	CHECK(run_host(dt_apply, &out) == 0 && !contains(out, "warning"), "installs: %s", out);
+	CHECK(dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.580.159.03") && dt_has("usr/local/lib/geforce-sriov/gl/libGLX_nvidia.so.580.159.03") &&
+	      dt_has("usr/local/lib/geforce-sriov/gl/libnvidia-glcore.so.580.159.03") && dt_has("usr/local/lib/geforce-sriov/gl/libnvidia-allocator.so.580.159.03") &&
+	      dt_has("usr/local/lib/geforce-sriov/gl/libnvidia-egl-gbm.so.1.1.3"), "the libraries are in the package's directory: %s", out);
+	CHECK(dt_link_is("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0", "libEGL_nvidia.so.580.159.03") &&
+	      dt_link_is("usr/local/lib/geforce-sriov/gl/libGLX_nvidia.so.0", "libGLX_nvidia.so.580.159.03") &&
+	      dt_link_is("usr/local/lib/geforce-sriov/gl/libnvidia-allocator.so.1", "libnvidia-allocator.so.580.159.03") &&
+	      dt_link_is("usr/local/lib/geforce-sriov/gl/libnvidia-egl-gbm.so.1", "libnvidia-egl-gbm.so.1.1.3") &&
+	      !dt_has("usr/local/lib/geforce-sriov/gl/libnvidia-glcore.so.0"), "the soname links, and none for a library that is its own soname");
+	CHECK(dt_has("usr/local/lib/geforce-sriov/xorg/drivers/nvidia_drv.so") && dt_has("usr/local/lib/geforce-sriov/xorg/extensions/libglxserver_nvidia.so.580.159.03") &&
+	      dt_link_is("usr/local/lib/geforce-sriov/xorg/extensions/libglxserver_nvidia.so", "libglxserver_nvidia.so.580.159.03"), "the X modules");
+	CHECK(dt_has("etc/X11/xorg.conf.d/geforce-sriov-nvidia-drm-outputclass.conf") && !dt_has("usr/share/X11/xorg.conf.d/geforce-sriov-nvidia-drm-outputclass.conf"),
+	      "the output-class file is in /etc/X11/xorg.conf.d, not in the X server package's /usr/share directory");
+	CHECK(dt_has("etc/glvnd/egl_vendor.d/10_nvidia.json") && dt_has("etc/egl/egl_external_platform.d/15_nvidia_gbm.json") &&
+	      dt_has("etc/egl/egl_external_platform.d/10_nvidia_wayland.json") && dt_has("etc/vulkan/icd.d/nvidia_icd.json") &&
+	      dt_has("usr/share/nvidia/nvidia-application-profiles-580.159.03-rc") && dt_has("usr/share/nvidia/nvidia-application-profiles-580.159.03-key-documentation"),
+	      "the small files");
+	snprintf(q, sizeof(q), "%s/usr/local/lib/geforce-sriov/gl/libnvidia-allocator.so.1", dt_root);
+	CHECK(dt_link_is("usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so", q), "the GBM backend link names the allocator in the package's directory");
+	text = slurp(dt_conf);
+	snprintf(q, sizeof(q), "%s\n", dt_dir);
+	CHECK(text && strcmp(text, q) == 0, "the loader's file names the directory: %s", text ? text : "(none)");
+	free(text);
+	gs_pathf(p, sizeof(p), "%s/usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.580.159.03", dt_root);
+	CHECK(stat(p, &st) == 0 && (st.st_mode & 0777) == 0755, "a library is executable, as NVIDIA's installer leaves it");
+	gs_pathf(p, sizeof(p), "%s/usr/share/nvidia/nvidia-application-profiles-580.159.03-rc", dt_root);
+	CHECK(stat(p, &st) == 0 && (st.st_mode & 0777) == 0444, "the profile is read-only");
+	/* The output-class file: NVIDIA's own, with the module path and ProbeAllGpus=false inside its OutputClass section: no BusID, no Device section. */
+	text = slurp(xconf);
+	snprintf(q, sizeof(q), "    ModulePath     \"%s/usr/local/lib/geforce-sriov/xorg\"\nEndSection\n", dt_root);
+	CHECK(text && strncmp(text, "# NVIDIA's nvidia-drm-outputclass.conf, with the directory geforce-sriov keeps NVIDIA's X modules in.\n# NVIDIA's own words.\n", 120) == 0 &&
+	      contains(text, "Section \"OutputClass\"\n    Identifier     \"nvidia\"\n    MatchDriver    \"nvidia-drm\"\n    Driver         \"nvidia\"\n") &&
+	      contains(text, q) && !contains(text, "BusID") && !contains(text, "Device") &&
+	      contains(text, "    Option         \"ProbeAllGpus\" \"false\"\n    ModulePath") && strstr(text, "ProbeAllGpus") < strstr(text, "EndSection") &&
+	      strstr(text, "ProbeAllGpus") > strstr(text, "Section \"OutputClass\"") && !strstr(strstr(text, "ProbeAllGpus") + 1, "ProbeAllGpus") &&
+	      !contains(text, "ServerFlags") && contains(text, "# geforce-sriov: X probes only the boot display card") &&
+	      !contains(text, "opens only the GPU"), "the output-class file: %s", text ? text : "(none)");
+	free(text);
+	{
+		const char *ld = strstr(out, "R ldconfig\n"), *xc = strstr(out, xconf), *drv = strstr(out, "xorg/drivers/nvidia_drv.so");
+		const char *js = strstr(out, "egl_vendor.d/10_nvidia.json"), *gl = strstr(out, gbm), *pl = strstr(out, "15_nvidia_gbm.json");
+
+		/*
+		 * The order that keeps the X server alive (X on NVIDIA's EGL without NVIDIA's X driver dies): the X driver, then the
+		 * output-class file, and only then, after the loader's cache has the libraries, what makes NVIDIA's EGL reachable.
+		 */
+		CHECK(drv && xc && js && gl && pl && ld, "every step of the order is in the output: %s", out);
+		CHECK(drv < xc, "the X driver is in before the output-class file: %s", out);
+		CHECK(xc < js && xc < gl && xc < pl, "the output-class file is in before the EGL vendor file, the platform file and the GBM link: %s", out);
+		CHECK(xc < ld && ld < js && ld < gl, "ldconfig runs before NVIDIA's EGL is made reachable: %s", out);
+		CHECK(contains(out, "host desktop: NVIDIA's graphics libraries 580.159.03 are installed in ") && !gs_exists(dt_stage),
+		      "said, and the staging directory is used up: %s", out);
+	}
+	free(out);
+	/* No file of a Debian package changed, and the only entry in a directory of theirs is the backend link. */
+	gs_pathf(p, sizeof(p), "%s/usr", dt_root);
+	dt_dump(p, NULL, deb_after, 1 << 16);
+	CHECK(strstr(deb_after, "gbm/nvidia-drm_gbm.so") != NULL, "the backend link is in libgbm's directory");
+	gs_pathf(p, sizeof(p), "%s/libEGL.so.1", libdir);
+	text = slurp(p);
+	CHECK(text && strcmp(text, "libglvnd's libEGL\n") == 0, "libglvnd's libEGL is as it was");
+	free(text);
+	gs_pathf(p, sizeof(p), "%s/gbm/dri_gbm.so", libdir);
+	text = slurp(p);
+	CHECK(text && strcmp(text, "mesa's gbm backend\n") == 0, "Mesa's GBM backend is as it was");
+	free(text);
+	gs_pathf(p, sizeof(p), "%s/usr/share/glvnd/egl_vendor.d/50_mesa.json", dt_root);
+	text = slurp(p);
+	CHECK(text && strcmp(text, "mesa\n") == 0 && !dt_has("usr/share/glvnd/egl_vendor.d/10_nvidia.json") &&
+	      !dt_has("usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0") && !dt_has("usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0"),
+	      "Mesa's EGL vendor file is as it was and nothing of NVIDIA's is in the distribution's directories");
+	free(text);
+	text = slurp(dt_manifest);
+	CHECK(text && contains(text, "f ") && contains(text, xconf) && contains(text, dt_conf) && contains(text, "/gbm/nvidia-drm_gbm.so\n") &&
+	      contains(text, "/usr/local/lib/geforce-sriov/xorg/drivers/nvidia_drv.so\n"), "the manifest lists every file and link: %s", text ? text : "(none)");
+	free(text);
+	CHECK(gs_nvlibs_state(&gs_nvset_desktop, dt_manifest, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad)) == 1 &&
+	      strcmp(dir, dt_dir) == 0 && strcmp(version, v) == 0, "the manifest says what is installed: %s %s", dir, version);
+	CHECK(gs_nvlibs_state(&gs_nvset_cuda, dt_manifest, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad)) == 0,
+	      "and the CUDA set sees none of it");
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/libgbm.so.1\n\tlibEGL_nvidia.so.0 (libc6,x86-64) => %s/libEGL_nvidia.so.0\n"
+		 "\tlibGLX_nvidia.so.0 (libc6,x86-64) => %s/libGLX_nvidia.so.0\n", libdir, dt_dir, dt_dir);
+	snprintf(q, sizeof(q), "NVIDIA's graphics libraries 580.159.03 are installed in %s", dt_dir);
+	CHECK(gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 1, dt_capture, line, sizeof(line)) == 1 && strcmp(line, q) == 0, "status and doctor: %s", line);
+	/* libgbm looks elsewhere: the link would not be found. */
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/other/libgbm.so.1\n\tlibEGL_nvidia.so.0 (libc6,x86-64) => %s/libEGL_nvidia.so.0\n", libdir, dt_dir);
+	CHECK(gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 1, dt_capture, line, sizeof(line)) == -1 && contains(line, "libgbm looks for its backends in "), "libgbm elsewhere: %s", line);
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/libgbm.so.1\n\tlibEGL_nvidia.so.0 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0\n", libdir);
+	CHECK(gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 1, dt_capture, line, sizeof(line)) == -1 && contains(line, "but programs load another one first: "), "another libEGL_nvidia first: %s", line);
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/libgbm.so.1\n", libdir);
+
+	/* Again, with nothing handed over: nothing is written and ldconfig is not run. */
+	CHECK(run_host(dt_apply, &out) == 0 && !contains(out, "R ") && !contains(out, "installed") && !contains(out, "warning"), "a rerun changes nothing: %s", out);
+	free(out);
+	/* Again, with the same libraries handed over: every file is as it was. */
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "unchanged ") && !contains(out, "R ldconfig") && !contains(out, "linked ") && !gs_exists(dt_stage),
+	      "the same libraries again: %s", out);
+	free(out);
+
+	/* A second package of another version: its libraries replace the installed ones, small files included. */
+	dt_stage_make("580.159.05");
+	CHECK(run_host(dt_apply, &out) == 0 && dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.580.159.05") &&
+	      !dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.580.159.03") && !dt_has("usr/local/lib/geforce-sriov/xorg/extensions/libglxserver_nvidia.so.580.159.03") &&
+	      !dt_has("usr/share/nvidia/nvidia-application-profiles-580.159.03-rc") && dt_has("usr/share/nvidia/nvidia-application-profiles-580.159.05-rc") &&
+	      dt_link_is("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0", "libEGL_nvidia.so.580.159.05") &&
+	      contains(out, "libEGL_nvidia.so.580.159.03: it belongs to another version of NVIDIA's graphics libraries") && contains(out, "R ldconfig\n"),
+	      "another version replaces the installed one: %s", out);
+	{
+		const char *xc = strstr(out, xconf), *js = strstr(out, "egl_vendor.d/10_nvidia.json"), *ld = strstr(out, "R ldconfig\n");
+		const char *gnew = strstr(out, "installed "), *gold = strstr(out, "libglxserver_nvidia.so.580.159.03: it belongs");
+		char rm_xc[GS_PATH_MAX + 16], rm_drv[GS_PATH_MAX + 16];
+
+		snprintf(rm_xc, sizeof(rm_xc), "removed %s", xconf);
+		snprintf(rm_drv, sizeof(rm_drv), "removed %s/usr/local/lib/geforce-sriov/xorg/drivers/nvidia_drv.so", dt_root);
+		/* An upgrade: X's two halves are replaced in place, never taken out, and NVIDIA's EGL file is not written before X is on NVIDIA's driver. */
+		CHECK(!contains(out, rm_xc) && !contains(out, rm_drv), "an upgrade never removes the output-class file or the X driver: %s", out);
+		CHECK(xc && js && ld && xc < js && ld < js, "an upgrade keeps the EGL vendor file after the output-class file and ldconfig: %s", out);
+		gnew = strstr(out, "installed ") ? strstr(out, "libglxserver_nvidia.so.580.159.05") : NULL;
+		CHECK(gnew && gold && gnew < gold, "the new GLX module is in before the old one is swept: %s", out);
+	}
+	free(out);
+
+	/* A library that was changed since install: incomplete, and said; with the set off it is kept and named, the rest goes. */
+	gs_pathf(p, sizeof(p), "%s/usr/local/lib/geforce-sriov/gl/libnvidia-glcore.so.580.159.05", dt_root);
+	writef(p, "changed\n");
+	CHECK(gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 1, NULL, line, sizeof(line)) == -1 && contains(line, "incomplete: ") && contains(line, p), "a changed library: %s", line);
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "warning: NVIDIA's graphics libraries are incomplete: ") && contains(out, p), "install says so too: %s", out);
+	free(out);
+	dt_want = 0;
+	CHECK(gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 0, NULL, line, sizeof(line)) == 2 && contains(line, "although host_desktop=off"), "off, still installed: %s", line);
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0") && !dt_has("usr/local/lib/geforce-sriov/xorg") &&
+	      !dt_has("etc/glvnd") && !dt_has("etc/egl") && !dt_has("etc/vulkan") && !dt_has("usr/share/nvidia") && !gs_exists(xconf) && !gs_exists(dt_conf) &&
+	      !dt_has("usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so") && gs_exists(p) && contains(out, "kept ") && contains(out, "(changed since install)") &&
+	      contains(out, ": host desktop is off\n") && contains(out, "R ldconfig\n"), "off removes what is unchanged and keeps what was changed: %s", out);
+	{
+		const char *xc = strstr(out, xconf), *js = strstr(out, "egl_vendor.d/10_nvidia.json: host desktop is off");
+		const char *gl = strstr(out, "nvidia-drm_gbm.so: host desktop is off"), *lib = strstr(out, "libEGL_nvidia.so.580.159.05: host desktop is off");
+		const char *drv = strstr(out, "xorg/drivers/nvidia_drv.so: host desktop is off");
+
+		CHECK(xc && js && gl && lib && drv, "every removal is said: %s", out);
+		CHECK(js < xc && gl < xc && lib < xc && drv < xc, "the output-class file goes last, after NVIDIA's EGL files, the GBM link and the X driver: %s", out);
+	}
+	free(out);
+	unlink(p);
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local") && !contains(out, "R ldconfig"), "off again: the directories go, nothing else: %s", out);
+	free(out);
+
+	/* M1: libgbm without a backend directory (Mesa before 24.3): the X11 desktop installs, only the GBM link is left out, and it is said. */
+	{
+		char gdir[GS_PATH_MAX];
+		const char *rm_gbm[] = { "rm", "-rf", "--", gdir, NULL };
+
+		gs_pathf(gdir, sizeof(gdir), "%s/gbm", libdir);
+		gs_run(rm_gbm);
+		dt_want = GS_NVLIBS_ON;
+		dt_stage_make(v);
+		CHECK(run_host(dt_apply, &out) == 0 && !contains(out, "warning") && contains(out, "host desktop: the GBM backend link is not made: libgbm's backend directory ") &&
+		      contains(out, "X11 desktops are not affected") && dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0") &&
+		      dt_has("usr/local/lib/geforce-sriov/xorg/drivers/nvidia_drv.so") && dt_has("etc/glvnd/egl_vendor.d/10_nvidia.json") &&
+		      dt_has("etc/X11/xorg.conf.d/geforce-sriov-nvidia-drm-outputclass.conf") && gs_exists(dt_conf) && !dt_has("usr/lib/x86_64-linux-gnu/gbm") &&
+		      contains(out, "host desktop: NVIDIA's graphics libraries 580.159.03 are installed in "),
+		      "libgbm without its directory: the set installs, one line says the link is left out: %s", out);
+		free(out);
+		CHECK(gs_nvlibs_state(&gs_nvset_desktop, dt_manifest, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad)) == 1 &&
+		      gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 1, NULL, line, sizeof(line)) == 1, "and the set is installed, not partial: %s", line);
+		dt_want = 0;
+		CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local") && !dt_has("etc/X11") && !dt_has("etc/glvnd") && !dt_has("usr/lib/x86_64-linux-gnu/gbm"),
+		      "and off takes it away, with the directories made for it: %s", out);
+		free(out);
+		gs_pathf(p, sizeof(p), "%s/gbm/dri_gbm.so", libdir);
+		writef(p, "mesa's gbm backend\n");
+	}
+
+	/* M2: an install that fails half-way is taken back completely, and nothing reports a partial set as installed. */
+	CHECK(gs_mkdir_p(dt_conf, 0755) == 0, "the loader's file cannot be written: a directory is in its place");
+	dt_want = GS_NVLIBS_ON;
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "warning: NVIDIA's graphics libraries could not be installed in ") &&
+	      contains(out, "What this run wrote\nwas taken out again; the desktop is as it was without them.") && !contains(out, "host_desktop=on, but") &&
+	      !dt_has("usr/local") && !dt_has("etc/X11") && !dt_has("etc/glvnd") && !dt_has("etc/egl") && !dt_has("etc/vulkan") && !dt_has("usr/share/nvidia") &&
+	      !dt_has("usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so") && gs_exists(dt_stage),
+	      "a failed install is rolled back, the stage stays for the next run: %s", out);
+	free(out);
+	CHECK(gs_nvlibs_state(&gs_nvset_desktop, dt_manifest, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad)) == 0 &&
+	      gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 1, NULL, line, sizeof(line)) == -1 && contains(line, "not installed"),
+	      "status and doctor say it is not installed: %s", line);
+	rmdir(dt_conf);
+	after[0] = '\0';
+	dt_dump(dt_root, state, after, 1 << 17);
+	CHECK(strcmp(before, after) == 0, "the host is as before the failed install:\n%s\n--- against ---\n%s", before, after);
+	CHECK(run_host(dt_apply, &out) == 0 && !contains(out, "warning") && dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0"), "the same command installs once the cause is gone: %s", out);
+	free(out);
+	/* A manifest that lists the libraries but not the output-class file, the EGL vendor file or the loader's file is not a complete set. */
+	text = slurp(dt_manifest);
+	CHECK(text != NULL, "the manifest of the complete set");
+	{
+		static const char *const parts[] = { "geforce-sriov-nvidia-drm-outputclass.conf", "10_nvidia.json", "geforce-sriov-gl.conf" };
+		char *whole = text ? strdup(text) : NULL, *copy;
+
+		for (unsigned int k = 0; k < 3 && whole; k++) {
+			FILE *f;
+			char *l, *save = NULL;
+
+			copy = strdup(whole);
+			f = fopen(dt_manifest, "w");
+			for (l = strtok_r(copy, "\n", &save); f && l; l = strtok_r(NULL, "\n", &save))
+				if (!strstr(l, parts[k]))
+					fprintf(f, "%s\n", l);
+			if (f)
+				fclose(f);
+			free(copy);
+			CHECK(gs_nvlibs_state(&gs_nvset_desktop, dt_manifest, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad)) == -1 && contains(bad, parts[k]),
+			      "a manifest without %s is not a complete set: %s", parts[k], bad);
+			CHECK(gs_nvlibs_line(&gs_nvset_desktop, dt_manifest, 1, NULL, line, sizeof(line)) == -1 && contains(line, "incomplete: "), "and the line says so: %s", line);
+		}
+		if (whole) {
+			FILE *f = fopen(dt_manifest, "w");
+
+			if (f) {
+				fputs(whole, f);
+				fclose(f);
+			}
+		}
+		free(whole);
+	}
+	free(text);
+	dt_want = 0;
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local"), "off again: %s", out);
+	free(out);
+
+	/* M2, late: the failure comes after the EGL vendor file is in place (the platform directory's parent is a file). The rollback takes
+	 * NVIDIA's EGL file out before the output-class file. */
+	gs_pathf(p, sizeof(p), "%s/etc/egl", dt_root);
+	writef(p, "not a directory\n");
+	dt_want = GS_NVLIBS_ON;
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "warning: NVIDIA's graphics libraries could not be installed in "), "a late failure: %s", out);
+	{
+		const char *js = strstr(out, "egl_vendor.d/10_nvidia.json: the install of NVIDIA's graphics libraries failed"), *xc;
+
+		CHECK(contains(out, "installed ") && js, "the vendor file was written before the failure, and taken out: %s", out);
+		xc = strstr(out, "outputclass.conf: the install of NVIDIA's graphics libraries failed");
+		CHECK(js && xc && js < xc, "the rollback removes the EGL vendor file before the output-class file: %s", out);
+	}
+	free(out);
+	CHECK(gs_nvlibs_state(&gs_nvset_desktop, dt_manifest, dir, sizeof(dir), version, sizeof(version), bad, sizeof(bad)) == 0 &&
+	      !dt_has("usr/local") && !dt_has("etc/X11") && !dt_has("etc/glvnd"), "and the set is not installed");
+	unlink(p);
+	dt_want = 0;
+	CHECK(run_host(dt_apply, &out) == 0, "off: %s", out);
+	free(out);
+
+	/* S2: NVIDIA's output-class file that cannot be used is found before the first write. A keyword with blanks and a CR line end is usable. */
+	dt_want = GS_NVLIBS_ON;
+	dt_xconf_text = "Section \"OutputClass\"\n    Identifier \"nvidia\"\n";
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "has no `EndSection` line") && contains(out, "Nothing was written.") && !contains(out, "installed ") &&
+	      !contains(out, "R ldconfig") && !dt_has("usr/local") && !dt_has("etc/X11") && !dt_has("etc/glvnd") && gs_exists(dt_stage),
+	      "an unusable output-class file refuses the set before anything is written: %s", out);
+	free(out);
+	dt_xconf_text = "Section \"OutputClass\"\r\n    Identifier \"nvidia\"\r\n   EndSection \r\n";
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && !contains(out, "warning") && gs_exists(xconf), "an indented keyword with a CR is usable: %s", out);
+	free(out);
+	text = slurp(xconf);
+	snprintf(q, sizeof(q), "    ModulePath     \"%s/usr/local/lib/geforce-sriov/xorg\"\n   EndSection", dt_root);
+	CHECK(text && contains(text, q), "the module path is put before that keyword: %s", text ? text : "(none)");
+	free(text);
+	dt_xconf_text = NULL;
+	dt_want = 0;
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local"), "off again: %s", out);
+	free(out);
+
+	/* S3: a stage of another version than the build accepts is refused with one line, and kept. */
+	dt_want = GS_NVLIBS_ON;
+	dt_accept = "580.159.05";
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && contains(out, "the staged ones are version 580.159.03 and the installed\nnvidia.ko accepts version 580.159.05.") &&
+	      !contains(out, "installed /") && !dt_has("usr/local") && !dt_has("etc/X11") && gs_exists(dt_stage), "another version than the build accepts: %s", out);
+	free(out);
+	dt_accept = "580.159.03";
+	CHECK(run_host(dt_apply, &out) == 0 && !contains(out, "warning") && dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0"), "the version the build accepts installs: %s", out);
+	free(out);
+	dt_accept = NULL;
+	dt_want = 0;
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local"), "off again: %s", out);
+	free(out);
+
+	/* Without libgbm on the host there is no backend link and the rest installs. */
+	dt_want = GS_NVLIBS_AUTO;
+	dt_loader[0] = '\0';
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so") && dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0") && !contains(out, "warning"),
+	      "no libgbm: %s", out);
+	free(out);
+	dt_want = 0;
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("usr/local"), "and off again: %s", out);
+	free(out);
+
+	/* The distribution's own platform file of that name: the package's copy is not written, and says so. */
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/libgbm.so.1\n", libdir);
+	gs_pathf(foreign, sizeof(foreign), "%s/usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json", dt_root);
+	writef(foreign, "libnvidia-egl-wayland1's\n");
+	dt_want = GS_NVLIBS_ON;
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && !dt_has("etc/egl/egl_external_platform.d/10_nvidia_wayland.json") &&
+	      dt_has("etc/egl/egl_external_platform.d/15_nvidia_gbm.json") && contains(out, "host desktop: 10_nvidia_wayland.json is not installed: the distribution has ") &&
+	      !contains(out, "warning"), "a platform file the distribution has: %s", out);
+	free(out);
+
+	/* Uninstall removes exactly what was installed: unchanged files and links go, one that was changed stays; the output-class file last. */
+	gs_pathf(p, sizeof(p), "%s/usr/local/lib/geforce-sriov/gl/libnvidia-egl-gbm.so.1", dt_root);
+	unlink(p);
+	CHECK(symlink("somewhere-else", p) == 0, "a link that the user changed");
+	CHECK(run_host(dt_uninstall, &out) == GS_EXIT_OK && !dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0") && !dt_has("usr/local/lib/geforce-sriov/xorg") &&
+	      !gs_exists(xconf) && !gs_exists(dt_conf) && !dt_has("usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so") && gs_exists(p) &&
+	      contains(out, "libnvidia-egl-gbm.so.1 (changed since install)"), "uninstall: %s", out);
+	{
+		const char *xc = strstr(out, "geforce-sriov-nvidia-drm-outputclass.conf"), *js = strstr(out, "egl_vendor.d/10_nvidia.json");
+		const char *gl = strstr(out, "nvidia-drm_gbm.so"), *lib = strstr(out, "libEGL_nvidia.so.580.159.03");
+
+		CHECK(xc && js && gl && lib, "every removal is said: %s", out);
+		CHECK(js < xc && gl < xc && lib < xc, "the output-class file is removed last, after NVIDIA's EGL files, the GBM link and the libraries: %s", out);
+	}
+	free(out);
+	text = slurp(dt_manifest);
+	CHECK(text && contains(text, "/gl/libnvidia-egl-gbm.so.1\n") && !contains(text, "libEGL_nvidia.so.580.159.03 /"), "the manifest keeps the link that stayed: %s", text ? text : "(none)");
+	free(text);
+	unlink(p);
+	unlink(foreign);
+	/* What the changed link kept is the user's now: it goes with its directories before the host is compared. */
+	gs_pathf(p, sizeof(p), "%s/usr/local", dt_root);
+	{
+		const char *rm_local[] = { "rm", "-rf", "--", p, NULL };
+
+		gs_run(rm_local);
+	}
+	gs_pathf(p, sizeof(p), "%s/usr/share/egl/egl_external_platform.d", dt_root);
+	rmdir(p);
+	gs_pathf(p, sizeof(p), "%s/usr/share/egl", dt_root);
+	rmdir(p);
+
+	/* A clean cycle puts everything back exactly as it was: the same files, links and directories. */
+	{
+		const char *rm_all[] = { "rm", "-rf", "--", state, NULL };
+
+		gs_run(rm_all);
+	}
+	snprintf(dt_loader, sizeof(dt_loader), "\tlibgbm.so.1 (libc6,x86-64) => %s/libgbm.so.1\n", libdir);
+	gs_pathf(p, sizeof(p), "%s/usr", dt_root);
+	after[0] = '\0';
+	dt_dump(dt_root, state, after, 1 << 17);
+	CHECK(strcmp(before, after) == 0, "the earlier runs left nothing behind:\n%s\n--- against ---\n%s", before, after);
+	gs_mkdir_p(state, 0755);
+	dt_want = GS_NVLIBS_ON;
+	dt_stage_make(v);
+	CHECK(run_host(dt_apply, &out) == 0 && dt_has("usr/local/lib/geforce-sriov/gl/libEGL_nvidia.so.0"), "installed again: %s", out);
+	free(out);
+	CHECK(run_host(dt_uninstall, &out) == GS_EXIT_OK, "uninstall: %s", out);
+	free(out);
+	after[0] = '\0';
+	dt_dump(dt_root, state, after, 1 << 17);
+	CHECK(strcmp(before, after) == 0, "install and uninstall leave the host as it was:\n%s\n--- against ---\n%s", before, after);
+	deb_after[0] = '\0';
+	gs_pathf(p, sizeof(p), "%s/usr", dt_root);
+	dt_dump(p, NULL, deb_after, 1 << 16);
+	CHECK(strcmp(deb_before, deb_after) == 0, "nothing of the distribution's changed");
+	/* The display server, from a fake /proc: NVIDIA's libraries mapped, not mapped, a map that cannot be read, none. */
+	{
+		char pr[GS_PATH_MAX], who[256];
+
+		gs_pathf(pr, sizeof(pr), "%s/proc", dt_root);
+		CHECK(gs_desktop_servers(pr, who, sizeof(who)) == -1, "no /proc: no display server");
+		gs_pathf(p, sizeof(p), "%s/100/comm", pr);
+		writef(p, "Xorg\n");
+		gs_pathf(p, sizeof(p), "%s/100/maps", pr);
+		CHECK(symlink("maps", p) == 0, "a map that cannot be opened (a link loop)");
+		CHECK(gs_desktop_servers(pr, who, sizeof(who)) == -2 && contains(who, "the X server (pid 100)"), "unreadable map: cannot be told: %s", who);
+		unlink(p);
+		writef(p, "7f00 r-xp /usr/lib/xorg/modules/drivers/modesetting_drv.so\n");
+		CHECK(gs_desktop_servers(pr, who, sizeof(who)) == 0, "readable, without NVIDIA's libraries: software");
+		writef(p, "7f00 r-xp /usr/local/lib/geforce-sriov/xorg/drivers/nvidia_drv.so\n");
+		CHECK(gs_desktop_servers(pr, who, sizeof(who)) == 1, "readable, with the X driver: NVIDIA");
+		{
+			const char *loaded = "the running nvidia module (build-id aa) is not the installed one (bb); power the machine off and on to load it";
+
+			CHECK(gs_desktop_draw_line(1, who, 1, loaded, line, sizeof(line)) == 1 && contains(line, "draws with NVIDIA's driver") &&
+			      contains(line, "used after the next power cycle") && !contains(line, "in software"), "stale module, NVIDIA renderer: %s", line);
+			CHECK(gs_desktop_draw_line(-1, who, 1, loaded, line, sizeof(line)) == 1 && contains(line, "used after the next power cycle") &&
+			      !contains(line, "in software"), "stale module, no server: %s", line);
+			CHECK(gs_desktop_draw_line(0, who, 1, loaded, line, sizeof(line)) == 3 && contains(line, "draws in software"), "stale module, software renderer: %s", line);
+			CHECK(gs_desktop_draw_line(1, who, 0, loaded, line, sizeof(line)) == 0, "current module, NVIDIA renderer: nothing to say");
+		}
+	}
+	gs_nvgl = saved;
+	free(before);
+	free(after);
+	free(deb_before);
+	free(deb_after);
+}
+
+#pragma GCC diagnostic pop
 
 /* The build sentence names the one command that builds again for this kernel, whatever the features. */
 static void test_build_line(void)
@@ -5487,13 +6233,13 @@ static int setup_run(const char *const argv[])
 		fprintf(f, "R %s\n", line);
 		fclose(f);
 	}
-	if (strcmp(argv[1], "install") == 0 && setup_write_config) {
+	if (strcmp(argv[1], "install") == 0 && (!argv[2] || strcmp(argv[2], "--dry-run") != 0) && setup_write_config) {
 		char text[128];
 
 		snprintf(text, sizeof(text), "bdfs=0000:03:00.0\n");
 		writef(setup_write_config, "%s", text);
 	}
-	return strcmp(argv[1], "doctor") == 0 ? 0 : strcmp(argv[1], "check") == 0 ? 0 : 0;
+	return 0;
 }
 
 static int run_setup(const char *root, const char *answers, const struct gs_install_opts *o, int driver_present,
@@ -5509,6 +6255,7 @@ static int run_setup(const char *root, const char *answers, const struct gs_inst
 	h.proc = root;
 	h.state_dir = root;
 	h.run_dir = root;
+	h.root = root;
 	h.run = setup_run;
 	memset(&s, 0, sizeof(s));
 	s.h = &h;
@@ -5622,12 +6369,12 @@ static void test_version_setup(void)
 	free(log);
 	free(out);
 
-	/* A yes continues: doctor, install, activate, check, in that order. */
+	/* A yes continues: install --dry-run, install, activate, check, in that order. */
 	unlink(setup_log);
 	unlink(cfg);
 	CHECK(run_setup(root, "\ny\n", &o, 0, cfg, NULL, &out) == GS_EXIT_OK && contains(out, "so CUDA programs can run on the host? [y/N]") && !contains(out, "--host-cuda"), "host CUDA left at no, then yes: %s", out);
 	log = slurp(setup_log);
-	CHECK(contains(log, " doctor ") && contains(log, " install ") &&
+	CHECK(contains(log, " install --dry-run ") && contains(log, " install ") &&
 	      contains(log, " activate --boot") && contains(log, " check"),
 	      "steps after yes: %s", log ? log : "");
 	CHECK(contains(out, "  Continuing uses best effort; input and safety checks still apply. Default is no."),
@@ -5899,6 +6646,7 @@ static void test_rebuild(void)
 			 "ls /var/lib/geforce-sriov | sed 's/^/STATE:/'", installed);
 		CHECK(run_in_ns(script, &out) == 0 && contains(out, "RC=3") && !contains(out, "run make first") &&
 		      contains(out, "/usr/bin/geforce-sriov-driver --retained --kernel gs-no-such-kernel") &&
+		      !contains(out, "--fb-placement") && !contains(out, "--ada-selected") && !contains(out, "placement") &&
 		      contains(out, "geforce-sriov-driver: refused: ") &&
 		      contains(out, "NVIDIA's module and plugin for gs-no-such-kernel are as they were") &&
 		      contains(out, "run `sudo geforce-sriov rebuild --kernel gs-no-such-kernel` again") && !contains(out, "STATE:driver-build") &&
@@ -5907,7 +6655,7 @@ static void test_rebuild(void)
 		free(out);
 	}
 
-	/* The index of kept inputs, as doctor and setup read it. */
+	/* The index of kept inputs, as the host checks and setup read it. */
 	gs_pathf(p, sizeof(p), "%s/kept/state/inputs", tmp);
 	gs_mkdir_p(p, 0755);
 	CHECK(!gs_kept_input(p, "companion"), "no index: nothing is kept");
@@ -5936,14 +6684,34 @@ static void test_rebuild(void)
 static struct gs_diag_opts doctor_opts;
 static int doctor_host(void)
 {
-	return gs_cmd_doctor(&doctor_opts);
+	return gs_hostcheck(&doctor_opts, GS_HOSTCHECK_POST);
+}
+
+static struct gs_diag_opts hostcheck_opts;
+static enum gs_hostcheck_mode hostcheck_mode;
+static int hostcheck_host(void)
+{
+	return gs_hostcheck(&hostcheck_opts, hostcheck_mode);
+}
+
+/* gs_hostcheck on a fixture root, as install --dry-run (PRE) or status (POST) runs it; extra: the options install took. */
+static int run_hostcheck(char **out, enum gs_hostcheck_mode mode, const char *root, const char *cfg,
+			 const struct gs_diag_opts *extra)
+{
+	memset(&hostcheck_opts, 0, sizeof(hostcheck_opts));
+	if (extra)
+		hostcheck_opts = *extra;
+	hostcheck_opts.sysroot = root;
+	hostcheck_opts.config_path = cfg;
+	hostcheck_mode = mode;
+	return run_host(hostcheck_host, out);
 }
 
 static struct gs_config next_cfg;
 static int next_from_setup;
 static int install_next_host(void)
 {
-	gs_install_next("/usr/local/bin", &next_cfg, next_from_setup);
+	gs_install_next(&next_cfg, next_from_setup);
 	return 0;
 }
 
@@ -6047,8 +6815,8 @@ static void test_first_install(void)
 	struct gs_build_src src;
 
 	/*
-	 * doctor before the first install, as setup runs it: what install is about to put in place is noted,
-	 * not warned about, and nothing is said about a build record that does not exist.
+	 * The checks after install, as status runs them, on a host that has not been installed yet: what install is about to put
+	 * in place is noted, not warned about, and nothing is said about a build record that does not exist.
 	 */
 	fixture("doctor-fresh", &topo_display, gpu_display, 1, NULL, sysroot, sizeof(sysroot));
 	gs_pathf(state, sizeof(state), "%s/doctor-state", tmp);
@@ -6096,17 +6864,15 @@ static void test_first_install(void)
 	/* And with a record that names no features, the record lines are back. */
 	writef(record, "kernel=6.8.0\n");
 	run_host(doctor_host, &out);
-	CHECK(contains(out, "[INFO] the build record does not name the installed features (not recorded)") &&
-	      contains(out, "[WARN] display is requested and the build record does not say whether the display stack is installed") &&
-	      contains(out, "[INFO] build record: no confirmation line (not recorded)"),
-	      "installed host with an old record: the record lines stay: %s", out);
+	CHECK(contains(out, "[WARN] display is requested and the build record does not say whether the display stack is installed"),
+	      "installed host with an old record: the display line stays: %s", out);
 	free(out);
 
 	/* install alone: one closing block, which does not send the user to setup. */
 	gs_config_defaults(&next_cfg);
 	next_from_setup = 0;
 	run_host(install_next_host, &out);
-	CHECK(contains(out, "Next: run `/usr/local/bin/geforce-sriov doctor`, then power the machine off and on.") &&
+	CHECK(contains(out, "Next: power the machine off and on.") && !contains(out, "geforce-sriov doctor") &&
 	      contains(out, "After the boot, `geforce-sriov status` shows each GPU and its next step.") &&
 	      !contains(out, "geforce-sriov setup"), "install alone: its own instructions, no word of setup: %s", out);
 	free(out);
@@ -6151,146 +6917,605 @@ static void test_first_install(void)
 	CHECK(run_host(uninstall_files_host, &out) == GS_EXIT_OK && !contains(out, "--driver-file extracted"),
 	      "no extraction, no line about it: %s", out);
 	free(out);
+	/* The version stamp goes with a finished uninstall only: a failed step (a restore, a unit, dkms remove) keeps it. */
+	gs_pathf(p, sizeof(p), "%s/" GS_FORMAT_NAME, state);
+	writef(p, GS_VERSION "\n");
+	gs_format_release(state, GS_EXIT_FAIL);
+	CHECK(gs_exists(p), "a failed uninstall keeps the version stamp, so a re-install of this version is not refused");
+	gs_format_release(state, GS_EXIT_OK);
+	CHECK(!gs_exists(p), "a finished uninstall removes the version stamp");
 }
 
-static void test_migration(void)
+/* A staged host of an older install: the files an uninstall of any version removes, without the stamp of this one. */
+static void older_stage(const char *name, char *stage, size_t len, int record, int dkms, int program, int link)
 {
-	char stage[GS_PATH_MAX], p[GS_PATH_MAX], cfg[GS_PATH_MAX], *out, *text, *before;
-	static const char oldcfg[] = "bdfs=0000:03:00.0\ndisplay=auto\nari=on\nmsix=on\n"
-				     "boot_display_release=0000:03:00.0\n";
+	char p[GS_PATH_MAX], wants[GS_PATH_MAX];
 
-	/* A package-owned config, an unchanged prepare unit and hold file, and the old drop-in. */
-	snprintf(stage, sizeof(stage), "%s/stage-mig", tmp);
-	gs_pathf(cfg, sizeof(cfg), "%s/etc/geforce-sriov/config", stage);
-	writef(cfg, "%s", oldcfg);
-	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/geforce-sriov-prepare.service", stage);
-	writef(p, "[Unit]\nDescription=old prepare\n");
+	snprintf(stage, len, "%s/%s", tmp, name);
+	if (record) {
+		char sha[65], rec[256];
+
+		/* A record whose module is still installed with the recorded digest: a restore would have work to do. */
+		gs_pathf(p, sizeof(p), "%s/lib/modules/7.0.0/updates/dkms/nvidia.ko", stage);
+		writef(p, "patched module\n");
+		gs_sha256_buf("patched module\n", 15, sha);
+		snprintf(rec, sizeof(rec), "kernel=7.0.0\nmodule_sha256=%s\nmodule_build_id=00\nstock_sha256=00\n", sha);
+		gs_pathf(p, sizeof(p), "%s" GS_DRIVER_BUILD, stage);
+		writef(p, "%s", rec);
+	}
+	if (dkms) {
+		gs_pathf(p, sizeof(p), "%s/var/lib/dkms/" GS_DKMS_NAME "/0.3.0", stage);
+		gs_mkdir_p(p, 0755);
+	}
+	if (program) {
+		gs_pathf(p, sizeof(p), "%s/usr/bin/geforce-sriov", stage);
+		writef(p, "#!/bin/sh\n");
+		gs_pathf(p, sizeof(p), "%s/var/lib/geforce-sriov", stage);
+		gs_mkdir_p(p, 0755);
+		manifest_add_file(stage, "/usr/bin/geforce-sriov");
+	}
+	if (link) {
+		gs_pathf(p, sizeof(p), "%s" GS_UNIT_WANTS_LIVEPATCH, stage);
+		gs_pathf(wants, sizeof(wants), "%s/etc/systemd/system/sysinit.target.wants", stage);
+		gs_mkdir_p(wants, 0755);
+		link_to("../" GS_UNIT_LIVEPATCH, p);
+	}
+}
+
+/* install over a host that another version installed stops before any write; the same version, and a host the uninstall emptied, do not. */
+static void test_older_install(void)
+{
+	char stage[GS_PATH_MAX], p[GS_PATH_MAX], wants[GS_PATH_MAX], *out, *text;
+	const char *args[] = { "install", "--destdir", stage, "--source", srcdir, "--prefix", "/usr", NULL };
+	static const struct { const char *name; int record, dkms, program, link; const char *what; } signs[] = {
+		{ "old-all", 1, 1, 1, 1, "a host as 0.3.0 left it" },
+		{ "old-disabled", 1, 1, 1, 0, "units disabled by hand: the record, DKMS and the program remain" },
+		{ "old-record", 1, 0, 0, 0, "the build record alone" },
+		{ "old-dkms", 0, 1, 0, 0, "the DKMS registration alone" },
+		{ "old-program", 0, 0, 1, 0, "the installed program alone" },
+		{ "old-link", 0, 0, 0, 1, "the enabled boot unit alone" },
+	};
+
+	for (size_t i = 0; i < sizeof(signs) / sizeof(signs[0]); i++) {
+		older_stage(signs[i].name, stage, sizeof(stage), signs[i].record, signs[i].dkms, signs[i].program, signs[i].link);
+		CHECK(run_cli(&out, NULL, args) == GS_EXIT_REFUSED &&
+		      contains(out, "refused, nothing changed: another version of geforce-sriov than " GS_VERSION " is installed") &&
+		      contains(out, "Run the installed version's `sudo geforce-sriov uninstall`") &&
+		      contains(out, "power the machine off and on, then run this install again"),
+		      "%s: refused with the one instruction: %s", signs[i].what, out);
+		free(out);
+		gs_pathf(p, sizeof(p), "%s" GS_FORMAT_PATH, stage);
+		CHECK(!gs_exists(p), "%s: no stamp written", signs[i].what);
+		gs_pathf(p, sizeof(p), "%s/usr/bin/geforce-sriov-patch", stage);
+		CHECK(!gs_exists(p), "%s: nothing installed", signs[i].what);
+		gs_pathf(p, sizeof(p), "%s/usr/share/geforce-sriov/config.example", stage);
+		CHECK(!gs_exists(p), "%s: no file written", signs[i].what);
+	}
+	/* The refusal says what the old uninstall removes and prints the installed settings worth noting. */
+	older_stage("old-settings", stage, sizeof(stage), 1, 1, 1, 0);
+	gs_pathf(p, sizeof(p), "%s/etc/geforce-sriov", stage);
+	gs_mkdir_p(p, 0755);
+	gs_pathf(p, sizeof(p), "%s" GS_CONFIG_PATH, stage);
+	writef(p, "bdfs=0000:04:00.0,0000:03:00.0\ndisplay=off\nhost_cuda=on\nhost_desktop=off\nvfs=8\ntype_ada=900\nfb_placement=top\nfb_slots=4\nsome_future_key=1\n");
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_REFUSED && contains(out, "uninstall removes /etc/geforce-sriov (your card selection and settings") &&
+	      contains(out, "  bdfs=0000:04:00.0,0000:03:00.0\n  display=off\n  host_cuda=on\n  host_desktop=off\n  vfs=8\n  type_ada=900\n") &&
+	      !contains(out, "fb_placement"), "the refusal names the settings that the uninstall removes, and not the removed key: %s", out);
+	free(out);
+	/* setup stops the same way, before any step runs. */
+	{
+		struct gs_install_opts so;
+		char cfg[GS_PATH_MAX];
+
+		older_stage("old-setup", stage, sizeof(stage), 1, 1, 1, 0);
+		gs_pathf(cfg, sizeof(cfg), "%s/no-config", stage);
+		gs_pathf(setup_log, sizeof(setup_log), "%s/setup.log", stage);
+		setup_write_config = cfg;
+		setup_opts(&so, NULL);
+		CHECK(run_setup(stage, NULL, &so, 0, cfg, stage, &out) == GS_EXIT_REFUSED &&
+		      contains(out, "refused, nothing changed: another version of geforce-sriov than " GS_VERSION " is installed") &&
+		      contains(out, "power the machine off and on, then run this install again"), "setup: refused: %s", out);
+		CHECK(!slurp(setup_log), "setup: no step ran");
+		free(out);
+		/* Without DESTDIR the host's own root is read: a record under it refuses the same way. */
+		CHECK(run_setup(stage, NULL, &so, 0, cfg, NULL, &out) == GS_EXIT_REFUSED &&
+		      contains(out, "refused, nothing changed: another version of geforce-sriov"), "setup, live root: refused: %s", out);
+		free(out);
+	}
+	/*
+	 * A record that outlives a finished uninstall (the kernel was purged, or NVIDIA's module was replaced) is no sign:
+	 * its restore had nothing to do. install goes through.
+	 */
+	older_stage("record-purged", stage, sizeof(stage), 1, 0, 0, 0);
+	gs_pathf(p, sizeof(p), "%s/lib/modules/7.0.0/updates/dkms/nvidia.ko", stage);
+	unlink(p);
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_OK && contains(out, "staged below"),
+	      "a record of a purged kernel does not stop the install: %s", out);
+	free(out);
+	older_stage("record-replaced", stage, sizeof(stage), 1, 0, 0, 0);
+	gs_pathf(p, sizeof(p), "%s/lib/modules/7.0.0/updates/dkms/nvidia.ko", stage);
+	writef(p, "NVIDIA's own module, reinstalled\n");
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_OK && contains(out, "staged below"),
+	      "a record of a module that was replaced does not stop the install: %s", out);
+	free(out);
+	older_stage("record-archived", stage, sizeof(stage), 0, 0, 0, 0);
+	gs_pathf(p, sizeof(p), "%s/var/lib/geforce-sriov/driver-builds/6.8.0-old", stage);
+	writef(p, "kernel=6.8.0-old\nmodule_sha256=00\nmodule_build_id=00\nstock_sha256=00\n");
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_OK && contains(out, "staged below"),
+	      "an archived record of a kernel that is gone does not stop the install: %s", out);
+	free(out);
+
+	/* The way out is printed when the installed program is gone, and not when it is there. */
+	older_stage("old-gone", stage, sizeof(stage), 1, 1, 0, 1);
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_REFUSED && contains(out, "If that program is gone") &&
+	      contains(out, "dkms remove " GS_DKMS_NAME "/0.3.0 --all") && contains(out, "systemctl disable " GS_UNIT_LIVEPATCH) &&
+	      contains(out, "--restore --kernel 7.0.0"), "the manual way out: %s", out);
+	free(out);
+	older_stage("old-here", stage, sizeof(stage), 1, 1, 1, 1);
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_REFUSED && !contains(out, "If that program is gone"),
+	      "no manual lines while the installed program is there: %s", out);
+	free(out);
+
+	/* A long --prefix with every sign does not overrun the evidence buffer. */
+	{
+		char longp[GS_PATH_MAX], rel[1200] = "", bin[GS_PATH_MAX];
+		const char *largs[] = { "install", "--destdir", stage, "--source", srcdir, "--prefix", rel, NULL };
+
+		for (int k = 0; k < 40; k++)
+			strcat(rel, "/abcdefghijklmnopqrstuvwxyz");
+		older_stage("old-long", stage, sizeof(stage), 1, 1, 0, 1);
+		gs_pathf(bin, sizeof(bin), "%s%s/bin", stage, rel);
+		gs_mkdir_p(bin, 0755);
+		gs_pathf(longp, sizeof(longp), "%s/geforce-sriov", bin);
+		writef(longp, "#!/bin/sh\n");
+		manifest_add_file(stage, longp + strlen(stage));
+		CHECK(run_cli(&out, NULL, largs) == GS_EXIT_REFUSED && contains(out, "refused, nothing changed"),
+		      "a long prefix with every sign is refused without overrunning: %s", out);
+		free(out);
+	}
+
+	/* The 0.2.x unit's enablement link is a sign as well. */
+	snprintf(stage, sizeof(stage), "%s/old-prepare", tmp);
 	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/sysinit.target.wants", stage);
 	gs_mkdir_p(p, 0755);
 	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/sysinit.target.wants/geforce-sriov-prepare.service", stage);
 	link_to("../geforce-sriov-prepare.service", p);
-	gs_pathf(p, sizeof(p), "%s/etc/modprobe.d/nvidia-manual-load.conf", stage);
-	writef(p, "blacklist nvidia\n");
-	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/nvidia-vgpud.service.d/geforce-sriov.conf", stage);
-	writef(p, "# old drop-in\n[Service]\nExecStartPre=/bin/false\n");
-	gs_pathf(p, sizeof(p), "%s/var/lib/geforce-sriov", stage);
-	gs_mkdir_p(p, 0755);
-	manifest_add_file(stage, "/etc/geforce-sriov/config");
-	manifest_add_file(stage, "/etc/systemd/system/geforce-sriov-prepare.service");
-	manifest_add_file(stage, "/etc/modprobe.d/nvidia-manual-load.conf");
-	manifest_add_file(stage, "/etc/systemd/system/nvidia-vgpud.service.d/geforce-sriov.conf");
-
-	stage_install(&out, stage);
-	CHECK(contains(out, "boot_display_release is obsolete; migration removes console-release deferral."),
-	      "obsolete key notice: %s", out);
-	CHECK(contains(out, "removed obsolete") && contains(out, "geforce-sriov-prepare.service") &&
-	      contains(out, "nvidia-manual-load.conf"), "unchanged legacy files removed: %s", out);
-	text = slurp(cfg);
-	CHECK(text && !contains(text, "boot_display_release") && contains(text, "bdfs=0000:03:00.0") &&
-	      contains(text, "display=auto") && contains(text, "ari=on"), "config migrated, other keys kept: %s", text);
-	free(text);
-	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/sysinit.target.wants/geforce-sriov-prepare.service", stage);
-	CHECK(!gs_exists(p), "the prepare enablement link is gone");
-	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/nvidia-vgpud.service.d/geforce-sriov.conf", stage);
-	text = slurp(p);
-	CHECK(text && contains(text, "check --daemon-ready") && !contains(text, "deferred") &&
-	      contains(text, "LD_PRELOAD="), "the drop-in is the new one: %s", text);
-	free(text);
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_REFUSED && contains(out, "geforce-sriov-prepare.service"),
+	      "the 0.2.x boot unit: %s", out);
 	free(out);
 
-	/* An edited config is never rewritten: the exact obsolete line is named and nothing changes. */
-	snprintf(stage, sizeof(stage), "%s/stage-edited", tmp);
-	gs_pathf(cfg, sizeof(cfg), "%s/etc/geforce-sriov/config", stage);
-	writef(cfg, "%s", oldcfg);
-	gs_pathf(p, sizeof(p), "%s/var/lib/geforce-sriov", stage);
-	gs_mkdir_p(p, 0755);
-	/* No manifest entry: the config is not this package's, so migration must not rewrite it. */
-	before = slurp(cfg);
-	{
-		const char *args[] = { "install", "--destdir", stage, "--source", srcdir, NULL };
-		char *cfgtext;
-
-		CHECK(run_cli(&out, NULL, args) == GS_EXIT_REFUSED &&
-		      contains(out, "obsolete config line in") && contains(out, "boot_display_release=0000:03:00.0") &&
-		      contains(out, "Remove this line and rerun install; it does not grant display-manager consent."),
-		      "edited or unowned config: %s", out);
-		cfgtext = slurp(cfg);
-		CHECK(cfgtext && before && strcmp(cfgtext, before) == 0, "the config is unchanged");
-		free(cfgtext);
-	}
-	free(before);
-	free(out);
-
-	/* An edited prepare unit and hold file are kept and named, never deleted. */
-	snprintf(stage, sizeof(stage), "%s/stage-kept", tmp);
-	gs_pathf(cfg, sizeof(cfg), "%s/etc/geforce-sriov/config", stage);
-	writef(cfg, "bdfs=0000:03:00.0\ndisplay=auto\n");
-	gs_pathf(p, sizeof(p), "%s/var/lib/geforce-sriov", stage);
-	gs_mkdir_p(p, 0755);
-	manifest_add_file(stage, "/etc/geforce-sriov/config");
-	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/geforce-sriov-prepare.service", stage);
-	writef(p, "[Unit]\nDescription=old prepare\n");
-	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/geforce-sriov-prepare.service", stage);
-	writef(p, "[Unit]\nDescription=edited by the user\n");
-	gs_pathf(p, sizeof(p), "%s/etc/modprobe.d/nvidia-manual-load.conf", stage);
-	writef(p, "blacklist nvidia\n");
-	{
-		/* Record both files with a hash of their *old* content, then edit them. */
-		char sha[65], manifest[GS_PATH_MAX];
-		FILE *f;
-
-		gs_sha256_buf("old prepare", 11, sha);
-		gs_pathf(manifest, sizeof(manifest), "%s" GS_MANIFEST, stage);
-		f = fopen(manifest, "a");
-		if (!f)
-			die(manifest);
-		fprintf(f, "f %s /etc/systemd/system/geforce-sriov-prepare.service\n", sha);
-		gs_sha256_buf("old hold", 8, sha);
-		fprintf(f, "f %s /etc/modprobe.d/nvidia-manual-load.conf\n", sha);
-		fclose(f);
-	}
-	stage_install(&out, stage);
-	CHECK(contains(out, "kept ") && contains(out, "geforce-sriov-prepare.service") &&
-	      contains(out, "it was edited or was not installed by this package; remove it before the next boot"),
-	      "edited prepare unit kept: %s", out);
-	CHECK(contains(out, "kept ") && contains(out, "nvidia-manual-load.conf"), "edited hold file kept: %s", out);
-	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/geforce-sriov-prepare.service", stage);
-	CHECK(gs_exists(p), "the edited unit is still there");
-	gs_pathf(p, sizeof(p), "%s/etc/modprobe.d/nvidia-manual-load.conf", stage);
-	CHECK(gs_exists(p), "the edited hold file is still there");
-	CHECK(contains(out, "staged below"), "staging runs no live step: %s", out);
+	/* The stamp names another version: refused, and the version is named. */
+	older_stage("other-version", stage, sizeof(stage), 1, 1, 1, 0);
+	gs_pathf(p, sizeof(p), "%s" GS_FORMAT_PATH, stage);
+	writef(p, "0.0.1\n");
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_REFUSED && contains(out, "version 0.0.1: "), "another version's stamp: %s", out);
 	free(out);
 
 	/*
-	 * A staged install changes nothing outside DESTDIR and touches no hardware. The stale
-	 * /run/geforce-sriov/deferred is removed only by a live install (destdir == ""), so that half
-	 * of the migration is not exercised here: it would write on this host.
+	 * What an uninstall of any version leaves on purpose is not a sign: the config (with the removed fb_slots
+	 * line), the manifest listing it and an edited unit, the activation lock, NVIDIA's extracted package, and
+	 * a stale /run marker. The install goes through and writes the stamp.
 	 */
+	snprintf(stage, sizeof(stage), "%s/after-uninstall", tmp);
+	gs_pathf(p, sizeof(p), "%s/etc/geforce-sriov/config", stage);
+	writef(p, "bdfs=0000:03:00.0\ndisplay=auto\nfb_slots=off\n");
+	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/" GS_UNIT_ACTIVATE, stage);
+	writef(p, "[Unit]\nDescription=edited by the user\n");
+	gs_pathf(p, sizeof(p), "%s" GS_ATTEMPT_MARKER, stage);
+	writef(p, "boot_id=x\n");
+	gs_pathf(p, sizeof(p), "%s" GS_STATE_DIR "/nvidia/x", stage);
+	writef(p, "x\n");
+	manifest_add_file(stage, "/etc/geforce-sriov/config");
+	manifest_add_file(stage, "/etc/systemd/system/" GS_UNIT_ACTIVATE);
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_OK && contains(out, "staged below") &&
+	      contains(out, "note: fb_slots was removed in 0.4.0 and is ignored; delete the line from " GS_CONFIG_PATH),
+	      "after an uninstall that kept its config: %s", out);
+	free(out);
+	gs_pathf(p, sizeof(p), "%s" GS_FORMAT_PATH, stage);
+	text = slurp(p);
+	CHECK(text && strcmp(text, GS_VERSION "\n") == 0, "the stamp names this version: %s", text ? text : "(none)");
+	free(text);
+
+	/* An edited program that the uninstall kept on purpose (still in the kept manifest) is no sign. */
+	older_stage("kept-program", stage, sizeof(stage), 0, 0, 1, 0);
+	gs_pathf(p, sizeof(p), "%s/usr/bin/geforce-sriov", stage);
+	writef(p, "#!/bin/sh\n# edited by the user\n");
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_OK && contains(out, "staged below"),
+	      "a kept, edited program does not stop the install: %s", out);
+	free(out);
+
+	/* The same version again: nothing stops it, whatever it left (record, DKMS registration, program, enabled unit). */
+	gs_pathf(p, sizeof(p), "%s/var/lib/dkms/" GS_DKMS_NAME "/" GS_VERSION, stage);
+	gs_mkdir_p(p, 0755);
+	gs_pathf(p, sizeof(p), "%s" GS_DRIVER_BUILD, stage);
+	writef(p, "kernel=7.0.0\nmodule_sha256=00\nmodule_build_id=00\nstock_sha256=00\n");
+	gs_pathf(p, sizeof(p), "%s" GS_UNIT_WANTS_LIVEPATCH, stage);
+	gs_pathf(wants, sizeof(wants), "%s/etc/systemd/system/sysinit.target.wants", stage);
+	gs_mkdir_p(wants, 0755);
+	link_to("../" GS_UNIT_LIVEPATCH, p);
+	gs_pathf(p, sizeof(p), "%s/usr/bin/geforce-sriov", stage);
+	CHECK(gs_exists(p), "the program of the first install is there");
+	CHECK(run_cli(&out, NULL, args) == GS_EXIT_OK && contains(out, "staged below") && !contains(out, "refused"),
+	      "install again over the same version: %s", out);
+	free(out);
+
+	/* A plain staged install writes below DESTDIR only, and the manifest and the stamp are there. */
 	snprintf(stage, sizeof(stage), "%s/stage-plain", tmp);
 	stage_install(&out, stage);
 	CHECK(contains(out, "staged below"), "a staged install stops at the staging boundary: %s", out);
 	gs_pathf(p, sizeof(p), "%s/var/lib/geforce-sriov/installed-files", stage);
 	CHECK(gs_exists(p), "the manifest is written below DESTDIR");
+	gs_pathf(p, sizeof(p), "%s" GS_FORMAT_PATH, stage);
+	CHECK(gs_exists(p), "the stamp is written below DESTDIR");
 	gs_pathf(p, sizeof(p), "%s/usr/bin/geforce-sriov", stage);
 	CHECK(gs_exists(p), "the binary is staged below DESTDIR");
 	free(out);
 }
 
+/* ---- the kernel hook ---------------------------------------------------- */
+
+static struct gs_diag_opts hook_status_opts;
+static int hook_status_host(void)
+{
+	return gs_cmd_status(&hook_status_opts);
+}
+
+/*
+ * install puts the hook where the distribution runs its kernel hooks (the image's and the headers'),
+ * only on a host that has those directories; uninstall removes it through the manifest; status
+ * reports a kernel whose automatic build failed, with the command that fixes it.
+ */
+static void test_kernel_hook(void)
+{
+	char stage[GS_PATH_MAX], p[GS_PATH_MAX], q[GS_PATH_MAX], manifest[GS_PATH_MAX], modprobe[GS_PATH_MAX], sha[65];
+	char root[GS_PATH_MAX], cfg[GS_PATH_MAX], marks[GS_PATH_MAX], *out, *text;
+	static const char *const dirs[] = { "etc/kernel/postinst.d", "etc/kernel/header_postinst.d" };
+	struct stat st;
+	FILE *f;
+
+	/* A Debian-style host: both directories exist, so both get the hook. */
+	snprintf(stage, sizeof(stage), "%s/stage-hook", tmp);
+	for (size_t i = 0; i < 2; i++) {
+		gs_pathf(p, sizeof(p), "%s/%s", stage, dirs[i]);
+		gs_mkdir_p(p, 0755);
+	}
+	gs_pathf(p, sizeof(p), "%s/etc/apt/apt.conf.d", stage);
+	gs_mkdir_p(p, 0755);
+	stage_install(&out, stage);
+	CHECK(contains(out, "kernel hook: a kernel update builds NVIDIA's module for the new kernel itself") &&
+	      !contains(out, "this host has no /etc/kernel/postinst.d"), "install says the hook is in place: %s", out);
+	CHECK(contains(out, "headers that apt installs after their kernel make the missing build too"), "install says the apt snippet is in place: %s", out);
+	free(out);
+	for (size_t i = 0; i < 2; i++) {
+		gs_pathf(p, sizeof(p), "%s/%s/geforce-sriov", stage, dirs[i]);
+		text = slurp(p);
+		CHECK(text && !stat(p, &st) && (st.st_mode & 0777) == 0755, "the hook in %s is executable", dirs[i]);
+		CHECK(text && contains(text, "cli=/usr/bin/geforce-sriov\n") && contains(text, "state=/var/lib/geforce-sriov\n") &&
+		      contains(text, "rebuild --kernel \"$kernel\"") && !contains(text, "@BINDIR@") && !contains(text, "@STATE@") &&
+		      !contains(text, "@VERSION@"), "the hook in %s is rendered for the install", dirs[i]);
+		free(text);
+	}
+	gs_pathf(p, sizeof(p), "%s" GS_MANIFEST, stage);
+	text = slurp(p);
+	CHECK(text && contains(text, " /etc/kernel/postinst.d/geforce-sriov\n") &&
+	      contains(text, " /etc/kernel/header_postinst.d/geforce-sriov\n"), "the manifest owns both hooks: %s", text ? text : "");
+	CHECK(text && contains(text, " /etc/apt/apt.conf.d/99geforce-sriov\n"), "the manifest owns the apt snippet: %s", text ? text : "");
+	free(text);
+	gs_pathf(p, sizeof(p), "%s/etc/apt/apt.conf.d/99geforce-sriov", stage);
+	text = slurp(p);
+	CHECK(text && !stat(p, &st) && (st.st_mode & 0777) == 0644 && contains(text, "DPkg::Post-Invoke") &&
+	      contains(text, "/etc/kernel/postinst.d/geforce-sriov --retry") && contains(text, "|| true"),
+	      "the apt snippet runs the hook with --retry after dpkg and never fails apt: %s", text ? text : "");
+	free(text);
+
+	/* uninstall removes what the manifest lists: here a manifest of the staged copies, so that only they go. */
+	gs_pathf(manifest, sizeof(manifest), "%s/hook-manifest", tmp);
+	gs_pathf(modprobe, sizeof(modprobe), "%s/hook-modprobe.d", tmp);
+	gs_mkdir_p(modprobe, 0755);
+	f = fopen(manifest, "w");
+	if (!f)
+		die(manifest);
+	for (size_t i = 0; i < 3; i++) {
+		gs_pathf(p, sizeof(p), "%s/%s", stage, i < 2 ? dirs[i] : "etc/apt/apt.conf.d/99geforce-sriov");
+		if (i < 2)
+			strncat(p, "/geforce-sriov", sizeof(p) - strlen(p) - 1);
+		if (gs_sha256_file(p, sha))
+			die(p);
+		fprintf(f, "f %s %s\n", sha, p);
+	}
+	fclose(f);
+	fflush(stdout);
+	CHECK(gs_uninstall_files(manifest, modprobe, NULL) == GS_EXIT_OK, "uninstall of the hooks succeeds");
+	for (size_t i = 0; i < 2; i++) {
+		gs_pathf(p, sizeof(p), "%s/%s/geforce-sriov", stage, dirs[i]);
+		CHECK(!gs_exists(p), "uninstall removed the hook in %s", dirs[i]);
+		gs_pathf(p, sizeof(p), "%s/%s", stage, dirs[i]);
+		CHECK(gs_exists(p), "and left the distribution's directory %s", dirs[i]);
+	}
+	gs_pathf(p, sizeof(p), "%s/etc/apt/apt.conf.d/99geforce-sriov", stage);
+	CHECK(!gs_exists(p), "uninstall removed the apt snippet");
+	gs_pathf(p, sizeof(p), "%s/etc/apt/apt.conf.d", stage);
+	CHECK(gs_exists(p), "and left apt's directory");
+
+	/* A host without those directories gets no hook, and is told what to run instead. */
+	snprintf(stage, sizeof(stage), "%s/stage-nohook", tmp);
+	stage_install(&out, stage);
+	CHECK(contains(out, "kernel hook: this host has no /etc/kernel/postinst.d, so after a kernel update run "
+			    "`sudo geforce-sriov rebuild` for the new kernel") &&
+	      !contains(out, "builds NVIDIA's module for the new kernel itself"), "no hook directory: said: %s", out);
+	free(out);
+	gs_pathf(p, sizeof(p), "%s/etc/kernel", stage);
+	CHECK(!gs_exists(p), "and nothing is created there");
+
+	/* --driver=skip leaves no build record: the hook is installed and does nothing, and install says so. */
+	snprintf(stage, sizeof(stage), "%s/stage-hook-skip", tmp);
+	for (size_t i = 0; i < 2; i++) {
+		gs_pathf(p, sizeof(p), "%s/%s", stage, dirs[i]);
+		gs_mkdir_p(p, 0755);
+	}
+	{
+		const char *args[] = { "install", "--destdir", stage, "--source", srcdir, "--prefix", "/usr", "--driver=skip", NULL };
+
+		CHECK(run_cli(&out, NULL, args) == GS_EXIT_OK && contains(out, "kernel hook: --driver=skip leaves no build record, so the hook does nothing") &&
+		      !contains(out, "builds NVIDIA's module for the new kernel itself"), "driver=skip: the hook is not announced as building: %s", out);
+		free(out);
+	}
+
+	/* status: a kernel whose automatic build failed is named with the command that fixes it. */
+	fixture("hook-status", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
+	writef(cfg, "bdfs=0000:03:00.0\n");
+	gs_pathf(marks, sizeof(marks), "%s/kernel-hook-failed", root);
+	memset(&hook_status_opts, 0, sizeof(hook_status_opts));
+	hook_status_opts.sysroot = root;
+	hook_status_opts.config_path = cfg;
+	hook_status_opts.kernel_hook_dir = marks;
+	run_host(hook_status_host, &out);
+	CHECK(!contains(out, "kernel hook:"), "no failure reported: nothing is said: %s", out);
+	free(out);
+	gs_pathf(q, sizeof(q), "%s/7.0.99-1-pve", marks);
+	writef(q, "exit 3 at 2026-11-12 10:00:00; see /var/lib/geforce-sriov/kernel-hook-logs/7.0.99-1-pve.log\n");
+	run_host(hook_status_host, &out);
+	CHECK(contains(out, "kernel hook: the automatic build for kernel 7.0.99-1-pve failed (exit 3 at 2026-11-12 10:00:00; see "
+			    "/var/lib/geforce-sriov/kernel-hook-logs/7.0.99-1-pve.log); run `sudo geforce-sriov rebuild --kernel 7.0.99-1-pve`"),
+	      "a failed automatic build is reported with the fix: %s", out);
+	free(out);
+}
+
+/*
+ * An earlier build of this version installed the sources of the guest framebuffer cap under driver-patches/guest-fb/. A reinstall
+ * removes the copies the manifest still names while they are unchanged, and the directory with them; a changed copy stays, listed.
+ */
+static void test_stale_cap_files(void)
+{
+	static const char *const names[] = { "gs-guest-fb.h", "guest-fb.patch" };
+	char stage[GS_PATH_MAX], p[GS_PATH_MAX], man[GS_PATH_MAX], sha[65], *out, *text;
+
+	for (int edited = 0; edited < 2; edited++) {
+		FILE *f;
+
+		snprintf(stage, sizeof(stage), "%s/stage-stale-cap-%d", tmp, edited);
+		stage_install(&out, stage);
+		free(out);
+		gs_pathf(man, sizeof(man), "%s" GS_MANIFEST, stage);
+		gs_pathf(p, sizeof(p), "%s/usr/bin/driver-patches/guest-fb", stage);
+		gs_mkdir_p(p, 0755);
+		f = fopen(man, "a");
+		if (!f)
+			die(man);
+		fprintf(f, "d - /usr/bin/driver-patches/guest-fb\n");
+		for (size_t k = 0; k < 2; k++) {
+			gs_pathf(p, sizeof(p), "%s/usr/bin/driver-patches/guest-fb/%s", stage, names[k]);
+			writef(p, "a file of an earlier build\n");
+			if (gs_sha256_file(p, sha))
+				die(p);
+			fprintf(f, "f %s /usr/bin/driver-patches/guest-fb/%s\n", sha, names[k]);
+		}
+		fclose(f);
+		gs_pathf(p, sizeof(p), "%s/usr/bin/driver-patches/guest-fb/guest-fb.patch", stage);
+		if (edited)
+			writef(p, "edited by hand\n");
+		stage_install(&out, stage);
+		text = slurp(man);
+		gs_pathf(p, sizeof(p), "%s/usr/bin/driver-patches/guest-fb/gs-guest-fb.h", stage);
+		CHECK(!gs_exists(p) && contains(out, "removed obsolete"), "stale cap source %d: the unchanged copy is removed: %s", edited, out);
+		gs_pathf(p, sizeof(p), "%s/usr/bin/driver-patches/guest-fb/guest-fb.patch", stage);
+		CHECK(gs_exists(p) == edited, "stale cap source %d: the copy is %s", edited, edited ? "kept when it was changed" : "removed");
+		CHECK(text && !contains(text, "gs-guest-fb.h") && contains(text, "guest-fb.patch") == edited &&
+		      contains(text, "/usr/bin/driver-patches/guest-fb\n") == edited,
+		      "stale cap source %d: the manifest keeps only what is still there: %s", edited, text ? text : "");
+		free(text);
+		free(out);
+	}
+}
+
+/* `rebuild` asks for a power cycle only for the running kernel; a kernel that is not running has its build ready for the boot that uses it. */
+static void test_rebuild_done_text(void)
+{
+	char text[512];
+
+	gs_rebuild_done_text("7.0.14-16-pve", "7.0.14-16-pve", text, sizeof(text));
+	CHECK(contains(text, "for 7.0.14-16-pve are now the build") && contains(text, "Next: power the machine off and on. A restart is not enough"),
+	      "the running kernel: the power cycle is asked: %s", text);
+	gs_rebuild_done_text("7.0.14-12-pve", "7.0.14-16-pve", text, sizeof(text));
+	CHECK(contains(text, "for 7.0.14-12-pve are now the build") && contains(text, "it is used when the machine boots that kernel") &&
+	      contains(text, "The running kernel (7.0.14-16-pve) is not changed") && !contains(text, "power the machine off and on"),
+	      "another kernel: ready for its boot, no power cycle: %s", text);
+	gs_rebuild_done_text("7.0.14-12-pve", "", text, sizeof(text));
+	CHECK(contains(text, "The running kernel (unknown) is not changed") && !contains(text, "power the machine off and on"),
+	      "the running kernel unknown: no power cycle: %s", text);
+}
+
+/*
+ * Hosts whose kernel packages run no postinst.d hook: kernel-install (Fedora, openSUSE, any systemd host) gets a plugin, pacman (Arch) a
+ * hook, each only where its directory exists; both call the hook script, installed beside the program. A host with postinst.d keeps its
+ * hook and gets no plugin. uninstall removes them through the manifest.
+ */
+static void test_kernel_install_pacman(void)
+{
+	char stage[GS_PATH_MAX], p[GS_PATH_MAX], man[GS_PATH_MAX], modprobe[GS_PATH_MAX], sha[65], *out, *text;
+	static const char *const files[] = { "/etc/kernel/install.d/90-geforce-sriov.install", "/usr/bin/geforce-sriov-kernel-hook",
+					     "/etc/pacman.d/hooks/90-geforce-sriov.hook" };
+	struct stat st;
+	FILE *f;
+
+	/* A host with kernel-install and no postinst.d. */
+	snprintf(stage, sizeof(stage), "%s/stage-kinstall", tmp);
+	gs_pathf(p, sizeof(p), "%s/usr/lib/kernel/install.d", stage);
+	gs_mkdir_p(p, 0755);
+	stage_install(&out, stage);
+	CHECK(contains(out, "kernel-install plugin /etc/kernel/install.d/90-geforce-sriov.install") &&
+	      !contains(out, "this host has no /etc/kernel/postinst.d") && !contains(out, "pacman builds"),
+	      "kernel-install host: install says the plugin is in place: %s", out);
+	free(out);
+	gs_pathf(p, sizeof(p), "%s%s", stage, files[0]);
+	text = slurp(p);
+	CHECK(text && !stat(p, &st) && (st.st_mode & 0777) == 0755 && contains(text, "hook=/usr/bin/geforce-sriov-kernel-hook\n") &&
+	      contains(text, "[ \"${1:-}\" = add ] || exit 0") && !contains(text, "@BINDIR@") && !contains(text, "@VERSION@"),
+	      "the plugin is executable, runs the hook for add only and is rendered: %s", text ? text : "");
+	free(text);
+	gs_pathf(p, sizeof(p), "%s%s", stage, files[1]);
+	text = slurp(p);
+	CHECK(text && !stat(p, &st) && (st.st_mode & 0777) == 0755 && contains(text, "cli=/usr/bin/geforce-sriov\n") && !contains(text, "@BINDIR@"),
+	      "the hook script is installed beside the program, rendered: %s", text ? text : "");
+	free(text);
+	gs_pathf(p, sizeof(p), "%s/etc/pacman.d", stage);
+	CHECK(!gs_exists(p), "and no pacman hook or directory is made");
+	gs_pathf(p, sizeof(p), "%s" GS_MANIFEST, stage);
+	text = slurp(p);
+	CHECK(text && contains(text, " /etc/kernel/install.d/90-geforce-sriov.install\n") && contains(text, " /usr/bin/geforce-sriov-kernel-hook\n"),
+	      "the manifest owns the plugin and the hook script: %s", text ? text : "");
+	free(text);
+
+	/* A host with pacman. */
+	snprintf(stage, sizeof(stage), "%s/stage-pacman", tmp);
+	gs_pathf(p, sizeof(p), "%s/etc/pacman.d", stage);
+	gs_mkdir_p(p, 0755);
+	stage_install(&out, stage);
+	CHECK(contains(out, "pacman builds NVIDIA's module for every installed kernel that has headers and no build yet (/etc/pacman.d/hooks/90-geforce-sriov.hook)") &&
+	      !contains(out, "kernel-install plugin"), "pacman host: install says the hook is in place: %s", out);
+	free(out);
+	gs_pathf(p, sizeof(p), "%s%s", stage, files[2]);
+	text = slurp(p);
+	CHECK(text && !stat(p, &st) && (st.st_mode & 0777) == 0644 && contains(text, "\nWhen = PostTransaction\n") &&
+	      contains(text, "\nExec = /usr/bin/geforce-sriov-kernel-hook --retry\n") && contains(text, "\nTarget = usr/lib/modules/*/build/include/\n") &&
+	      contains(text, "\nTarget = usr/lib/modules/*/modules.order\n") && !contains(text, "@BINDIR@"),
+	      "the pacman hook runs the hook script after the transaction on kernel and header paths: %s", text ? text : "");
+	free(text);
+	gs_pathf(p, sizeof(p), "%s/etc/kernel/install.d", stage);
+	CHECK(!gs_exists(p), "and no kernel-install plugin is made");
+
+	/* postinst.d wins: a host that has it keeps its hook and gets no plugin. */
+	snprintf(stage, sizeof(stage), "%s/stage-kinstall-apt", tmp);
+	gs_pathf(p, sizeof(p), "%s/usr/lib/kernel/install.d", stage);
+	gs_mkdir_p(p, 0755);
+	gs_pathf(p, sizeof(p), "%s/etc/kernel/postinst.d", stage);
+	gs_mkdir_p(p, 0755);
+	stage_install(&out, stage);
+	free(out);
+	gs_pathf(p, sizeof(p), "%s/etc/kernel/install.d", stage);
+	CHECK(!gs_exists(p), "a host with postinst.d gets no kernel-install plugin");
+
+	/* uninstall removes the files the manifest lists (a manifest of the staged copies, so that only they go). */
+	snprintf(stage, sizeof(stage), "%s/stage-kinstall", tmp);
+	gs_pathf(man, sizeof(man), "%s/ki-manifest", tmp);
+	gs_pathf(modprobe, sizeof(modprobe), "%s/ki-modprobe.d", tmp);
+	gs_mkdir_p(modprobe, 0755);
+	f = fopen(man, "w");
+	if (!f)
+		die(man);
+	for (size_t i = 0; i < 2; i++) {
+		gs_pathf(p, sizeof(p), "%s%s", stage, files[i]);
+		if (gs_sha256_file(p, sha))
+			die(p);
+		fprintf(f, "f %s %s\n", sha, p);
+	}
+	snprintf(stage, sizeof(stage), "%s/stage-pacman", tmp);
+	gs_pathf(p, sizeof(p), "%s%s", stage, files[2]);
+	if (gs_sha256_file(p, sha))
+		die(p);
+	fprintf(f, "f %s %s\n", sha, p);
+	fclose(f);
+	fflush(stdout);
+	CHECK(gs_uninstall_files(man, modprobe, NULL) == GS_EXIT_OK, "uninstall of the plugin, the hook script and the pacman hook succeeds");
+	snprintf(stage, sizeof(stage), "%s/stage-kinstall", tmp);
+	for (size_t i = 0; i < 2; i++) {
+		gs_pathf(p, sizeof(p), "%s%s", stage, files[i]);
+		CHECK(!gs_exists(p), "uninstall removed %s", files[i]);
+	}
+	snprintf(stage, sizeof(stage), "%s/stage-pacman", tmp);
+	gs_pathf(p, sizeof(p), "%s%s", stage, files[2]);
+	CHECK(!gs_exists(p), "uninstall removed %s", files[2]);
+}
+
+/*
+ * Guest autostart is ordered after activation and never blocked by it. The four triggers that used to stop
+ * every guest on the host: activation failed, one VF not ready, no GPU selected, a geforce_sriov.skip boot.
+ * systemd is not run here. What decides each case is in the files install writes: the drop-in must order
+ * and must not require, its check must not fail the unit, and the activation unit must be bounded and
+ * must name both autostart units in Before=.
+ */
+static void test_vm_autostart(void)
+{
+	static const char *const units[] = { "libvirt-guests.service", "pve-guests.service" };
+	char stage[GS_PATH_MAX], p[GS_PATH_MAX], root[GS_PATH_MAX], cfg[GS_PATH_MAX], *out, *text;
+	const char *check[] = { "check", "--sysfs-root", root, "--config", cfg, NULL };
+
+	snprintf(stage, sizeof(stage), "%s/stage-vm-autostart", tmp);
+	for (size_t i = 0; i < 2; i++) {
+		gs_pathf(p, sizeof(p), "%s/usr/lib/systemd/system/%s", stage, units[i]);
+		writef(p, "[Service]\nExecStart=/bin/true\n");
+	}
+	stage_install(&out, stage);
+	free(out);
+	for (size_t i = 0; i < 2; i++) {
+		gs_pathf(p, sizeof(p), "%s/etc/systemd/system/%s.d/geforce-sriov.conf", stage, units[i]);
+		text = slurp(p);
+		/* Activation failed, or one VF is not ready: ordering stays, no dependency exists to fail. */
+		CHECK(text && contains(text, "\nAfter=geforce-sriov-activate.service\n"), "%s: ordered after activation: %s",
+		      units[i], text ? text : "(missing)");
+		CHECK(text && !contains(text, "\nRequires=") && !contains(text, "\nBindsTo=") &&
+		      !contains(text, "\nWants=") && !contains(text, "\nPartOf=") && !contains(text, "\nRequisite="),
+		      "%s: no dependency on activation: %s", units[i], text ? text : "(missing)");
+		/* Not ready, or no GPU selected: check exits non-zero, and the leading '-' ignores that. */
+		CHECK(text && contains(text, "\nExecStartPre=-/usr/bin/geforce-sriov check\n") &&
+		      !contains(text, "\nExecStartPre=/"), "%s: the check cannot fail the unit: %s", units[i],
+		      text ? text : "(missing)");
+		free(text);
+	}
+	/* A skip boot or a host without config skips the activation unit; After= on a skipped unit orders nothing. */
+	gs_pathf(p, sizeof(p), "%s/etc/systemd/system/" GS_UNIT_ACTIVATE, stage);
+	text = slurp(p);
+	CHECK(text && contains(text, "\nBefore=display-manager.service libvirt-guests.service pve-guests.service\n") &&
+	      contains(text, "\nConditionKernelCommandLine=!geforce_sriov.skip\n") &&
+	      contains(text, "\nConditionPathExists=/etc/geforce-sriov/config\n"),
+	      "the activation unit orders before autostart and is skipped on a skip boot: %s", text ? text : "(missing)");
+	/* Autostart can wait for activation only as long as the unit may run. */
+	CHECK(text && contains(text, "\nTimeoutStartSec=") && !contains(text, "TimeoutStartSec=0") &&
+	      !contains(text, "TimeoutStartSec=infinity") && !contains(text, "@START_TIMEOUT@"),
+	      "the activation unit has a finite start timeout: %s", text ? text : "(missing)");
+	free(text);
+	/* No GPU selected: check refuses, which the drop-in tolerates. */
+	fixture("vm-autostart-nogpu", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
+	writef(cfg, "identity=on\n");
+	CHECK(run_cli(&out, NULL, check) != 0, "check with no GPU selected is not ready: %s", out);
+	free(out);
+}
+
 /* ---- manifest removal rules ------------------------------------------- */
 
-/* doctor and status name the display state activation produces: display=on is limited to the boot display GPU. */
+/* install --dry-run and status name the display state activation produces: display=on is limited to the boot display GPU. */
 static void test_display_report(void)
 {
 	char root[GS_PATH_MAX], cfg[GS_PATH_MAX], *out;
-	const char *doctor[] = { "doctor", "--sysfs-root", root, "--config", cfg, NULL };
 	const char *status[] = { "status", "--sysfs-root", root, "--config", cfg, NULL };
 
 	fixture("disp-report", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
 	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
 	writef(cfg, "bdfs=0000:03:00.0\ndisplay=on\n");
-	run_cli(&out, NULL, doctor);
+	run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, NULL);
 	CHECK(contains(out, "display: boot_vga=0, requested=on, effective=off (display=on puts the console on the boot "
-			    "display GPU only)") && !contains(out, "on (forced)"), "doctor, display=on on a non-boot card: %s", out);
+			    "display GPU only)") && !contains(out, "on (forced)"), "install --dry-run, display=on on a non-boot card: %s", out);
 	free(out);
 	run_cli(&out, NULL, status);
 	CHECK(contains(out, "display: requested=on, effective for the selection: off (no selected GPU is the boot "
@@ -6301,49 +7526,88 @@ static void test_display_report(void)
 	fixture("disp-report-boot", &topo_default, gpu_ampere, 1, NULL, root, sizeof(root));
 	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
 	writef(cfg, "bdfs=0000:03:00.0\ndisplay=on\n");
-	run_cli(&out, NULL, doctor);
+	run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, NULL);
 	CHECK(contains(out, "display: boot_vga=1, requested=on, effective=on (the boot display)"),
-	      "doctor, display=on on the boot display: %s", out);
+	      "install --dry-run, display=on on the boot display: %s", out);
 	/* The display build's inputs are named before install runs, and no longer once they are given. */
 	CHECK(contains(out, "[FAIL] 0000:03:00.0 is the boot display GPU, so install builds the modules for the host console") &&
 	      contains(out, "--companion-file PATH (or --companion-source DIR): NVIDIA's second package") &&
-	      contains(out, "--nvkms-source PATH: NVIDIA's public kernel module source"), "doctor names the display inputs: %s", out);
+	      contains(out, "--nvkms-source PATH: NVIDIA's public kernel module source"), "the checks name the display inputs: %s", out);
 	free(out);
 	{
-		const char *given[] = { "doctor", "--sysfs-root", root, "--config", cfg, "--companion-file", cfg,
-					"--nvkms-source", root, NULL };
-		const char *half[] = { "doctor", "--sysfs-root", root, "--config", cfg, "--companion-file", cfg, NULL };
-		const char *none[] = { "doctor", "--sysfs-root", root, "--config", cfg, "--no-display", NULL };
-		const char *cuda[] = { "doctor", "--sysfs-root", root, "--config", cfg, "--no-display", "--host-cuda", NULL };
-		const char *skip[] = { "doctor", "--sysfs-root", root, "--config", cfg, "--driver=skip", NULL };
-		const char *gone[] = { "doctor", "--sysfs-root", root, "--config", cfg, "--companion-file", "/nonexistent/p.run",
-				       "--nvkms-source", root, NULL };
+		struct gs_diag_opts given = { .companion_file = cfg, .nvkms_source = root };
+		struct gs_diag_opts half = { .companion_file = cfg };
+		struct gs_diag_opts none = { .display_set = 1, .display = GS_DISPLAY_OFF };
+		struct gs_diag_opts cuda = { .display_set = 1, .display = GS_DISPLAY_OFF, .host_cuda_set = 1, .host_cuda = 1 };
+		struct gs_diag_opts skip = { .skip_driver = 1 };
+		struct gs_diag_opts gone = { .companion_file = "/nonexistent/p.run", .nvkms_source = root };
 
-		run_cli(&out, NULL, given);
+
+		run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &given);
 		CHECK(!contains(out, "that\n       build needs two more inputs"), "inputs given: %s", out);
 		free(out);
-		run_cli(&out, NULL, half);
+		run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &half);
 		CHECK(contains(out, "--nvkms-source PATH: NVIDIA's public kernel module source") &&
 		      !contains(out, "--companion-file PATH (or"), "only the missing input is named: %s", out);
 		free(out);
-		run_cli(&out, NULL, none);
+		run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &none);
 		CHECK(!contains(out, "build needs two more inputs") && !contains(out, "host CUDA is selected"),
 		      "--no-display needs no input: %s", out);
 		free(out);
-		run_cli(&out, NULL, cuda);
+		run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &cuda);
 		CHECK(contains(out, "[FAIL] host CUDA is selected, and its build needs NVIDIA's second package"),
 		      "host CUDA names its input: %s", out);
 		free(out);
-		run_cli(&out, NULL, skip);
+		run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &skip);
 		CHECK(!contains(out, "build needs two more inputs"), "--driver=skip builds nothing and needs no input: %s", out);
 		free(out);
-		run_cli(&out, NULL, gone);
+		run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &gone);
 		CHECK(contains(out, "[FAIL] --companion-file /nonexistent/p.run does not exist"), "a missing path: %s", out);
 	}
 	free(out);
 	run_cli(&out, NULL, status);
 	CHECK(contains(out, "display: requested=on, effective for the boot display GPU: on"),
 	      "status, display=on with the boot display: %s", out);
+	free(out);
+}
+
+/*
+ * The two ways to run the host checks: before install (every line, a summary, the banner) and after it, inside
+ * status (INFO, WARN and FAIL only; a FAIL is the exit code). doctor itself is not a command.
+ */
+static void test_hostcheck_modes(void)
+{
+	char root[GS_PATH_MAX], cfg[GS_PATH_MAX], p[GS_PATH_MAX], *out;
+	const char *status[] = { "status", "--sysfs-root", root, "--config", cfg, NULL };
+	struct gs_diag_opts d3 = { .disable_d3cold = 1 };
+
+	fixture("hostcheck-modes", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
+	writef(cfg, "bdfs=0000:03:00.0\n");
+
+	CHECK(run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, NULL) == GS_EXIT_OK && contains(out, "checks before install (sysfs root ") &&
+	      contains(out, "[OK  ] kernel livepatch support present") && contains(out, "\n0 failure(s), "),
+	      "before install: banner, OK lines and the summary: %s", out);
+	free(out);
+	CHECK(run_hostcheck(&out, GS_HOSTCHECK_POST, root, cfg, NULL) == GS_EXIT_OK && !contains(out, "[OK  ]") &&
+	      !contains(out, "failure(s)") && !contains(out, "checks before install"),
+	      "after install: no OK lines, no summary, no banner: %s", out);
+	free(out);
+	/* --disable-d3cold needs a laptop GPU among the GPUs judged. */
+	CHECK(run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &d3) == GS_EXIT_USAGE, "--disable-d3cold without a laptop GPU: %s", out);
+	free(out);
+
+	/* A FAIL after install is the exit code of status; the lines come under their own heading. */
+	gs_pathf(p, sizeof(p), "%s/kernel/livepatch", root);
+	CHECK(rmdir(p) == 0, "the fixture's livepatch directory goes");
+	CHECK(run_hostcheck(&out, GS_HOSTCHECK_POST, root, cfg, NULL) == GS_EXIT_REFUSED &&
+	      contains(out, "Other host checks (OK lines are not shown):\n[FAIL] kernel: no "), "after install: a FAIL: %s", out);
+	free(out);
+	CHECK(run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, NULL) == GS_EXIT_REFUSED && contains(out, "\n1 failure(s), "),
+	      "before install: the same FAIL is exit 3: %s", out);
+	free(out);
+	CHECK(run_cli(&out, NULL, status) == GS_EXIT_FAIL && contains(out, "Other host checks (OK lines are not shown):\n[FAIL] kernel: no ") &&
+	      contains(out, "next: ") && !contains(out, "doctor"), "status carries the FAIL and names no doctor: %s", out);
 	free(out);
 }
 
@@ -6358,7 +7622,8 @@ static void test_autoload_scope(void)
 	snprintf(stage, sizeof(stage), "%s/stage-autoload-sel", tmp);
 	CHECK(run_cli(&out, NULL, sel) == GS_EXIT_OK, "staged install with a GPU: %s", out);
 	/* The command printed for the target host builds what was chosen: --no-display is not --display. */
-	CHECK(contains(out, "geforce-sriov-driver --source") && !contains(out, " --display") && !contains(out, " --host-cuda"),
+	CHECK(contains(out, "geforce-sriov-driver --source") && !contains(out, " --display") && !contains(out, " --host-cuda") &&
+	      contains(out, "Host desktop: not installed (host_desktop=auto): it needs the display build, and the display build is off here.\n"),
 	      "the staged hint follows the effective features: %s", out);
 	free(out);
 	{
@@ -6366,9 +7631,22 @@ static void test_autoload_scope(void)
 				       "--display", "--host-cuda", NULL };
 
 		CHECK(run_cli(&out, NULL, both) == GS_EXIT_OK &&
-		      contains(out, "/usr/src/nvidia-580.159.01 --display --host-cuda "),
-		      "the staged hint names both features: %s", out);
+		      contains(out, "/usr/src/nvidia-580.159.01 --display --host-cuda ") &&
+		      contains(out, "Host desktop: enabled (host_desktop=auto); NVIDIA's graphics libraries come from NVIDIA's second driver package.\n"),
+		      "the staged hint names both features, and the host desktop is on with the display build: %s", out);
 		free(out);
+	}
+	{
+		const char *off[] = { "install", "--destdir", stage, "--source", srcdir, "--prefix", "/usr",
+				      "--display", "--no-host-desktop", NULL };
+
+		CHECK(run_cli(&out, NULL, off) == GS_EXIT_OK && contains(out, "Host desktop: disabled (host_desktop=off).\n") &&
+		      !contains(out, "Host desktop: enabled"), "--no-host-desktop: %s", out);
+		free(out);
+		gs_pathf(p, sizeof(p), "%s" GS_CONFIG_PATH, stage);
+		text = slurp(p);
+		CHECK(text && contains(text, "\nhost_desktop=off\n"), "the config keeps it: %s", text ? text : "(absent)");
+		free(text);
 	}
 	gs_pathf(p, sizeof(p), "%s" GS_AUTOLOAD_PATH, stage);
 	text = slurp(p);
@@ -6465,6 +7743,626 @@ static const char *section_name(const char *symbol)
 	return strncmp(symbol, "test_", 5) == 0 ? symbol + 5 : symbol;
 }
 
+/* ---- the selection record: the card at a selected address against the card that was selected ---- */
+
+static const struct fx_fn gpu_ada04[] = {
+	{ "0000:04:00.0", "2783", "030000", "nvidia" },
+	{ "0000:04:00.1", "22bc", "040300", "snd_hda_intel" },
+	{ NULL, NULL, NULL, NULL }
+};
+static const struct fx_topo topo_third = { "pci0000:00/0000:00:04.0", "0000:05:00.0" };
+static const struct fx_fn gpu_ada05[] = {
+	{ "0000:05:00.0", "2783", "030000", "nvidia" },
+	{ "0000:05:00.1", "22bc", "040300", "snd_hda_intel" },
+	{ NULL, NULL, NULL, NULL }
+};
+
+/* What install records for the two cards of the fixture: an Ampere 3080 at 03:00.0, an Ada 4070 SUPER at 04:00.0. */
+#define REC_TWO "0000:03:00.0 10de:2206 10de:146d\n0000:04:00.0 10de:2783 10de:146d\n"
+
+/* Rewrite what a card says it is: its device ID and the subsystem IDs. NULL leaves one as it was. */
+static void set_card_ids(const char *root, const struct fx_topo *k, const char *bdf, const char *device, const char *subvendor,
+			 const char *subdevice)
+{
+	const char *name[3] = { "device", "subsystem_vendor", "subsystem_device" };
+	const char *value[3] = { device, subvendor, subdevice };
+	char p[GS_PATH_MAX];
+
+	for (unsigned int i = 0; i < 3; i++) {
+		if (!value[i])
+			continue;
+		gs_pathf(p, sizeof(p), "%s/devices/%s/%s/%s", root, k->bridge_path, bdf, name[i]);
+		writef(p, "0x%s\n", value[i]);
+	}
+}
+
+/* A host with the Ampere card at 03:00.0, the Ada card at 04:00.0 (when with04) or 05:00.0 (when with05), and the record of both. */
+static void ident_host(const char *name, int with04, int with05, char *root, size_t len)
+{
+	act_host(name, &topo_default, gpu_ampere, 0, "0/4", root, len);
+	if (with04)
+		make_card(root, &topo_display, gpu_ada04, 0, "0/4");
+	if (with05)
+		make_card(root, &topo_third, gpu_ada05, 0, "0/4");
+	config_of(&act_cfg, "bdfs=0000:03:00.0,0000:04:00.0\n");
+	check_cfg = act_cfg;
+	memset(&check_opts, 0, sizeof(check_opts));
+	memset(&lp_opts, 0, sizeof(lp_opts));
+	lp_opts.boot = 1;
+	sim_writef("livepatch.conf", "bdfs=0000:03:00.0,0000:04:00.0\nvfs=4\n");
+	sim_remove("module/geforce_sriov");
+	sim_writef("state/" GS_SELECTION_NAME, REC_TWO);
+}
+
+/* The four commands that look before they act refuse, and nothing was written or run. */
+static void ident_refused(const char *what, const char *const must[])
+{
+	static int (*const hosts[])(void) = { activate_host, livepatch_host, check_host, daemon_host };
+	static const char *const names[] = { "activate", "livepatch", "check", "check --daemon-ready" };
+
+	for (unsigned int i = 0; i < 4; i++) {
+		char *out;
+
+		CHECK(run_host(hosts[i], &out) == GS_EXIT_REFUSED && contains(out, "refused, nothing changed: ") &&
+		      !sim_exists("sim.log"), "%s, %s: refused and nothing run: %s", what, names[i], out);
+		for (unsigned int k = 0; must[k]; k++)
+			CHECK(contains(out, must[k]), "%s, %s: names '%s': %s", what, names[i], must[k], out);
+		free(out);
+	}
+}
+
+static void test_selection_identity(void)
+{
+	char root[GS_PATH_MAX], text[4096], *out, *log, line[1024];
+	struct gs_ident ids[GS_CFG_MAX_BDFS], back[GS_CFG_MAX_BDFS];
+	struct gs_addr list[GS_CFG_MAX_BDFS];
+	unsigned int n, nback = 0;
+	char err[256];
+	int len;
+
+	/* What install records: read from the cards, rendered, read back; an address that was recorded stays unless named again. */
+	ident_host("ident-roundtrip", 1, 0, root, sizeof(root));
+	set_card_ids(root, &topo_display, "0000:04:00.0", NULL, "1043", "88e2");
+	CHECK(gs_parse_addr_list("bdfs", "0000:03:00.0,0000:04:00.0", list, &n, err, sizeof(err)) == 0 && n == 2, "two addresses");
+	CHECK(gs_selection_collect(root, list, n, NULL, 0, 1, ids) == 2 && ids[0].device == 0x2206 && ids[1].device == 0x2783 &&
+	      ids[1].subvendor == 0x1043 && ids[1].subdevice == 0x88e2, "the identities are read from the cards");
+	len = gs_selection_render(ids, 2, text, sizeof(text));
+	CHECK(len > 0 && contains(text, "0000:04:00.0 10de:2783 1043:88e2\n"), "rendered: %s", text);
+	sim_writef("state/" GS_SELECTION_NAME, text);
+	CHECK(gs_selection_read(sim.state, back, &nback) == 0 && nback == 2 && back[1].subdevice == 0x88e2 &&
+	      strcmp(back[0].pf.str, "0000:03:00.0") == 0, "read back");
+	set_card_ids(root, &topo_display, "0000:04:00.0", "2782", NULL, NULL);
+	CHECK(gs_selection_collect(root, list, n, back, nback, 0, ids) == 2 && ids[1].device == 0x2783,
+	      "without refresh the recorded line stays, whatever is there now");
+	CHECK(gs_selection_collect(root, list, n, back, nback, 1, ids) == 2 && ids[1].device == 0x2782,
+	      "with refresh the card there now is recorded");
+	set_card_ids(root, &topo_display, "0000:04:00.0", "1234", NULL, NULL);
+	CHECK(gs_selection_collect(root, list, n, NULL, 0, 1, ids) == 1, "a card that is not in the device table is not recorded");
+
+	/* A selected card that is the one that was selected: nothing is refused, whatever else is on the host. */
+	ident_host("ident-same", 1, 0, root, sizeof(root));
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK && contains(out, "loaded for"), "unchanged cards: %s", out);
+	free(out);
+	log = sim_text("sim.log");
+	CHECK(contains(log, "R modprobe geforce_sriov"), "the livepatch loads for the cards that were selected: %s", log);
+	free(log);
+
+	/* Two selected cards of different kinds trade places: both are refused, the command names each card where it is now. */
+	ident_host("ident-swap", 1, 0, root, sizeof(root));
+	set_card_ids(root, &topo_default, "0000:03:00.0", "2783", NULL, NULL);
+	set_card_ids(root, &topo_display, "0000:04:00.0", "2206", NULL, NULL);
+	{
+		static const char *const must[] = { "0000:03:00.0 is not the GPU that was selected", "0000:04:00.0 is not the GPU that was selected",
+						    "the selected GPU is at 0000:04:00.0 now", "the selected GPU is at 0000:03:00.0 now",
+						    "Nothing was written to any GPU",
+						    "sudo geforce-sriov install --device 0000:03:00.0 --device 0000:04:00.0\n",
+						    "power the machine off and on", NULL };
+
+		ident_refused("swap", must);
+	}
+	{
+		struct gs_host h = sim_host();
+
+		CHECK(gs_selection_verdict(&h, &act_cfg, NULL, text, sizeof(text)) == 1 &&
+		      contains(text, "selected:  GeForce RTX 3080 10de:2206 (subsystem 10de:146d)") &&
+		      contains(text, "there now: GeForce RTX 4070 SUPER 10de:2783 (subsystem 10de:146d)"), "the cards are named: %s", text);
+		act_opts.ndevices = 1;
+		gs_addr_parse("0000:03:00.0", &act_opts.devices[0]);
+		CHECK(gs_selection_verdict(&h, &act_cfg, &act_opts, text, sizeof(text)) == 1 &&
+		      !contains(text, "0000:04:00.0 is not"), "check --device judges only the card it names: %s", text);
+		act_opts.ndevices = 0;
+	}
+
+	/* A selected card replaced by a card of another kind the tool supports: refused; the command selects the card that is there. */
+	ident_host("ident-replaced", 1, 0, root, sizeof(root));
+	set_card_ids(root, &topo_display, "0000:04:00.0", "2782", NULL, NULL);
+	{
+		static const char *const must[] = { "0000:04:00.0 is not the GPU that was selected", "there now: GeForce RTX 4070 Ti 10de:2782",
+						    "sudo geforce-sriov install --device 0000:03:00.0 --device 0000:04:00.0\n", NULL };
+
+		ident_refused("replaced", must);
+	}
+	/* The same chip on another board (the subsystem IDs differ) is another card too. */
+	ident_host("ident-board", 1, 0, root, sizeof(root));
+	set_card_ids(root, &topo_display, "0000:04:00.0", NULL, "1043", "88e2");
+	{
+		static const char *const must[] = { "there now: GeForce RTX 4070 SUPER 10de:2783 (subsystem 1043:88e2)", NULL };
+
+		ident_refused("another board", must);
+	}
+	/* Replaced by a card the tool does not support: no address is named for it. */
+	ident_host("ident-unsupported", 1, 0, root, sizeof(root));
+	set_card_ids(root, &topo_display, "0000:04:00.0", "1234", NULL, NULL);
+	{
+		static const char *const must[] = { "there now: 10de:1234", "sudo geforce-sriov install --device 0000:03:00.0\n", NULL };
+
+		ident_refused("unsupported replacement", must);
+	}
+
+	/* A selected card at a new address: found there and named. The card at the old address is gone. */
+	ident_host("ident-moved", 0, 1, root, sizeof(root));
+	{
+		static const char *const must[] = { "0000:04:00.0 is not the GPU that was selected", "there now: nothing",
+						    "the selected GPU is at 0000:05:00.0 now (the PCI addresses changed)",
+						    "sudo geforce-sriov install --device 0000:03:00.0 --device 0000:05:00.0\n", NULL };
+
+		ident_refused("moved", must);
+	}
+
+	/* A selected card is missing and the other still matches: nothing is activated, as for a missing card before. */
+	ident_host("ident-missing", 0, 0, root, sizeof(root));
+	{
+		static const char *const must[] = { "0000:04:00.0 is not the GPU that was selected", "there now: nothing",
+						    "sudo geforce-sriov install --device 0000:03:00.0\n", NULL };
+
+		ident_refused("missing", must);
+	}
+
+
+	/* A config from 0.3.0 has no record: every command goes on as before, and status says so once. */
+	enable_host("ident-unrecorded", root, sizeof(root));
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished"), "no record: activation as before: %s", out);
+	free(out);
+	{
+		struct gs_config c;
+
+		config_of(&c, "bdfs=0000:03:00.0\n");
+		CHECK(gs_selection_unrecorded(sim.state, &c, line, sizeof(line)) == 1 &&
+		      contains(line, "the card identities are not recorded yet") &&
+		      contains(line, "run `sudo geforce-sriov install --device 0000:03:00.0` to record them"), "said once: %s", line);
+		sim_writef("state/" GS_SELECTION_NAME, "0000:03:00.0 10de:2206 10de:146d\n");
+		CHECK(gs_selection_unrecorded(sim.state, &c, line, sizeof(line)) == 0, "recorded: nothing to say");
+		config_of(&c, "bdfs=0000:03:00.0,0000:04:00.0\n");
+		CHECK(gs_selection_unrecorded(sim.state, &c, line, sizeof(line)) == 1, "one address without a line is not recorded yet");
+	}
+	/* An address with no line in a record that exists is not judged: that card is activated as before. */
+	enable_host("ident-partial", root, sizeof(root));
+	sim_writef("state/" GS_SELECTION_NAME, "0000:09:00.0 10de:2783 10de:146d\n");
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished"), "a card with no line: %s", out);
+	free(out);
+	/* The record, with its card, is what lets activation go on. */
+	enable_host("ident-recorded", root, sizeof(root));
+	sim_writef("state/" GS_SELECTION_NAME, "0000:03:00.0 10de:2206 10de:146d\n");
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished"), "the card that was selected: %s", out);
+	free(out);
+	/* A record that cannot be read: the cards cannot be told apart, so nothing is touched. */
+	enable_host("ident-corrupt", root, sizeof(root));
+	sim_writef("state/" GS_SELECTION_NAME, "0000:03:00.0 10de:2206\n");
+	CHECK(run_host(activate_host, &out) == GS_EXIT_REFUSED && contains(out, "cannot be read as the record of the selected GPUs") &&
+	      contains(out, "sudo geforce-sriov install --device 0000:03:00.0\n") && !sim_exists("sim.log"), "corrupt record: %s", out);
+	free(out);
+}
+
+/* A GNU build-id note in a minimal ELF64 relocatable file, as a kernel module has one. */
+static void make_ko(const char *path, const unsigned char *id, size_t idlen)
+{
+	Elf64_Ehdr eh;
+	Elf64_Shdr sh[2];
+	unsigned char buf[512], note[64];
+	unsigned int hdr[3] = { 4, (unsigned int)idlen, 3 };
+	size_t nlen = 16 + ((idlen + 3) & ~(size_t)3);
+
+	memset(&eh, 0, sizeof(eh));
+	memset(sh, 0, sizeof(sh));
+	memset(note, 0, sizeof(note));
+	memcpy(note, hdr, sizeof(hdr));
+	memcpy(note + 12, "GNU", 4);
+	memcpy(note + 16, id, idlen);
+	memcpy(eh.e_ident, ELFMAG, SELFMAG);
+	eh.e_ident[EI_CLASS] = ELFCLASS64;
+	eh.e_ident[EI_DATA] = ELFDATA2LSB;
+	eh.e_ident[EI_VERSION] = EV_CURRENT;
+	eh.e_type = ET_REL;
+	eh.e_machine = EM_X86_64;
+	eh.e_version = EV_CURRENT;
+	eh.e_ehsize = sizeof(eh);
+	eh.e_shentsize = sizeof(Elf64_Shdr);
+	eh.e_shnum = 2;
+	eh.e_shoff = sizeof(eh) + nlen;
+	sh[1].sh_type = SHT_NOTE;
+	sh[1].sh_offset = sizeof(eh);
+	sh[1].sh_size = nlen;
+	memcpy(buf, &eh, sizeof(eh));
+	memcpy(buf + sizeof(eh), note, nlen);
+	memcpy(buf + sizeof(eh) + nlen, sh, sizeof(sh));
+	write_bin(path, buf, sizeof(eh) + nlen + sizeof(sh));
+}
+
+/* A build record for kernel 6.8.0 whose module is the one at ko, with the given display flag. */
+static void build_for(struct gs_build_src *src, const char *dir, int display)
+{
+	static const unsigned char id[] = { 0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4 };
+	static char record[GS_PATH_MAX], ko[GS_PATH_MAX];
+	char text[256];
+
+	gs_pathf(record, sizeof(record), "%s/driver-build", dir);
+	gs_pathf(ko, sizeof(ko), "%s/nvidia.ko", dir);
+	make_ko(ko, id, sizeof(id));
+	snprintf(text, sizeof(text), "kernel=6.8.0\nmodule_build_id=deadbeef01020304\ndisplay=%d\nhost_cuda=0\n", display);
+	writef(record, "%s", text);
+	memset(src, 0, sizeof(*src));
+	src->record = record;
+	src->release = "6.8.0";
+	src->module = ko;
+}
+
+/* A failure report of the kernel hook for a kernel whose installed module is the recorded build is not shown: a later install made it. */
+static void test_hook_report_cleared(void)
+{
+	char root[GS_PATH_MAX], cfg[GS_PATH_MAX], marks[GS_PATH_MAX], q[GS_PATH_MAX], *out;
+	struct gs_build_src src;
+
+	fixture("hook-cleared", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
+	writef(cfg, "bdfs=0000:03:00.0\n");
+	gs_pathf(marks, sizeof(marks), "%s/kernel-hook-failed", root);
+	build_for(&src, root, 0);
+	memset(&hook_status_opts, 0, sizeof(hook_status_opts));
+	hook_status_opts.sysroot = root;
+	hook_status_opts.config_path = cfg;
+	hook_status_opts.kernel_hook_dir = marks;
+	hook_status_opts.build = &src;
+	gs_mkdir_p(marks, 0755);
+	gs_pathf(q, sizeof(q), "%s/6.8.0", marks);
+	writef(q, "exit 1 at 2026-11-12 10:00:00; see x\n");
+	run_host(hook_status_host, &out);
+	CHECK(!contains(out, "kernel hook:"), "the kernel's module is the recorded build: no failure is reported: %s", out);
+	free(out);
+	gs_pathf(q, sizeof(q), "%s/7.0.99-1-pve", marks);
+	writef(q, "exit 1 at 2026-11-12 10:00:00; see x\n");
+	run_host(hook_status_host, &out);
+	CHECK(contains(out, "kernel hook: the automatic build for kernel 7.0.99-1-pve failed") && !contains(out, "for kernel 6.8.0"),
+	      "a kernel with no build is still reported: %s", out);
+	free(out);
+}
+
+/*
+ * The boot display GPU is selected and the installed build has no display modules: the firmware framebuffer
+ * is not released for modules that are not there, so nothing is touched and the command that fixes it is named.
+ */
+static void test_activate_nodisplay_build(void)
+{
+	char root[GS_PATH_MAX], *out, *log;
+	struct gs_build_src src;
+
+	act_host("nodisplay-build", &topo_display, gpu_display, 1, NULL, root, sizeof(root));
+	build_for(&src, root, 0);
+	act_opts.build = &src;
+	CHECK(run_host(activate_host, &out) == GS_EXIT_REFUSED &&
+	      contains(out, "refused, nothing changed: 0000:04:00.0 is the boot display GPU, and the installed build of NVIDIA's module has no display") &&
+	      contains(out, "sudo geforce-sriov install --no-display\n") &&
+	      contains(out, "sudo ./geforce-sriov install --companion-file PATH --nvkms-source PATH") &&
+	      !contains(out, "released") && !sim_exists("sim.log") && !sim_exists("state/" GS_ATTEMPT_NAME),
+	      "no display modules, no inputs kept: %s", out);
+	free(out);
+	/* The inputs for the display modules were kept: rebuild is the command. */
+	sim_writef("state/" GS_INPUTS_NAME "/index", "nvidia_source=/usr/src/nvidia-580.159.01\ncompanion=/x/c.run\nnvkms=/x/nvkms\n");
+	CHECK(run_host(activate_host, &out) == GS_EXIT_REFUSED && contains(out, "To build them, run:\n  sudo geforce-sriov rebuild\n") &&
+	      !contains(out, "--no-display") && !sim_exists("sim.log"), "inputs kept: %s", out);
+	free(out);
+	/* display=off: there is no console to hand over, so a build without display modules is right. */
+	act_cfg.display = GS_DISPLAY_OFF;
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished") &&
+	      !contains(out, "boot display GPU, and the installed build"), "display=off: %s", out);
+	free(out);
+
+	/* A build with the display modules, or a host with no record of the build: the handoff goes on. */
+	act_host("display-build", &topo_display, gpu_display, 1, NULL, root, sizeof(root));
+	build_for(&src, root, 1);
+	act_opts.build = &src;
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "firmware framebuffer simple-framebuffer.0 released"),
+	      "a display build: %s", out);
+	free(out);
+	log = sim_text("sim.log");
+	CHECK(contains(log, "simple-framebuffer.0/driver/unbind"), "the handoff ran: %s", log);
+	free(log);
+	act_host("display-norecord", &topo_display, gpu_display, 1, NULL, root, sizeof(root));
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "firmware framebuffer simple-framebuffer.0 released"),
+	      "no build record: %s", out);
+	free(out);
+}
+
+/* ---- install from the installed copy: a change of the selection ---------------------------------- */
+
+static struct gs_install_opts sel_opts;
+static struct gs_select_env sel_env;
+static struct gs_build_src sel_build;
+static char sel_dest[GS_PATH_MAX], sel_driver[GS_PATH_MAX], sel_args[GS_PATH_MAX], sel_drvlog[GS_PATH_MAX];
+
+static int select_host(void)
+{
+	return gs_install_select(&sel_opts, &sel_env);
+}
+
+/*
+ * A host with the Ampere card at 03:00.0 and the Ada card at 04:00.0 (the boot display when ada_boot), an
+ * install of this tool that selected 03:00.0, and a driver step that records what it was asked.
+ */
+static void select_fixture(const char *name, int ada_boot, int display_record, const char *config)
+{
+	static char root[GS_PATH_MAX]; /* sel_env keeps a pointer to it */
+	char p[GS_PATH_MAX], sha[65];
+
+	act_host(name, &topo_default, gpu_ampere, 0, "0/4", root, sizeof(root));
+	make_card(root, &topo_display, gpu_ada04, ada_boot, "0/4");
+	gs_pathf(sel_dest, sizeof(sel_dest), "%s/dest", root);
+	gs_pathf(p, sizeof(p), "%s" GS_CONFIG_PATH, sel_dest);
+	{
+		struct gs_config c;
+		char text[4096];
+
+		config_of(&c, config);
+		if (gs_config_render(&c, text, sizeof(text)) < 0)
+			die("render");
+		writef(p, "%s", text);
+		chmod(p, 0644);
+	}
+	if (gs_sha256_file(p, sha))
+		die(p);
+	gs_pathf(p, sizeof(p), "%s" GS_MANIFEST, sel_dest);
+	writef(p, "f %s " GS_CONFIG_PATH "\n", sha);
+	gs_pathf(sel_driver, sizeof(sel_driver), "%s/fake-driver", root);
+	gs_pathf(sel_args, sizeof(sel_args), "%s/driver-args", root);
+	gs_pathf(sel_drvlog, sizeof(sel_drvlog), "%s/driver.log", root);
+	writef(sel_driver, "#!/bin/sh\necho \"$@\" >>%s\nexit 0\n", sel_args);
+	chmod(sel_driver, 0755);
+	if (display_record >= 0)
+		build_for(&sel_build, root, display_record);
+	memset(&sel_opts, 0, sizeof(sel_opts));
+	sel_opts.ov.ari = sel_opts.ov.msix = GS_SW_UNSET;
+	sel_env = (struct gs_select_env){ root, sel_dest, display_record >= 0 ? &sel_build : NULL, sel_driver, sel_drvlog, "6.8.0", NULL };
+}
+
+static char *sel_file(const char *rel)
+{
+	char p[GS_PATH_MAX];
+
+	gs_pathf(p, sizeof(p), "%s%s", sel_dest, rel);
+	return slurp(p);
+}
+
+static void test_install_select(void)
+{
+	static const char cfg[] = "bdfs=0000:03:00.0\nidentity=on\nidentity_force_host=on\n";
+	char *out, *text, p[GS_PATH_MAX];
+
+
+	/* The selection changes: checked, written with the cards' identities, no file copied, the power cycle named. */
+	select_fixture("select-device", 0, -1, cfg);
+	sel_opts.devices[0] = (struct gs_addr){ 0 };
+	gs_addr_parse("0000:04:00.0", &sel_opts.devices[0]);
+	sel_opts.ndevices = 1;
+	CHECK(run_host(select_host, &out) == GS_EXIT_OK && contains(out, "installed " ) && contains(out, "recorded the card at 0000:04:00.0: 10de:2783") &&
+	      contains(out, "power the machine off and on") && contains(out, "no file was copied"), "device change: %s", out);
+	free(out);
+	text = sel_file(GS_CONFIG_PATH);
+	CHECK(contains(text, "bdfs=0000:04:00.0") && !contains(text, "0000:03:00.0"), "the config names the new card: %s", text);
+	free(text);
+	text = sel_file(GS_SELECTION);
+	CHECK(contains(text, "0000:04:00.0 10de:2783 10de:146d\n") && !contains(text, "0000:03:00.0"), "the record names it: %s", text);
+	free(text);
+	text = sel_file(GS_MANIFEST);
+	CHECK(contains(text, " " GS_SELECTION "\n") && contains(text, " " GS_CONFIG_PATH "\n"), "the manifest lists the record: %s", text);
+	free(text);
+	gs_pathf(p, sizeof(p), "%s/usr", sel_dest);
+	CHECK(!gs_exists(p) && !gs_exists(sel_args), "nothing was copied and the driver step did not run");
+	/* The same command again changes nothing. */
+	CHECK(run_host(select_host, &out) == GS_EXIT_OK && contains(out, "Nothing changed"), "again: %s", out);
+	free(out);
+
+	/* The Ada placement change: a selection that needs another build than the installed one runs the driver step, with
+	 * --ada-selected when an Ada card is selected. A record without ada_placement is a build without the change. */
+	for (int k = 0; k < 4; k++) {
+		static const struct { const char *from, *to, *record; int runs, ada; } t[] = {
+			{ "0000:03:00.0", "0000:04:00.0", "", 1, 1 },
+			{ "0000:03:00.0", "0000:04:00.0", "ada_placement=1\n", 0, 1 },
+			{ "0000:04:00.0", "0000:03:00.0", "ada_placement=1\n", 1, 0 },
+			{ "0000:04:00.0", "0000:03:00.0", "ada_placement=0\n", 0, 0 },
+		};
+		char conf[256], name[64], *rec;
+
+		snprintf(conf, sizeof(conf), "bdfs=%s\nidentity=on\nidentity_force_host=on\n", t[k].from);
+		snprintf(name, sizeof(name), "select-ada-placement-%d", k);
+		select_fixture(name, 0, 0, conf);
+		rec = slurp(sel_build.record);
+		writef(sel_build.record, "%s%s", rec ? rec : "", t[k].record);
+		free(rec);
+		sel_opts.devices[0] = (struct gs_addr){ 0 };
+		gs_addr_parse(t[k].to, &sel_opts.devices[0]);
+		sel_opts.ndevices = 1;
+		CHECK(run_host(select_host, &out) == GS_EXIT_OK, "ada placement case %d: %s", k, out);
+		free(out);
+		CHECK(gs_exists(sel_args) == t[k].runs, "ada placement case %d: the driver step %s", k, t[k].runs ? "runs" : "does not run");
+		if (t[k].runs) {
+			text = slurp(sel_args);
+			CHECK(contains(text, "--retained --kernel 6.8.0") && contains(text, "--ada-selected") == t[k].ada,
+			      "ada placement case %d: --ada-selected is %s: %s", k, t[k].ada ? "passed" : "not passed", text ? text : "(none)");
+			free(text);
+		}
+	}
+
+	/* The activate unit installed earlier gets the start timeout of the new card count; an edited unit is kept. */
+	for (int edited = 0; edited < 2; edited++) {
+		char unit[GS_PATH_MAX], sha[65], want[64];
+		char *t;
+
+		select_fixture(edited ? "select-unit-edited" : "select-unit", 0, -1, cfg);
+		gs_pathf(unit, sizeof(unit), "%s%s/" GS_UNIT_ACTIVATE, sel_dest, GS_UNIT_DIR);
+		gs_mkdir_p(strrchr(unit, '/') ? (gs_pathf(p, sizeof(p), "%s%s", sel_dest, GS_UNIT_DIR), p) : p, 0755);
+		writef(unit, "[Service]\nTimeoutStartSec=%u\nStandardOutput=journal\n", gs_activate_start_timeout_s(1, GS_DEFAULT_VFS));
+		if (gs_sha256_file(unit, sha))
+			die(unit);
+		gs_pathf(p, sizeof(p), "%s" GS_MANIFEST, sel_dest);
+		t = slurp(p);
+		writef(p, "%sf %s %s/" GS_UNIT_ACTIVATE "\n", t, sha, GS_UNIT_DIR);
+		free(t);
+		if (edited)
+			writef(unit, "[Service]\nTimeoutStartSec=77\n");
+		sel_opts.devices[0] = (struct gs_addr){ 0 };
+		sel_opts.devices[1] = (struct gs_addr){ 0 };
+		gs_addr_parse("0000:03:00.0", &sel_opts.devices[0]);
+		gs_addr_parse("0000:04:00.0", &sel_opts.devices[1]);
+		sel_opts.ndevices = 2;
+		CHECK(run_host(select_host, &out) == GS_EXIT_OK, "two cards: %s", out);
+		free(out);
+		t = slurp(unit);
+		snprintf(want, sizeof(want), "TimeoutStartSec=%u\n", edited ? 77u : gs_activate_start_timeout_s(2, GS_DEFAULT_VFS));
+		CHECK(t && contains(t, want) && contains(t, "StandardOutput=journal\n") == !edited,
+		      "%s unit: the start timeout of two cards, the rest of the unit as it was: %s", edited ? "edited" : "installed", t ? t : "(missing)");
+		free(t);
+	}
+
+	/* The record alone (the cards were selected before the record existed): no power cycle. */
+	select_fixture("select-record", 0, -1, cfg);
+	sel_opts.devices[0] = (struct gs_addr){ 0 };
+	gs_addr_parse("0000:03:00.0", &sel_opts.devices[0]);
+	sel_opts.ndevices = 1;
+	CHECK(run_host(select_host, &out) == GS_EXIT_OK && contains(out, "only the record of the cards changed") &&
+	      contains(out, "power the machine off and on if an earlier change still waits for it"), "record only: %s", out);
+	free(out);
+
+	/* An address that cannot be selected stops before anything is written. */
+	select_fixture("select-refused", 0, -1, cfg);
+	gs_addr_parse("0000:09:00.0", &sel_opts.devices[0]);
+	sel_opts.ndevices = 1;
+	CHECK(run_host(select_host, &out) == GS_EXIT_REFUSED && contains(out, "refused --device: 0000:09:00.0: no such PCI function"), "%s", out);
+	free(out);
+	text = sel_file(GS_CONFIG_PATH);
+	gs_pathf(p, sizeof(p), "%s" GS_SELECTION, sel_dest);
+	CHECK(contains(text, "bdfs=0000:03:00.0") && !gs_exists(p), "config and record untouched: %s", text);
+	free(text);
+	/* --disable-d3cold needs a laptop GPU among the selected. */
+	select_fixture("select-d3cold", 0, -1, cfg);
+	sel_opts.disable_d3cold = 1;
+	CHECK(run_host(select_host, &out) == GS_EXIT_USAGE, "d3cold without a laptop GPU: %s", out);
+	free(out);
+	/* A host with no selection yet needs the source folder: it enables the boot units. */
+	select_fixture("select-none", 0, -1, "ari=on\n");
+	gs_addr_parse("0000:03:00.0", &sel_opts.devices[0]);
+	sel_opts.ndevices = 1;
+	CHECK(run_host(select_host, &out) == GS_EXIT_REFUSED && contains(out, "no GPU is selected yet"), "%s", out);
+	free(out);
+	/* A config this tool did not write is left alone. */
+	select_fixture("select-foreign", 0, -1, cfg);
+	gs_pathf(p, sizeof(p), "%s" GS_MANIFEST, sel_dest);
+	writef(p, "%s", "");
+	gs_addr_parse("0000:04:00.0", &sel_opts.devices[0]);
+	sel_opts.ndevices = 1;
+	CHECK(run_host(select_host, &out) == GS_EXIT_REFUSED && contains(out, "was not written by geforce-sriov"), "%s", out);
+	free(out);
+
+	/* The boot display joins the selection and the installed build has no display modules: with no kept inputs, the two forms. */
+	select_fixture("select-display-refused", 1, 0, cfg);
+	gs_addr_parse("0000:04:00.0", &sel_opts.devices[0]);
+	sel_opts.ndevices = 1;
+	CHECK(run_host(select_host, &out) == GS_EXIT_REFUSED && contains(out, "no earlier install kept them") &&
+	      contains(out, "sudo geforce-sriov install --device 0000:04:00.0 --no-display\n") &&
+	      contains(out, "sudo ./geforce-sriov install --device 0000:04:00.0 --companion-file PATH --nvkms-source PATH") &&
+	      !gs_exists(sel_args), "display, nothing kept: %s", out);
+	free(out);
+	text = sel_file(GS_CONFIG_PATH);
+	CHECK(contains(text, "bdfs=0000:03:00.0"), "the config is as it was: %s", text);
+	free(text);
+	/* With the inputs kept the driver step runs, as rebuild runs it, before the config is written. */
+	select_fixture("select-display", 1, 0, cfg);
+	gs_pathf(p, sizeof(p), "%s" GS_INPUTS_DIR "/index", sel_dest);
+	writef(p, "companion=/x/c.run\nnvkms=/x/nvkms\n");
+	gs_addr_parse("0000:04:00.0", &sel_opts.devices[0]);
+	sel_opts.ndevices = 1;
+	CHECK(run_host(select_host, &out) == GS_EXIT_OK && contains(out, "Display: automatic for selected boot-display GPU 0000:04:00.0") &&
+	      contains(out, "== NVIDIA's files:") && contains(out, "NVIDIA's modules for 6.8.0 were rebuilt and installed (nvidia, nvidia-modeset, nvidia-drm)") &&
+	      contains(out, "The power cycle loads them") && !contains(out, "no file was copied"), "display, inputs kept: %s", out);
+	free(out);
+	text = slurp(sel_args);
+	CHECK(contains(text, "--retained --kernel 6.8.0 --display --no-host-cuda --ada-selected"), "the driver step builds the display modules, for an Ada card: %s", text ? text : "(none)");
+	free(text);
+	text = sel_file(GS_CONFIG_PATH);
+	CHECK(contains(text, "bdfs=0000:04:00.0"), "then the config is written: %s", text);
+	free(text);
+	/* Leaving the display out of a build that has it: the driver step without it, and display=off in the config. */
+	select_fixture("select-nodisplay", 0, 1, cfg);
+	sel_opts.display_set = 1;
+	sel_opts.display = GS_DISPLAY_OFF;
+	CHECK(run_host(select_host, &out) == GS_EXIT_OK && contains(out, "Display: not enabled.") &&
+	      contains(out, "NVIDIA's modules for 6.8.0 were rebuilt and installed (nvidia)") && !contains(out, "no file was copied"), "--no-display: %s", out);
+	free(out);
+	text = slurp(sel_args);
+	CHECK(contains(text, "--kernel 6.8.0 --no-display --no-host-cuda"), "the driver step leaves the display modules out: %s", text ? text : "(none)");
+	free(text);
+	text = sel_file(GS_CONFIG_PATH);
+	CHECK(contains(text, "display=off") && contains(text, "bdfs=0000:03:00.0"), "display=off, the selection kept: %s", text);
+	free(text);
+	/* A driver step that refuses leaves the config alone. */
+	select_fixture("select-driver-fails", 0, 1, cfg);
+	writef(sel_driver, "#!/bin/sh\necho 'geforce-sriov-driver: refused: no headers' >&2\nexit 3\n");
+	sel_opts.display_set = 1;
+	sel_opts.display = GS_DISPLAY_OFF;
+	CHECK(run_host(select_host, &out) == GS_EXIT_REFUSED && contains(out, "NVIDIA's module and plugin are as they were, and the config is not written"), "%s", out);
+	free(out);
+	text = sel_file(GS_CONFIG_PATH);
+	CHECK(!contains(text, "display=off"), "the config is as it was: %s", text);
+	free(text);
+
+	/* The command line: only selection options are taken from the installed copy; everything else keeps the refusal. */
+	{
+		char stage[GS_PATH_MAX], installed[GS_PATH_MAX];
+		const char *built = cli;
+		static const char *const refused[][6] = {
+			{ "install", NULL }, { "install", "--vfs", "8", NULL }, { "install", "--host-cuda", NULL },
+			{ "install", "--device", "0000:03:00.0", "--ari", "off", NULL }, { "install", "--driver", "skip", NULL },
+			{ "install", "--device", "0000:03:00.0", "--prefix", "/usr", NULL },
+		};
+
+		gs_pathf(stage, sizeof(stage), "%s/stage-select", tmp);
+		stage_install(&out, stage);
+		free(out);
+		gs_pathf(installed, sizeof(installed), "%s/usr/bin/geforce-sriov", stage);
+		gs_pathf(p, sizeof(p), "%s/var/lib/geforce-sriov/" GS_SELECTION_NAME, stage);
+		CHECK(!gs_exists(p), "a staged install records no card: it reads none");
+		cli = installed;
+		for (unsigned int i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+			CHECK(run_cli(&out, NULL, refused[i]) == GS_EXIT_REFUSED && contains(out, "is the installed copy") &&
+			      contains(out, "sudo geforce-sriov install --device BDF"), "refused: install %s %s: %s",
+			      refused[i][1] ? refused[i][1] : "", refused[i][2] ? refused[i][2] : "", out);
+			free(out);
+		}
+		if (geteuid() != 0) {
+			static const char *const taken[][5] = {
+				{ "install", "--device", "0000:03:00.0", NULL }, { "install", "--disable-d3cold", NULL },
+				{ "install", "--no-display", NULL }, { "install", "--display", "--device", "0000:03:00.0", NULL },
+			};
+
+			for (unsigned int i = 0; i < sizeof(taken) / sizeof(taken[0]); i++) {
+				CHECK(run_cli(&out, NULL, taken[i]) == GS_EXIT_REFUSED && contains(out, "a live install must run as root") &&
+				      !contains(out, "is the installed copy"), "taken: install %s: %s", taken[i][1], out);
+				free(out);
+			}
+		}
+		cli = built;
+
+	}
+}
+
 int main(int argc, char **argv)
 {
 	const char *only = argc > 1 ? argv[1] : NULL;
@@ -6491,8 +8389,12 @@ int main(int argc, char **argv)
 	if (!mkdtemp(tmp))
 		die("mkdtemp");
 
+	RUN(test_selection_identity);
+	RUN(test_activate_nodisplay_build);
+	RUN(test_install_select);
 	RUN(test_addr);
 	RUN(test_config);
+	RUN(test_many_cards);
 	RUN(test_switches);
 	RUN(test_write_atomic);
 	RUN(test_sha256);
@@ -6506,6 +8408,11 @@ int main(int argc, char **argv)
 	RUN(test_livepatch_guard);
 	RUN(test_livepatch_load_driver);
 	RUN(test_activate_rescan);
+	RUN(test_notify);
+	RUN(test_hook_report_cleared);
+	RUN(test_selection_many);
+	RUN(test_start_timeout);
+	RUN(test_poll_elapsed);
 	RUN(test_activate_enable);
 	RUN(test_activate_oneshot);
 	RUN(test_activate_msix);
@@ -6530,20 +8437,28 @@ int main(int argc, char **argv)
 	RUN(test_clear_guard);
 	RUN(test_rebuild);
 	RUN(test_cuda_libs);
+	RUN(test_host_desktop);
 	RUN(test_dkms_ensure);
 	RUN(test_first_install);
 	RUN(test_package_copy);
 	RUN(test_activate_nodes);
-	RUN(test_activate_fb);
-	RUN(test_fb_slots);
+	RUN(test_fb_slots_ignored);
+	RUN(test_slot_hint);
+	RUN(test_ada_placement);
 	RUN(test_version_policy);
 	RUN(test_version_record);
 	RUN(test_build_line);
 	RUN(test_version_setup);
 	RUN(test_loaded_patch);
-	RUN(test_migration);
+	RUN(test_older_install);
+	RUN(test_kernel_hook);
+	RUN(test_stale_cap_files);
+	RUN(test_kernel_install_pacman);
+	RUN(test_rebuild_done_text);
+	RUN(test_vm_autostart);
 	RUN(test_autoload_scope);
 	RUN(test_display_report);
+	RUN(test_hostcheck_modes);
 	RUN(test_manifest_remove);
 
 	printf("test_lifecycle: %d checks, %d failures, %d skipped\n", checks, failures, skips);

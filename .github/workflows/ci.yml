@@ -43,18 +43,14 @@ jobs:
           test -x "$RUNNER_TEMP/stage/usr/bin/geforce-sriov-driver"
           test -f "$RUNNER_TEMP/stage/usr/bin/gs-driver-version.sh"
           test -f "$RUNNER_TEMP/stage/usr/bin/gs-driver-versions.tbl"
-          # The owner of the Ada framebuffer slots, which the driver step builds into nvidia.ko.
-          test -f "$RUNNER_TEMP/stage/usr/bin/driver-patches/fb-owner/gs-fb-owner.c"
-          test -f "$RUNNER_TEMP/stage/usr/bin/driver-patches/fb-owner/gs-fb-owner.h"
-          test -f "$RUNNER_TEMP/stage/usr/bin/driver-patches/fb-owner/fb-owner.patch"
           sh "$RUNNER_TEMP/stage/usr/bin/geforce-sriov-driver" --dry-run --kernel ci --source /nonexistent >"$RUNNER_TEMP/plan"
           grep -q 'version classification: unconfirmed' "$RUNNER_TEMP/plan"
           # From the installed copy, install names rebuild and never asks for the build tree.
           "$RUNNER_TEMP/stage/usr/bin/geforce-sriov" install >"$RUNNER_TEMP/again" 2>&1 || true
           grep -q 'After a kernel update, run `sudo geforce-sriov rebuild`' "$RUNNER_TEMP/again"
           ! grep -q 'run make first' "$RUNNER_TEMP/again"
-          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.3.0/dkms.conf"
-          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.3.0/include/gs_devices.h"
+          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.4.0/dkms.conf"
+          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.4.0/include/gs_devices.h"
           grep -qx 'bdfs=0000:01:00.0' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           grep -qx 'identity=on' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           grep -qx 'identity_force_host=on' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
@@ -69,7 +65,7 @@ jobs:
       SAN: -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
       TESTS: >-
         tests/test_lifecycle tests/test_devices tests/test_contracts tests/test_patch
-        tests/test_patch_ada tests/test_patch_display tests/test_modcheck tests/test_fbowner
+        tests/test_patch_ada tests/test_patch_display tests/test_modcheck tests/test_insn_find
     steps:
       - uses: actions/checkout@v5
       - name: Allow unprivileged user namespaces

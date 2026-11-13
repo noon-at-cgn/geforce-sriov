@@ -1,15 +1,16 @@
 # Supported cards
 
-The device table in `include/gs_devices.h` lists every card geforce-sriov acts on and how it treats each generation.
-Three parts read it: the livepatch module (`geforce_sriov`, a [livepatch](glossary.md) that reveals the SR-IOV feature a card hides), the command line tool, and the identity hook (which presents each card to NVIDIA's software as a professional card).
-`geforce-sriov devices` prints the table from the installed binary.
-This page is a readable copy; if it disagrees with the header, the header wins.
+The device table in `include/gs_devices.h` lists the cards geforce-sriov acts on and how it handles each generation.
+The kernel module, CLI and identity hook all use this table; `geforce-sriov devices` prints it from the installed binary.
+This page is a readable copy.
+If it disagrees with the header, the header takes precedence.
 
-Every entry is one exact PCI device ID, with no ranges.
-The device ID is the 16-bit model number a card reports on the PCI bus, and `10de` is NVIDIA's vendor ID; `lspci -nn` shows both, for example `10de:2206`.
-A listed ID means the tools act on that card when you select it.
-A card whose ID is not listed is **never** presented or activated, and `doctor`, `install --device` and `setup` refuse it with `<BDF> (10de:<id>) is not in the device table`, where `<BDF>` is the card's PCI address such as `0000:01:00.0`.
-The rebuilt `nvidia.ko` (NVIDIA's kernel driver module, patched by `install`) still applies to such a card whenever it is bound to the `nvidia` driver ([Combining generations](#combining-generations)).
+- A listed ID means the tools will act on that card when it is selected.
+- Every entry is one exact PCI device ID (vendor `10de`), with no ranges.
+- A card whose ID is not listed is not presented or activated. The rebuilt `nvidia.ko`
+  still applies to it whenever it is bound to `nvidia` ([Combining generations](#combining-generations)).
+  `install --dry-run`, `install --device` and `setup` refuse it with `<BDF> (10de:<id>) is not in the device
+  table`.
 
 ## Generations
 
@@ -21,48 +22,35 @@ flowchart LR
     ADA --> RTX6000["RTX 6000 Ada"]
 ```
 
-The table gives, per generation, the professional card its GeForce cards are presented as, with that card's device ID, the vGPU type used by default, and the page that documents the setup.
-
 | Generation | Presented as | Default vGPU type | Status | Page |
 |---|---|---|---|---|
 | Ampere | RTX A6000, `10de:2230` | 525, RTXA6000-2Q | supported | [Ampere](ampere.md) |
 | Ada | RTX 6000 Ada, `10de:26b1` | 942, RTX6000-Ada-2Q | supported | [Ada](ada.md) |
 
-NVIDIA's vGPU software only knows professional cards, so geforce-sriov presents each GeForce card to it under the device ID in the *Presented as* column, the professional board of that generation.
-The default vGPU type is what `activate` sets on every VF when you choose nothing else:
-
-- The number is NVIDIA's type ID.
-- The `2Q` in the name means a 2 GiB framebuffer (the VRAM given to each vGPU).
-
-Blackwell GPUs are **not** expected to work with the current implementation.
-NVIDIA's proprietary host driver does not support them on a vGPU host ([NVIDIA driver flavour](#nvidia-driver-flavour)).
+NVIDIA's vGPU software sees each card as its generation's professional target in the *Presented as* column.
+The card retains its board's subsystem ID: both targets' stock `<pgpu>` entries use subsystem ID `0x0`, which matches any ID.
 
 ## Status of every row
 
-The *Status* column has one value today, **supported**: the card is in the device table, the tools act on it, and its generation page documents the setup.
-It does not mean the maintainers own every card. The tested cards are named in the *At a glance* table of each generation page, and no laptop GPU has been tested.
-
-The recommended host driver is 580.159.01 (NVIDIA vGPU software 19.5), and the recommended guest drivers are in the [supported software stack](installation.md#supported-software-stack).
-Those are the tested versions; other versions are not guaranteed to work.
-What the tools do with another host driver version depends on how you installed:
-
-- `install` names the version and checks that it still finds every place it patches. If it does, it continues.
-- `setup` asks first, and the default answer is no.
-- On the manual path (`--driver=skip`), `doctor`, `check` and `activate` warn about the version and continue.
-
+Every listed card is supported. Use the host and guest driver versions in the [supported software stack](installation.md#supported-software-stack).
+Other versions are **not guaranteed to work**.
+`install` builds another host driver version best effort when it finds the code it patches (`setup` asks first, and `--allow-unsupported-driver` answers yes); 580.159.01 is the only confirmed version.
+On the manual path (`--driver=skip`), `status`, `check` and `activate` print that the host driver is not guaranteed to work and continue.
 See [Ampere](ampere.md) and [Ada](ada.md) for hardware details.
 
-`geforce-sriov devices` names the professional counterpart of each generation (the professional card it is presented as) once, then lists every row with its device ID, generation, die and name.
+- `geforce-sriov devices` names the target of each generation once, then lists every row with its
+  device ID, generation, die and name.
+- The capability offsets of each row come from public raw config-space dumps of cards with that ID, except the laptop and embedded rows without a dump, which use their generation's offsets ([Laptop support](laptops.md#ids-without-a-dump)).
+  The kernel module re-reads and validates each header on the running card and does nothing when it does not match.
 
 > [!IMPORTANT]
-> Choose vGPU types that fit your card's VRAM.
-> NVIDIA also calls a vGPU type a profile, and its name ends in the memory size: `4Q` means a 4 GB framebuffer (VRAM), so each vGPU of that type takes 4 GB of VRAM.
-> The list of vGPU types comes from the professional card, so it can offer types larger than your card's memory, and there is **no** automatic VRAM check.
-> For example, a GA102 card with 10 to 12 GB is presented as the 48 GB RTX A6000.
+> Choose vGPU types (also called profiles, each with a fixed memory size) that fit your card's physical VRAM.
+> The target's type table is presented unchanged, so it can offer types larger than the card's memory.
+> For example, a 10–12 GB GA102 card is presented as the 48 GB RTX A6000.
+> There is no automatic VRAM check.
 >
-> All the vGPUs you run at once must fit in VRAM together, and the host driver needs some room too.
-> On a 12 GB card, one `8Q` asks for 8 GB and leaves nominal room for the host, while three `4Q` ask for all 12 GB before the host takes any.
-> Availability also depends on the driver's per-VF allocation limits, so a vGPU type that looks like it fits can still fail ([Choosing a vGPU type](installation.md#choosing-a-vgpu-type)).
+> The combined memory of all running vGPUs must fit in physical VRAM, with room left for the host driver.
+> Four `4Q` vGPUs need 16 GB plus the host driver's share: they fit a 24 GB card and do not fit a 16 GB card ([Choosing a vGPU type](configuration.md#choosing-a-vgpu-type)).
 
 If you have a card from this table, please submit a
 [compatibility report](https://github.com/noon-at-cgn/geforce-sriov/issues/new?template=compatibility-report.yml)
@@ -71,35 +59,30 @@ whether it works or not.
 ## Combining generations
 
 Ampere and Ada cards can share one host.
-Select up to 8 cards with one `--device` per card.
-Each card is presented as its generation's professional counterpart, and `activate` and `check` process every selected card.
+Select up to 32 cards with one `--device` per card.
+Each uses its generation's target, and `activate` and `check` process every selected card.
 
-Loading `nvidia` makes it take over **every** NVIDIA card on the host, and the package cannot restrict that, so the points below follow from one shared driver stack:
+- One host module and one plugin serve all cards, so every revision any selected generation needs is
+  made ([Which revisions to make](driver-patch.md#which-revisions-to-make)). Loading `nvidia` binds
+  every NVIDIA card on the host, so select every card you will use.
+- The rebuilt `nvidia.ko` applies to every card bound to it, selected or not: its VF-count and scheduler revisions are not per card.
+  The VF-count revision forces 4 virtual functions (VFs, one per vGPU) on every card bound to it, whatever its row.
+  `vfs` accepts values from 1 to the card's ceiling (16 on Ampere and `28b0`, 4 on other Ada cards); NVIDIA's patched driver uses at most 4 VFs per card.
+- The selection (`bdfs`) limits what the kernel module presents (SR-IOV), the identity hook
+  and `activate`. A card outside it is bound by NVIDIA's driver but not activated.
+- `status` and `install --dry-run` print one `[WARN]` when a selection mixes Ada with another generation, and nothing refuses
+  the selection itself.
+- `--type` is refused on a mixed selection (exit 3), because no single type is creatable on both
+  targets. Omit it for the per-generation defaults (525 on Ampere, 942 on Ada).
+- `activate` restarts NVIDIA's daemons for the whole host, so it refuses while a GPU outside `bdfs`
+  has VFs.
 
-- One NVIDIA module (`nvidia.ko`) and one vGPU plugin serve all cards, so they get every byte patch (a small change to a few bytes of NVIDIA's own file) any selected generation needs ([Which byte patches to make](driver-patch.md#which-byte-patches-to-make)).
-  Select every card you will use.
-- Both generations use the patched plugin copy.
-  On 580.159.01, `activate` refuses any plugin copy other than the patched one, including the stock plugin.
-  On another host driver version it warns and continues.
-- The rebuilt `nvidia.ko` applies to every card bound to it, selected or not, because its VF-count and scheduler byte patches are not per card.
-  The VF-count patch forces 4 virtual functions (VFs, one per vGPU) on every TU/GA/AD card (Turing, Ampere and Ada chips) bound to it, whatever its row.
-  `vfs` accepts values from 1 up to the card's ceiling (`geforce-sriov doctor` shows it); NVIDIA's patched driver uses at most 4 VFs per card.
-- The selection (`bdfs`, the PCI addresses of the selected cards) limits what the livepatch module presents (SR-IOV), the identity hook and `activate`.
-  NVIDIA's driver still takes over a card outside it, but it is not activated.
-- Each generation has its own vGPU type: `type_ada` and `type_ampere` in the config, 942 on Ada and 525 on Ampere by default.
-  `--type` is refused on a mixed selection (exit 3), because no single type is creatable on both professional counterparts.
-  Omit it, set the two config keys, or narrow `check` to one generation with `--device`.
-- `doctor` prints one `[WARN]` when a selection mixes Ada with another generation. Nothing else refuses the mix.
-- `activate` restarts NVIDIA's daemons for the whole host, so it refuses while a GPU outside `bdfs` has VFs.
-- The recovery rule is host-wide: if any card disappears from `lspci` or the host cannot be reached, cold power cycle the whole machine ([the power-cycle rule](recovery.md#the-one-rule)).
+For mixed-host startup details, see [Ampere](ampere.md#with-the-other-generation) and [Ada](ada.md#with-the-other-generation).
 
-Host layouts (PCIe switches, shared buses, IOMMU groups, which keep each VM's device access separate, and the BAR address space the cards map) are covered in
+Host layouts (switches, shared buses, IOMMU groups, BAR space) are covered in
 [the technical reference](technical-reference.md#multiple-gpus-and-pci-topology).
 
 ## Rows
-
-Rows are ordered by device ID within each generation.
-*Device* is the part after `10de:`, *Die* is the GPU chip the card is built on, and *Product* is the marketing name.
 
 | Device | Die | Product | Generation |
 |---|---|---|---|
@@ -201,59 +184,55 @@ Rows are ordered by device ID within each generation.
 | `28e1` | AD107 | GeForce RTX 4050 Laptop GPU | Ada |
 | `28e3` | AD107 | GeForce RTX 3050 A Laptop GPU | Ada |
 
-The desktop workstation rows (`24b0`, `2571`, `27b1`, `27b2`, `28b0`) carry the same hidden SR-IOV feature as the GeForce cards of their generation and are handled the same way.
-The laptop and embedded rows, including workstation parts, take the same path with added power-management safeguards; see [Laptop support](laptops.md).
+The desktop workstation rows (`24b0`, `2571`, `27b1`, `27b2`, `28b0`) carry the same hidden SR-IOV block as the GeForce cards of their generation and are handled the same way.
+The laptop and embedded rows, including workstation parts, take the same path with added power guards; see [Laptop support](laptops.md).
 The Ada rows are explained in [Ada](ada.md).
 
 ## Capability positions per generation
 
-Every PCI device describes its optional features in its [config space](glossary.md) (a block of registers it exposes to the system) as a chain of capabilities, each at a fixed offset (a hexadecimal byte position in that block).
-These cards hide three of them from the kernel, and the livepatch module (`geforce_sriov`) links them back into the chain at the positions below:
-
-- [SR-IOV](glossary.md): the feature that creates VFs.
-- [ARI](glossary.md): the feature that lets a device have more than 8 functions.
-- [MSI-X](glossary.md): the feature that delivers interrupts.
-
-The last column gives the register and bit the card uses to hide MSI-X.
+The kernel module exposes capabilities hidden in the card's PCI config space.
+The table lists their positions and the register bit that hides MSI-X.
 
 | Generation | SR-IOV | ARI | MSI-X | MSI-X hide bit |
 |---|---|---|---|---|
 | Ampere | hidden at `0xBCC` (TotalVFs 16, first VF offset 4, stride 1) | hidden at `0xC14` | `0xC8` | `0x41C` bit 29 |
-| Ada | hidden at `0xBCC` (TotalVFs 1 as most Ada cards report it; the VF-count patch in NVIDIA's module makes NVIDIA's driver report 4; first VF offset 4, stride 1) | hidden at `0xC14` | `0xC8` | `0x41C` bit 29 |
-
-Three terms in the table:
-
-- [TotalVFs](glossary.md) is the number of VFs the card says it can have.
-- A PCI slot normally has functions 0 to 7, and the PF (the card itself) is function 0.
-- The first VF offset and the stride place the VFs relative to the PF's function number: with offset 4 and stride 1, the VFs take functions 4, 5, 6 and 7, which is why the default four VFs fill the slot exactly.
+| Ada | hidden at `0xBCC` (TotalVFs 1 as most Ada cards report it, 16 on the RTX 2000 / 2000E Ada Generation (`28b0`); the host module's VF-count revision makes NVIDIA's driver report 4; first VF offset 4, stride 1) | hidden at `0xC14` | `0xC8` | `0x41C` bit 29 |
 
 The VF count is a standard SR-IOV setting.
 Set it with `install --vfs N` or `vfs=N` in the config, from 1 up to the card's ceiling.
 If the card has no enabled VFs, `activate` enables every presented VF.
 
-- The default is 4. ARI is enabled in software (the livepatch module presents the card's ARI capability and turns on ARI forwarding in the bridge above it, the PCIe port the card hangs from), but ARI decoding in the GPU hardware does **not** work, so above 4 VFs the livepatch module refuses to load when the card's VF layout check fails.
-- The ceiling is the card's hardware default, except on an Ada card that reports 1: its ceiling is 4, set by the VF-count patch in NVIDIA's module. `doctor` then reports "hardware default 1, geforce-sriov presents 4".
+- More than 4 VFs per card is not available, so `vfs` defaults to 4.
+  ARI is enabled in software (the module presents the card's ARI capability and turns on ARI forwarding in the bridge above it); above 4 VFs the module refuses to load when the card's VF layout check fails.
+- The ceiling is the card's hardware default, except on an Ada card that reports 1: its ceiling is 4,
+  set by the host module's VF-count revision. `status` and `install --dry-run` then report "hardware default 1,
+  geforce-sriov presents 4".
 
-The livepatch module also checks each card's reported first VF offset and stride.
+The module also checks each card's reported first VF offset and stride.
 It refuses to load, or the kernel sets up no SR-IOV on that card, when:
 
 - a VF would land on the function of the PF (the card itself), or two VFs would share a function
 - a VF would land beyond function 7 or on a function another device already uses
-- the card's NumVFs register (how many VFs are enabled) does not read back the value the kernel wrote during setup
+- the card's NumVFs register does not read back the value the kernel wrote during setup
 
 ## NVIDIA driver flavour
 
-NVIDIA's vGPU host package can install its kernel module (`nvidia.ko`, the driver code Linux loads) in two flavours: proprietary, with NVIDIA's closed-source GPU code, and open, built from NVIDIA's open-source kernel code.
-The geforce-sriov driver patch and install path support **only** the proprietary flavour:
+NVIDIA's vGPU host package can install its kernel module in two flavours, proprietary and open.
+geforce-sriov's driver patch and install path support only the proprietary flavour.
 
-- Ampere: uses the proprietary flavour. The open flavour always starts the GSP (the GPU's on-board firmware processor), and on Ampere it fails at GPU start (`RmInitAdapter failed! (0x62:0x56:…)`).
-- Ada: uses NVIDIA's proprietary 580.159.01 module with GSP off; the open flavour is not supported ([Ada](ada.md#nvidia-host-driver-setup)).
-- Blackwell: the proprietary 580.159.01 object does not support these GPUs on a vGPU host (`… installed in this vGPU host system is not supported by proprietary nvidia.ko`).
+- Ampere: uses the proprietary flavour. The open flavour always starts the GSP firmware, and on
+  Ampere it fails at GPU start (`RmInitAdapter failed! (0x62:0x56:…)`).
+- Ada: uses the proprietary 580.159.01 module with GSP off; the open flavour is not supported
+  ([Ada](ada.md#host-stack)).
 
-NVIDIA's host documentation does not state this restriction on driver flavours.
+This follows from NVIDIA's driver source and from the Ampere and Ada host stacks
+([Ampere](ampere.md#host-stack), [Ada](ada.md#host-stack)). NVIDIA's host
+documentation does not state it.
 
 ## Excluded
 
-- Turing: NVIDIA does not support SR-IOV on Turing ([NVIDIA's list of supported platforms](https://docs.nvidia.com/vgpu/20.0/grid-vgpu-release-notes-red-hat-el-kvm/validated-platforms.html)).
-- Blackwell: see [Generations](#generations).
-- Other professional cards: they have NVIDIA's own vGPU support and are not in the device table, so no component presents or activates them. The rebuilt `nvidia.ko` still applies to them when they are bound to `nvidia`.
+- Turing: NVIDIA does not support SR-IOV on Turing
+  ([NVIDIA's list of supported platforms](https://docs.nvidia.com/vgpu/20.0/grid-vgpu-release-notes-red-hat-el-kvm/validated-platforms.html)).
+- Other professional cards: they have NVIDIA's own vGPU support and are not in the device table, so
+  no component presents or activates them. The rebuilt `nvidia.ko` still applies to them
+  when they are bound to `nvidia`.

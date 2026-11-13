@@ -54,8 +54,13 @@ int gs_record_value(const char *record, const char *key, char *out, size_t len);
 int gs_activating_left(const struct gs_diag_opts *o, int live, char *p, size_t len);
 
 /* ---- from install.c ---- */
+/* The longest target a link in the manifest can have; a file's digest is shorter. */
+#define GS_LINK_MAX 256
+/* The desktop set's output-class file, in the X configuration directory (src/nvlibs.c). */
+#define GS_XCONF_NAME "geforce-sriov-nvidia-drm-outputclass.conf"
 
-#define MAX_ENTRIES 192
+
+#define MAX_ENTRIES 256
 
 #define DKMS_ID GS_DKMS_NAME "/" GS_VERSION
 
@@ -63,7 +68,7 @@ int gs_activating_left(const struct gs_diag_opts *o, int live, char *p, size_t l
 
 struct entry {
 	char type;            /* 'f' file, 'd' directory created by install, 'l' symbolic link */
-	char sha[65];         /* of a file; "-" for a directory; the target of a link */
+	char sha[GS_LINK_MAX]; /* of a file; "-" for a directory; the target of a link */
 	char path[GS_PATH_MAX];
 };
 
@@ -95,8 +100,8 @@ int gs_install_put(struct ctx *x, const char *target, const void *data, size_t l
 /* A symbolic link at target that names to, recorded as 'l'. One that is there and is not this package's refuses. */
 int gs_install_link(struct ctx *x, const char *target, const char *to);
 void gs_manifest_drop(struct manifest *m, struct entry *e);
-/* NVIDIA's CUDA libraries (src/cudalibs.c): what was written or removed; never an error of the install. */
-int gs_cuda_libs_sync(struct ctx *x, const char *dir, const char *conf, const char *stage, int want, const struct gs_cuda_io *io);
+/* NVIDIA's libraries from the second package (src/nvlibs.c): what was written or removed; never an error of the install. */
+int gs_nvlibs_sync(struct ctx *x, const struct gs_nvset *set, const struct gs_nvdest *d, int want, const struct gs_nvlibs_io *io);
 int gs_deps_step(void);
 int gs_package_conflict(const char *file, const char *root, int accept_license);
 int gs_nvidia_files(struct ctx *x, const struct gs_install_opts *o, const struct gs_config *cfg, char *dir,

@@ -73,13 +73,13 @@ int gs_plugin_verdict(const char *path, const char *real, const char *sha, char 
 	if (digest_is(sha, row->mixed_plugin))
 		return snprintf(why, len, "%.300s (%.300s) is an earlier copy without the Ada framebuffer change. Run\n"
 				"`sudo geforce-sriov install` again to replace it with the patched plugin copy, SHA-256 %s"
-				" (docs/driver-patch.md#byte-patches)", path, real, patched), -1;
+				" (docs/driver-patch.md#revisions)", path, real, patched), -1;
 	if (strcmp(sha, ADA_PLUGIN_H5_SHA) == 0)
 		return snprintf(why, len, "%.300s (%.300s) is the earlier Ada-only copy; replace it with the patched plugin copy,\n"
-				"SHA-256 %s (docs/driver-patch.md#byte-patches)", path, real, patched), -1;
+				"SHA-256 %s (docs/driver-patch.md#revisions)", path, real, patched), -1;
 	if (digest_is(sha, row->stock_plugin))
 		return snprintf(why, len, "%.300s is NVIDIA's unchanged %s plugin (%.300s); Ada and Ampere need its patched plugin copy,\n"
-				"SHA-256 %s (docs/driver-patch.md#byte-patches)", path, row->host, real, patched), -1;
+				"SHA-256 %s (docs/driver-patch.md#revisions)", path, row->host, real, patched), -1;
 	return snprintf(why, len, "%.300s (%.300s) has SHA-256 %s: not the patched plugin copy of NVIDIA's %s\n"
 			"plugin, SHA-256 %s", path, real, sha, row->host, patched), -1;
 }
@@ -101,6 +101,10 @@ int gs_check_vfs(const struct gs_host *h, const struct gs_config *cfg, const str
 	cards = calloc(GS_CFG_MAX_BDFS, sizeof(*cards));
 	if (!cards)
 		return GS_EXIT_FAIL;
+	if ((r = gs_selection_verify(h, cfg, o))) {
+		free(cards);
+		return r;
+	}
 	if ((r = gs_select_cards(sys, cfg, o, cards, &n))) {
 		free(cards);
 		return r;
@@ -203,18 +207,12 @@ int gs_check_vfs(const struct gs_host *h, const struct gs_config *cfg, const str
 			if (!ok)
 				ready = 0;
 		}
-		/*
-		 * Ada: whether the VFs' framebuffer slots are held. Told, never judged: without a held slot a VM
-		 * starts as it did before there was an owner, so this line changes neither READY nor the exit code.
-		 */
+		/* Ada: where the video memory of a VM comes from. Told, never judged. */
 		if (k->generation == GS_ADA) {
-			char slots[768], ver[32] = "";
-			struct gs_build b;
-			int have = gs_build_identity(o->build, gs_is_live_root(sys), &b);
+			char line[768];
 
-			gs_nvidia_version(h->proc, ver, sizeof(ver));
-			gs_fb_line(h->proc, cfg, have ? b.record : NULL, k->pf.str, ver, slots, sizeof(slots));
-			printf("INFO %s: framebuffer slots: %s\n", k->pf.str, slots);
+			gs_ada_placement_line(sys, &k->pf, c.numvfs, line, sizeof(line));
+			printf("INFO %s: %s\n", k->pf.str, line);
 		}
 	}
 	/* An activate or re-probe that started during the reads: what was read above may be changing. */

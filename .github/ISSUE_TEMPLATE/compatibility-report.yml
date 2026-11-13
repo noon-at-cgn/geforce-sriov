@@ -128,15 +128,15 @@ body:
     attributes:
       label: geforce-sriov version or commit
       description: "`geforce-sriov --version`, and `git rev-parse --short HEAD` if you built from a checkout."
-      placeholder: "0.3.0, commit <short hash>"
+      placeholder: "0.4.0, commit <short hash>"
     validations:
       required: true
   - type: input
     id: settings
     attributes:
       label: Changed settings
-      description: "Only settings you changed from the defaults: `vfs`, `ari`, `msix`, a boot-display grant."
-      placeholder: "vfs=2, ari=off"
+      description: "Only settings you changed from the defaults, for example `vfs`, `ari`, `msix`, `display`, `host_cuda`, `host_desktop`, `type_ada` or `type_ampere`."
+      placeholder: "vfs=2, ari=off, host_desktop=off"
   - type: textarea
     id: guests
     attributes:
@@ -154,8 +154,7 @@ body:
       label: What worked
       description: Tick each step that worked and leave the others empty.
       options:
-        - label: "geforce-sriov doctor: no FAIL"
-        - label: prepare succeeded
+        - label: "geforce-sriov install --dry-run: no FAIL"
         - label: activate created VFs
         - label: VMs started with a vGPU
         - label: A CUDA or graphics program ran in a guest
@@ -178,10 +177,10 @@ body:
     validations:
       required: true
   - type: textarea
-    id: doctor
+    id: dry-run
     attributes:
-      label: Output of geforce-sriov doctor
-      description: "`sudo geforce-sriov doctor`"
+      label: Output of geforce-sriov install --dry-run
+      description: "`sudo geforce-sriov install --dry-run`, run before installing."
       render: text
   - type: textarea
     id: status

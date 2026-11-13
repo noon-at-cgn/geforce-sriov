@@ -24,8 +24,8 @@
  * of a synthetic file that carries their original bytes at their file offsets, and
  * runs the chain stock -> mixed -> div4 and back, with its refusals.
  * Not covered here: gs_ada_find accepting a shipped row, and applying a shipped
- * row to its real file, both of which need the measured vendor files. Those are
- * left to the external real-file check. Block 4 checks the admission wrapper:
+ * row to its real file, both of which need the measured vendor files; placement_locators()
+ * reads the vendor object only to check the ada-placement locator, when it is present. Block 4 checks the admission wrapper:
  * a digest match reports admission 0 and the row, a matching digest with other
  * site bytes names the revision, and an unknown digest refuses with the exact
  * anchor message. Block 5 runs the built patcher binary when it exists and
@@ -117,6 +117,8 @@ static void table_invariants(void)
 		 {0x48, 0x8b, 0x93, 0x60, 0x2b, 0x00, 0x00, 0x48, 0x89, 0x4a, 0x08, 0xe9, 0x01, 0x03, 0x00}, 0},
 		{"7ddfad458bbfdb0c4d6902a9e045bd15c84f63aea19314f3d3a60967224b73c6", "aa4fdeb5288b5e56e7d4972466813d78e10cfb428fcf62fb53b84fec718cf07c", 0xa5f28, 6,
 		 {0x8b, 0xbb, 0xd0, 0x29, 0x00, 0x00}, {0xbf, 0x04, 0x00, 0x00, 0x00, 0x90}, 1},
+		{"946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29", "20eaebcac4f5220d21f64bcd5145143abe8f806a25cb9e249088a1b98df7d157", 0xd3a86, 1,
+		 {0x01}, {0x00}, 1},
 	};
 	size_t count = gs_ada_revision_count(), nmeasured = sizeof(measured) / sizeof(measured[0]), i, j, dupes = 0, links = 0, confirmed = 0;
 
@@ -154,7 +156,8 @@ static void table_invariants(void)
 	 * No two rows share an input or an output, so each direction selects at
 	 * most one row. An output may equal another row's input only where the
 	 * measured stack chains revisions: module-gate's stack output into vf-count,
-	 * and plugin-mixed's output into plugin-div4. */
+	 * plugin-mixed's output into plugin-div4, and the plain chain's output into
+	 * ada-placement. */
 	for (i = 0; i < count; i++)
 		for (j = 0; j < count; j++) {
 			const struct gs_ada_revision *a = gs_ada_revision_at(i), *b = gs_ada_revision_at(j);
@@ -169,10 +172,11 @@ static void table_invariants(void)
 				links++;
 		}
 	CHECK(dupes == 0, "%zu digest pairs repeat on the same side across rows", dupes);
-	CHECK(links == 2, "%zu rows take another row's output as input, expected exactly 2", links);
-	/* The stock gate-only row and plugin-mixed are intermediate states, not the
-	 * tested stack; only the three rows that reproduce a tested file are confirmed. */
-	CHECK(confirmed == 3, "%zu rows are marked measured, expected exactly 3", confirmed);
+	CHECK(links == 3, "%zu rows take another row's output as input, expected exactly 3", links);
+	/* The stock gate-only row and plugin-mixed are intermediate states, not the tested stack; the
+	 * three rows that reproduce a tested file and the placement row (measured on hardware,
+	 * B9, 2026-11-13) are confirmed. */
+	CHECK(confirmed == 4, "%zu rows are marked measured, expected exactly 4", confirmed);
 
 	for (i = 0; i < nmeasured; i++) {
 		const struct gs_ada_revision *pick = NULL;
@@ -544,6 +548,12 @@ static void plugin_chain(void)
 	CHECK(refused(gs_ada_apply(&skew, pbuf, P, fresh(), sizeof(err)), "restored") && !memcmp(pbuf, pmixed, P),
 	      "plugin-div4 apply with a wrong output digest did not restore the six bytes: %s", err);
 }
+
+/* ------------------------------------------------------- ada-placement row */
+
+/* Synthetic images of the row: the object image of the locator tests with the window planted. */
+enum { PL_IMG = 0x1000 };
+static unsigned char plvf[PL_IMG], plwork[PL_IMG];
 
 /* Admission: a digest match reports the digest path and the selected row; a digest
  * match with other site bytes names the revision; an unknown digest refuses with the
@@ -1243,7 +1253,7 @@ static void object_locators(void)
 	/* Both revisions applied: nothing left, and inspect reports the last row. */
 	memset(&f, 0, sizeof(f));
 	CHECK(refused(gs_ada_admit(copy, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)),
-		      "anchor ada.module-gate: already at output state"), "patched object not refused: %s", err);
+		      "anchor ada.ada-placement: window:"), "patched object without a placement window not refused: %s", err);
 	memset(&f, 0, sizeof(f));
 	CHECK(gs_ada_admit(copy, obj_len, GS_ADA_ANY, &f, fresh(), sizeof(err)) == 0 && f.row == vf && f.state == 1,
 	      "patched object inspect did not report vf-count at output state: %s", err);
@@ -1331,6 +1341,294 @@ static void object_locators(void)
 	memset(&f, 0, sizeof(f));
 	CHECK(refused(gs_ada_admit_in(one, 1, objimg, obj_len, GS_ADA_ANY, &f, fresh(), sizeof(err)),
 		      "anchor ada.unknown: no recipe matches this input"), "an object was treated as a plugin: %s", err);
+}
+
+static const char vendor_object[] = "/home/nathan/vgpu-work/ds580/nv-kernel.o_binary";
+
+/* Admits `data` through a one-row table of the shipped row whose digests cannot match, so only the locator runs. */
+static int placement_admit(const struct gs_ada_revision *shp, const unsigned char *data, size_t size,
+			   struct gs_ada_found *f)
+{
+	static const char none[] = "0000000000000000000000000000000000000000000000000000000000000000";
+	struct gs_ada_revision row = *shp;
+
+	row.input_sha = none;
+	row.output_sha = none;
+	memset(f, 0, sizeof(*f));
+	return gs_ada_admit_in(&row, 1, data, size, GS_ADA_ANY, f, fresh(), sizeof(err));
+}
+
+
+static int run(const char *cmd, char *out, size_t outlen);
+
+/* ada-placement: the window is 19 bytes of code before the changed immediate and 4 after it. */
+static const unsigned char placement_head[19] = { 0x48, 0x69, 0x45, 0x08, 0x58, 0x4f, 0x13, 0x00, 0x48, 0x8b,
+						    0x75, 0x00, 0xc6, 0x84, 0x06, 0x3a, 0x4c, 0x13, 0x00 };
+static const unsigned char placement_tail[4] = { 0xe9, 0xd1, 0xf8, 0xff };
+
+/* The row on a synthetic object: one window found, stock and patched states, two windows refused,
+ * no window not found. */
+static void placement_synthetic(void)
+{
+	const struct gs_ada_revision *r = shipped("ada-placement"), *vf = shipped("vf-count");
+	struct gs_ada_found f;
+	size_t at, dup;
+
+	CHECK(r && vf, "shipped table lacks ada-placement or vf-count");
+	if (!r || !vf)
+		return;
+	CHECK(!strcmp(vf->output_sha, r->input_sha), "ada-placement does not take the plain chain's final object");
+	CHECK(r->site == 0xd3a86 && r->width == 1 && r->old_bytes[0] == 0x01 && r->new_bytes[0] == 0x00 &&
+	      r->function && !strcmp(r->function, "_nv042355rm") && r->function_offset == 0x7f6,
+	      "ada-placement is not the recorded row");
+
+	obj_defaults();
+	build_obj();
+	at = obj_text_off + 0x300;
+	dup = obj_text_off + 0x360;
+	memcpy(plvf, objimg, obj_len);
+	memcpy(plvf + at, placement_head, sizeof(placement_head));
+	plvf[at + sizeof(placement_head)] = 0x01;
+	memcpy(plvf + at + sizeof(placement_head) + 1, placement_tail, sizeof(placement_tail));
+	CHECK(placement_admit(r, plvf, obj_len, &f) == 0 && f.admission == GS_ADA_ANCHOR && f.state == 0 &&
+	      f.site == at + sizeof(placement_head) && f.width == 1 && f.old_bytes[0] == 0x01 && f.new_bytes[0] == 0x00,
+	      "window of ada-placement not located at the changed byte in state 0: %s", err);
+	/* The edit changes exactly that byte, a second apply is refused, and revert gives the image back. */
+	memcpy(plwork, plvf, obj_len);
+	CHECK(gs_ada_edit(&f, plwork, obj_len, 0, fresh(), sizeof(err)) == 0 &&
+	      plwork[f.site] == 0x00 && !memcmp(plwork, plvf, f.site) &&
+	      !memcmp(plwork + f.site + 1, plvf + f.site + 1, obj_len - f.site - 1), "apply did not change exactly the immediate: %s", err);
+	CHECK(placement_admit(r, plwork, obj_len, &f) == 0 && f.state == 1 && f.site == at + sizeof(placement_head),
+	      "patched window not located in state 1: %s", err);
+	{
+		static const char none[] = "0000000000000000000000000000000000000000000000000000000000000000";
+		struct gs_ada_revision row = *r;
+
+		row.input_sha = none;
+		row.output_sha = none;
+		CHECK(refused(gs_ada_admit_in(&row, 1, plwork, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)), "already at output state"),
+		      "a second apply was not refused: %s", err);
+	}
+
+	/* Two windows (a stock one and a second one, and one stock plus one patched): refused. */
+	memcpy(plwork, plvf, obj_len);
+	memcpy(plwork + dup, plvf + at, sizeof(placement_head) + 1 + sizeof(placement_tail));
+	CHECK(refused(placement_admit(r, plwork, obj_len, &f), "unique: 2 windows"), "two stock windows were not refused: %s", err);
+	plwork[dup + sizeof(placement_head)] = 0x00;
+	CHECK(refused(placement_admit(r, plwork, obj_len, &f), "unique: 2 windows"), "a stock and a patched window were not refused: %s", err);
+
+	/* No window: not found. */
+	memset(plwork + at, 0x90, sizeof(placement_head) + 1 + sizeof(placement_tail));
+	memset(plwork + dup, 0x90, sizeof(placement_head) + 1 + sizeof(placement_tail));
+	CHECK(refused(placement_admit(r, plwork, obj_len, &f), "not found"), "a missing window was not reported as not found: %s", err);
+	/* A changed byte inside the window is no window. */
+	memcpy(plwork, plvf, obj_len);
+	plwork[at + 3] ^= 0x10;
+	CHECK(refused(placement_admit(r, plwork, obj_len, &f), "not found"), "a window with a changed head byte was not reported as not found: %s", err);
+
+	/* The full table, not a one-row table: the placement window does not let the row jump the chain. An object that
+	 * carries the placement window and still has an earlier row to apply is taken by the earlier row (table order), and an
+	 * earlier row whose locator is refused blocks the chain; neither falls through to ada-placement. */
+	obj_defaults();
+	build_obj();
+	memcpy(plwork, objimg, obj_len);
+	memcpy(plwork + at, placement_head, sizeof(placement_head));
+	plwork[at + sizeof(placement_head)] = 0x01;
+	memcpy(plwork + at + sizeof(placement_head) + 1, placement_tail, sizeof(placement_tail));
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(plwork, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0 && f.row && !strcmp(f.row->name, "module-gate"),
+	      "a stock object with the placement window was not taken by the gate row first: %s", err);
+	obj_defaults();
+	of.patched_gate = 1;
+	build_obj();
+	memcpy(plwork, objimg, obj_len);
+	memcpy(plwork + at, placement_head, sizeof(placement_head));
+	plwork[at + sizeof(placement_head)] = 0x01;
+	memcpy(plwork + at + sizeof(placement_head) + 1, placement_tail, sizeof(placement_tail));
+	memset(&f, 0, sizeof(f));
+	CHECK(gs_ada_admit(plwork, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)) == 0 && f.row == vf && f.state == 0,
+	      "a gated object with the placement window was not taken by vf-count first: %s", err);
+	obj_defaults();
+	of.patched_gate = 1;
+	of.bad_load = 1;
+	build_obj();
+	memcpy(plwork, objimg, obj_len);
+	memcpy(plwork + at, placement_head, sizeof(placement_head));
+	plwork[at + sizeof(placement_head)] = 0x01;
+	memcpy(plwork + at + sizeof(placement_head) + 1, placement_tail, sizeof(placement_tail));
+	CHECK(refused(gs_ada_admit(plwork, obj_len, GS_ADA_FORWARD, &f, fresh(), sizeof(err)), "anchor ada.vf-count: totalvfs-load:"),
+	      "a refused vf-count locator did not block the chain before ada-placement: %s", err);
+}
+
+static int file_sha(const char *path, char *hex, unsigned char **keep, size_t *keep_size)
+{
+	FILE *fp = fopen(path, "rb");
+	unsigned char *buf;
+	long end;
+
+	if (!fp)
+		return -1;
+	if (fseek(fp, 0, SEEK_END) != 0 || (end = ftell(fp)) <= 0 || fseek(fp, 0, SEEK_SET) != 0) {
+		fclose(fp);
+		return -1;
+	}
+	buf = malloc((size_t)end);
+	if (!buf || fread(buf, 1, (size_t)end, fp) != (size_t)end) {
+		free(buf);
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+	gs_sha256(buf, (size_t)end, SIZE_MAX, hex);
+	if (keep) {
+		*keep = buf;
+		*keep_size = (size_t)end;
+	} else {
+		free(buf);
+	}
+	return 0;
+}
+
+/* The row on the vendor object: exactly one match, the byte changes 01 -> 00, and the whole chain
+ * through the patcher (stock, scheduler, gate, vf-count, ada-placement) ends at the row's output digest;
+ * a second apply is refused and revert gives the plain chain's object back. Needs the object and the built patcher. */
+static void placement_vendor(void)
+{
+	const struct gs_ada_revision *r = shipped("ada-placement"), *vf = shipped("vf-count");
+	const char *bin = getenv("GS_PATCH_BIN"), *tmp = getenv("TMPDIR");
+	char dir[512], cmd[2048], out[4096], hex[65];
+	unsigned char *obj = NULL, *cobj = NULL;
+	size_t size = 0, csize = 0;
+	struct gs_ada_found f;
+	size_t i, hits;
+
+	if (!bin || !*bin)
+		bin = "driver/geforce-sriov-patch";
+	if (!r || !vf || access(vendor_object, R_OK) != 0 || access(bin, X_OK) != 0) {
+		printf("test_patch_ada: skipped: vendor object or patcher not present; ada-placement checks on the vendor object not run\n");
+		return;
+	}
+	if (file_sha(vendor_object, hex, &obj, &size) != 0) {
+		CHECK(0, "vendor object not read");
+		return;
+	}
+	/* The locator finds exactly one window, in the stock state, at the recorded byte. */
+	CHECK(!memcmp(obj + r->site - sizeof(placement_head), placement_head, sizeof(placement_head)) &&
+	      obj[r->site] == 0x01 && !memcmp(obj + r->site + 1, placement_tail, sizeof(placement_tail)),
+	      "the vendor object does not carry the window of ada-placement at 0x%zx", r->site);
+	CHECK(placement_admit(r, obj, size, &f) == 0 && f.state == 0 && f.site == r->site && f.width == 1 && f.function &&
+	      !strcmp(f.function, r->function) && f.function_offset == r->function_offset,
+	      "ada-placement not located once at its recorded byte: %s", err);
+	/* Counted independently over the whole object: the 24-byte window occurs once in the object file. */
+	for (i = 0, hits = 0; i + 24 <= size; i++)
+		if (obj[i] == placement_head[0] && !memcmp(obj + i, placement_head, 19) && obj[i + 19] == 0x01 &&
+		    !memcmp(obj + i + 20, placement_tail, 4))
+			hits++;
+	CHECK(hits == 1, "the window of ada-placement occurs %zu times in the object file, want 1", hits);
+	{
+		/* Copies of the window in the real object: moved, duplicated, stock plus patched, removed. */
+		size_t w = sizeof(placement_head) + 1 + sizeof(placement_tail), at = r->site - sizeof(placement_head);
+		size_t dest = at + 0x40000;
+		unsigned char save[24];
+
+		memcpy(save, obj + at, w);
+		memcpy(obj + dest, save, w);
+		CHECK(refused(placement_admit(r, obj, size, &f), "unique: 2 windows"), "a duplicated window in the real object was not refused: %s", err);
+		obj[dest + sizeof(placement_head)] = r->new_bytes[0];
+		CHECK(refused(placement_admit(r, obj, size, &f), "unique: 2 windows"), "a stock and a patched window in the real object were not refused: %s", err);
+		memset(obj + at, 0x90, w);
+		obj[dest + sizeof(placement_head)] = r->old_bytes[0];
+		CHECK(placement_admit(r, obj, size, &f) == 0 && f.state == 0 && f.site == dest + sizeof(placement_head),
+		      "a moved window in the real object was not found where it went: %s", err);
+		memset(obj + dest, 0x90, w);
+		CHECK(refused(placement_admit(r, obj, size, &f), "not found"), "a removed window in the real object was not reported as not found: %s", err);
+		memcpy(obj + at, save, w);
+		memset(obj + dest, 0, w);
+	}
+	free(obj);
+
+	snprintf(dir, sizeof(dir), "%s/gs-ada-c-XXXXXX", tmp && *tmp ? tmp : "/tmp");
+	if (!mkdtemp(dir)) {
+		CHECK(0, "mkdtemp failed");
+		return;
+	}
+	snprintf(cmd, sizeof(cmd),
+		 "set -e; P=%s; D=%s; "
+		 "$P apply %s $D/s && $P ada apply $D/s $D/g && $P ada apply $D/g $D/p && "
+		 "$P ada apply $D/p $D/c 2>&1",
+		 bin, dir, vendor_object);
+	CHECK(run(cmd, out, sizeof(out)) == 0, "the chain through ada-placement failed: %s", out);
+	CHECK(strstr(out, "revision=ada-placement") != NULL && strstr(out, "admission=digest") != NULL &&
+	      strstr(out, "file_offset=0xd3a86") != NULL, "the patcher did not report the row by digest at 0xd3a86: %s", out);
+	snprintf(cmd, sizeof(cmd), "%s/p", dir);
+	CHECK(file_sha(cmd, hex, NULL, NULL) == 0 && !strcmp(hex, vf->output_sha), "the plain chain's object is not the recorded digest");
+	snprintf(cmd, sizeof(cmd), "%s/c", dir);
+	CHECK(file_sha(cmd, hex, &cobj, &csize) == 0 && !strcmp(hex, r->output_sha), "the output digest %s is not the recorded %s", hex, r->output_sha);
+	if (cobj) {
+		CHECK(csize == size && cobj[r->site] == 0x00 && !memcmp(cobj + r->site - 7, "\xc6\x84\x06\x3a\x4c\x13\x00", 7),
+		      "the output does not carry the immediate 00 at 0x%zx", r->site);
+		free(cobj);
+	}
+	printf("test_patch_ada: ada-placement output sha256 %s\n", r->output_sha);
+	snprintf(cmd, sizeof(cmd), "%s ada apply %s/c %s/c2 2>&1", bin, dir, dir);
+	CHECK(run(cmd, out, sizeof(out)) == 3 && strstr(out, "already at output state") != NULL, "a second apply was not refused: %s", out);
+	snprintf(cmd, sizeof(cmd), "%s/c2", dir);
+	CHECK(access(cmd, F_OK) != 0, "a refused second apply created an output file");
+	/* The recorded intermediate states of the chain (scheduler, gate) are admitted by digest as inputs of their own next
+	 * rows; the placement row is never taken early, and the result is no hybrid. */
+	snprintf(cmd, sizeof(cmd), "%s ada apply %s/s %s/x1 2>&1", bin, dir, dir);
+	CHECK(run(cmd, out, sizeof(out)) == 0 && strstr(out, "revision=module-gate") != NULL && strstr(out, "ada-placement") == NULL,
+	      "the scheduler-only object was not taken by its own next row: %s", out);
+	snprintf(cmd, sizeof(cmd), "%s ada apply %s/g %s/x2 2>&1", bin, dir, dir);
+	CHECK(run(cmd, out, sizeof(out)) == 0 && strstr(out, "revision=vf-count") != NULL && strstr(out, "ada-placement") == NULL,
+	      "the gate object was not taken by vf-count: %s", out);
+	snprintf(cmd, sizeof(cmd), "%s/x2", dir);
+	CHECK(file_sha(cmd, hex, NULL, NULL) == 0 && !strcmp(hex, vf->output_sha), "the gate object's apply is not the plain chain's object");
+	snprintf(cmd, sizeof(cmd), "%s ada revert %s/c %s/r 2>&1", bin, dir, dir);
+	CHECK(run(cmd, out, sizeof(out)) == 0, "revert of ada-placement failed: %s", out);
+	snprintf(cmd, sizeof(cmd), "%s/r", dir);
+	CHECK(file_sha(cmd, hex, NULL, NULL) == 0 && !strcmp(hex, vf->output_sha), "revert did not give the plain chain's object back");
+	/* The object differs from the plain chain's in that one byte only. */
+	snprintf(cmd, sizeof(cmd), "cmp -l %s/p %s/c | wc -l", dir, dir);
+	CHECK(run(cmd, out, sizeof(out)) == 0 && atoi(out) == 1, "the object does not differ in exactly one byte: %s", out);
+	/* The display revision on top of it is the recorded digest. */
+	snprintf(cmd, sizeof(cmd), "%s display apply %s/c %s/d 2>&1", bin, dir, dir);
+	CHECK(run(cmd, out, sizeof(out)) == 0 && strstr(out, "admission=digest") != NULL &&
+	      strstr(out, "output_sha256=48fd6ddd2df13a1131a98facd4a80be1d6d17877eb900f3c945dfa483347627b") != NULL,
+	      "display idx39 on the ada-placement object is not the recorded digest: %s", out);
+	snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+	CHECK(run(cmd, out, sizeof(out)) == 0, "removing the temporary directory failed");
+}
+
+
+/* A row that cannot carry a window (too wide for the window buffer) has no locator; a function name does not matter. */
+static void placement_bad_rows(void)
+{
+	static const char none[] = "0000000000000000000000000000000000000000000000000000000000000000";
+	const struct gs_ada_revision *r = shipped("ada-placement");
+	struct gs_ada_revision bad;
+	struct gs_ada_found f;
+	int k;
+
+	CHECK(r != NULL, "shipped table lacks ada-placement");
+	if (!r)
+		return;
+	obj_defaults();
+	build_obj();
+	for (k = 0; k < 3; k++) {
+		bad = *r;
+		bad.input_sha = bad.output_sha = none;
+		if (k == 0)
+			bad.width = 16;
+		else if (k == 1)
+			bad.function = NULL;
+		else
+			bad.function = "_nv_no_such_function";
+		memset(&f, 0, sizeof(f));
+		CHECK(refused(gs_ada_admit_in(&bad, 1, objimg, obj_len, GS_ADA_ANY, &f, fresh(), sizeof(err)),
+			      k == 0 ? "anchor ada.unknown" : "anchor ada.ada-placement: window:"),
+		      "placement row %d: a width that cannot carry the window has no locator, a function name does not matter: %s", k, err);
+	}
 }
 
 /* Runs cmd through a shell and returns its exit status, with combined output in out. */
@@ -1449,6 +1747,9 @@ int main(void)
 	admission();
 	plugin_locators();
 	object_locators();
+	placement_synthetic();
+	placement_vendor();
+	placement_bad_rows();
 	cli();
 	printf("test_patch_ada: %d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

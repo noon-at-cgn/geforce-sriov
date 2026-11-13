@@ -31,6 +31,7 @@ const char *const gs_nvidia_clients[GS_NVIDIA_CLIENT_MODULES] = { "nvidia_drm", 
 /* One host process through the deadline callback, or the synchronous one when there is none. */
 int gs_host_run(const struct gs_host *h, const char *const argv[], unsigned int ms)
 {
+	gs_notify_extend(ms);
 	if (h->run_deadline)
 		return h->run_deadline(h, argv, ms);
 	return h->run ? h->run(argv) : -ENOSYS;

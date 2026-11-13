@@ -44,7 +44,7 @@ int main(int argc,char **argv)
 {
  unsigned char *p=NULL,*stock=NULL;size_t n=0,sn=0,i;struct gs_patch_info info;struct gs_display_info display;struct gs_ada_found found;const struct gs_ada_revision *r;char err[512]={0},input_hash[65],output_hash[65];int rc=1,w,created=0;
  if(argc==2&&(!strcmp(argv[1],"--help")||!strcmp(argv[1],"-h"))){usage(stdout);rc=0;goto end;}
- if(argc==2&&!strcmp(argv[1],"--version")){puts("geforce-sriov-patch 0.3.0");rc=0;goto end;}
+ if(argc==2&&!strcmp(argv[1],"--version")){puts("geforce-sriov-patch 0.4.0");rc=0;goto end;}
  if(argc>=2&&!strcmp(argv[1],"abi-check"))return gs_modcheck(argc-2,argv+2);
  if(argc>=2&&!strcmp(argv[1],"display")){
   const struct gs_display_recipe *rows;size_t count;

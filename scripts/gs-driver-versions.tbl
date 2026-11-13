@@ -20,9 +20,21 @@
 #   gate_object           ... after module-gate
 #   patched_object        ... after vf-count: the plain build's final object
 #   display_object        ... after idx39: the display build's final object
+#   placement_display_object ... after idx39 on top of the ada-placement row: the final object of an
+#                         Ada + display build. It ends the chain of the plain objects plus this one
+#                         (the ada-placement row is not part of the chain), as display_object ends the
+#                         chain of a display build without an Ada card
+#   placement_object      ... after the ada-placement row, which takes patched_object as its input: the
+#                         final object of a plain build with an Ada card selected
+#   placement_offsets     the one .text offset, zero-based, at which the module of a build with an Ada
+#                         card selected differs from the plain build's, written as plain_offsets is.
+#                         Not measured on a built module: the object's .text is linked into
+#                         nvidia.ko at a fixed distance, which the three plain sites of this block
+#                         fix (object file offset - 0x40 + 0x241c0); the step refuses an Ada build
+#                         whose module differs anywhere else
 #   stock_plugin          SHA-256 of libnvidia-vgpu.so.<host>, unchanged
-#   mixed_plugin          ... after plugin-mixed: the input of plugin-div4, and the installed copy
-#                         of earlier releases (it is replaced, never accepted)
+#   mixed_plugin          ... after plugin-mixed: the input of plugin-div4, an intermediate that is
+#                         never installed
 #   patched_plugin        ... after plugin-div4: the only copy that is installed
 #   plain_offsets         the eight .text offsets, zero-based, ascending, as 0x<lowercase hex>, at
 #                         which the plain build's module differs from NVIDIA's
@@ -35,11 +47,6 @@
 #   profile_plain         evidence profile of the plain build
 #   profile_display       evidence profile of the display build
 #   profile_display_cuda  evidence profile of the display build with host CUDA
-#   owner_c, owner_h,     SHA-256 of driver-patches/fb-owner/gs-fb-owner.c, gs-fb-owner.h and
-#   owner_patch           fb-owner.patch: the owner of the Ada VFs' framebuffer slots as it was
-#                         reviewed for this version. A confirmed build takes no other files
-#   owner_symbols         the kernel symbols nvidia.ko may import with the owner that it does not
-#                         import without it, separated by spaces; anything else refuses the owner
 #   guest_ampere          the guest drivers for an Ampere card, as setup prints them
 #   guest_ada             the guest drivers for an Ada card, as setup prints them
 #
@@ -62,6 +69,9 @@ scheduler_object=ce8a485bfaeebca3a9609f9415a6df81c160a0a53509aec093bc3361a6d1270
 gate_object=f5b788cdb3e06aed18860cc6cf950dcc13143bd831d90d8e9c4bf9e744426f12
 patched_object=946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29
 display_object=83ce12abba0441812aa135d4f099636513d709090c3da8999cda9243bd3b67ff
+placement_object=20eaebcac4f5220d21f64bcd5145143abe8f806a25cb9e249088a1b98df7d157
+placement_display_object=48fd6ddd2df13a1131a98facd4a80be1d6d17877eb900f3c945dfa483347627b
+placement_offsets=0xf7c06
 stock_plugin=7e52b76dc7ca8490e7ffbc1fd724f5db07f3791a3a2ec07f2d595bf05abdcaa7
 mixed_plugin=7ddfad458bbfdb0c4d6902a9e045bd15c84f63aea19314f3d3a60967224b73c6
 patched_plugin=aa4fdeb5288b5e56e7d4972466813d78e10cfb428fcf62fb53b84fec718cf07c
@@ -73,9 +83,5 @@ public=580.159.03
 profile_plain=host-580.159.01-plain
 profile_display=display-580.159.01-idx39
 profile_display_cuda=display-cuda-580.159.01-idx39
-owner_c=5c9925ee306cfd089e1c53ec65f30a05e94315e579af8011fa763347005dfedb
-owner_h=4ce1f94cd1ffa1b62d654e213ac03527c5787b53cd8872c4d342a42cc73fe168
-owner_patch=89f335ba20d186f1238ca1831dc3368b00905abdc872205d2d841e8014811790
-owner_symbols=capable _copy_from_user _copy_to_user __check_object_size mutex_lock mutex_unlock sscanf snprintf _printk strcmp memset memcpy jiffies proc_create remove_proc_entry seq_printf seq_read seq_lseek single_open single_release
 guest_ampere=Linux 580.159.03, Windows 582.53
 guest_ada=Linux 535.230.02 (vGPU 16.9), Windows 539.19 (16.9)

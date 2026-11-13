@@ -11,7 +11,9 @@
  * .rela.text entry 118744 at file 0x63a5c98. Keep the two coordinate spaces apart. */
 static const struct gs_display_recipe recipes[] = {
  { "idx39-580.159.01", "946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29",
-   "83ce12abba0441812aa135d4f099636513d709090c3da8999cda9243bd3b67ff", 0x4f }
+   "83ce12abba0441812aa135d4f099636513d709090c3da8999cda9243bd3b67ff", 0x4f },
+ { "idx39-ada-placement-580.159.01", "20eaebcac4f5220d21f64bcd5145143abe8f806a25cb9e249088a1b98df7d157",
+   "48fd6ddd2df13a1131a98facd4a80be1d6d17877eb900f3c945dfa483347627b", 0x4f }
 };
 static const unsigned char before[] = {0xe8,0,0,0,0};
 static const unsigned char after[] = {0x31,0xc0,0x90,0x90,0x90};

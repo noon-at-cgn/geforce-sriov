@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: MIT
-# geforce-sriov @VERSION@: require successful activation before VM autostart.
+# geforce-sriov @VERSION@: order VM autostart after activation. This never blocks it.
+# After= only orders: autostart waits until geforce-sriov-activate.service has finished, whether it
+# succeeded, failed or was skipped (no GPU selected, geforce_sriov.skip). It does not require the
+# unit. The leading '-' on ExecStartPre makes check's exit status ignored: check only logs which VFs
+# are not ready, in this unit's journal. A guest that uses no vGPU starts in every case.
 [Unit]
-Requires=geforce-sriov-activate.service
 After=geforce-sriov-activate.service
 
 [Service]
-ExecStartPre=@BINDIR@/geforce-sriov check
+ExecStartPre=-@BINDIR@/geforce-sriov check

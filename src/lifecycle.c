@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 /*
- * devices, doctor, status and check: read-only commands over any sysfs root
+ * devices, status and check: read-only commands over any sysfs root
  * (check also runs against a fixture host in the tests). activate (src/activate.c)
  * owns every change to the host.
  *
- * doctor reports what a host needs and what activation would do; status
+ * install --dry-run reports what a host needs and what activation would do; status
  * reports each fact separately; check is the gate before a VM start. None of
  * them writes anything, and none of them treats a record of an earlier run as
  * proof of the current state.
@@ -70,7 +70,7 @@ int gs_cmd_devices(void)
 		printf("10de:%04x %-7s %-6s %s\n", e->device, gs_generation_name(e->generation), e->die, e->name);
 	}
 	printf("\n`install --vfs N` (vfs=N in the config) sets the VF count: 1 up to the card's hardware default, or up\n"
-	       "to %u on an Ada card that reports 1. doctor shows both counts. ARI decoding in the GPU does not work,\n"
+	       "to %u on an Ada card that reports 1. `status` and `install --dry-run` show both counts. ARI decoding in the GPU does not work,\n"
 	       "so above %u VFs the livepatch module geforce_sriov refuses to load when the card's VF layout check fails.\n", GS_DEFAULT_VFS,
 	       GS_DEFAULT_VFS);
 	printf("geforce-sriov does nothing for an ID not in this table. A presented capability alone is not a working vGPU.\n");
@@ -219,6 +219,198 @@ unsigned int gs_laptop_gpus(const char *sys, const struct gs_addr *list, unsigne
 	return k;
 }
 
+int gs_fb_ada_selected(const char *sys, const struct gs_addr *sel, unsigned int n)
+{
+	unsigned int device;
+
+	for (unsigned int i = 0; i < n; i++) {
+		const struct gs_device *e = gs_pf_entry(sys, &sel[i], &device);
+
+		if (e && e->generation == GS_ADA)
+			return 1;
+	}
+	return 0;
+}
+
+int gs_ada_placement_line(const char *sys, const struct gs_addr *pf, unsigned int numvfs, char *line, size_t len)
+{
+	struct gs_addr vf[GS_VFS_MAX];
+	char why[512], ids[96] = "", v[64];
+	int unreadable = 0, fixed = 0;
+
+	if (numvfs > GS_VFS_MAX || gs_vf_list(sys, pf, numvfs, vf, why, sizeof(why)))
+		unreadable = 1;
+	for (unsigned int i = 0; !unreadable && i < numvfs; i++) {
+		size_t n = strlen(ids);
+
+		if (gs_read_dev_attr(sys, vf[i].str, "nvidia/placement_id", v, sizeof(v)) != 0) {
+			unreadable = 1;
+		} else if (strcmp(v, "Not Applicable") != 0) {
+			if (v[0] < '0' || v[0] > '9')
+				unreadable = 1;
+			else if (n < sizeof(ids))
+				snprintf(ids + n, sizeof(ids) - n, "%s%.12s", fixed ? ", " : "", v);
+			fixed = 1;
+		}
+	}
+	if (unreadable) {
+		snprintf(line, len, "VM video memory: placement_id could not be read");
+		return 0;
+	}
+	if (fixed) {
+		snprintf(line, len, "VM video memory: fixed slots (placement_id %s): the loaded nvidia.ko does not carry the Ada placement "
+			 "change. Run sudo geforce-sriov install, then power the machine off and on", ids);
+		return 0;
+	}
+	snprintf(line, len, "VM video memory: taken from free memory when a VM starts (placement_id: Not Applicable)");
+	return 1;
+}
+
+/* printf onto the end of buf (len bytes), cut short when it does not fit. */
+static void add_to(char *buf, size_t len, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+
+static void add_to(char *buf, size_t len, const char *fmt, ...)
+{
+	size_t n = strlen(buf);
+	va_list ap;
+
+	if (n >= len)
+		return;
+	va_start(ap, fmt);
+	vsnprintf(buf + n, len - n, fmt, ap);
+	va_end(ap);
+}
+
+/*
+ * The build record at path is a sign only while the module it names is still installed with the recorded digest,
+ * which is when a restore would still have something to put back. A record of a kernel that is gone, or of a module
+ * that was replaced, stays after a finished uninstall of any version and says nothing. 1 with kernel set.
+ */
+static int record_live(const char *root, const char *path, char *kernel, size_t klen)
+{
+	char want[65], have[65], module[GS_PATH_MAX];
+
+	if (!gs_exists(path) || !gs_record_value(path, "kernel", kernel, klen) || !gs_record_value(path, "module_sha256", want, sizeof(want)) ||
+	    strchr(kernel, '/'))
+		return 0;
+	if (root[0] || gs_nvidia_module_path(kernel, module, sizeof(module)))
+		gs_pathf(module, sizeof(module), "%s/lib/modules/%s/updates/dkms/nvidia.ko", root, kernel);
+	return gs_sha256_file(module, have) == 0 && strcmp(have, want) == 0;
+}
+
+int gs_other_install(const char *root, const char *bindir, char *why, size_t len, char *fix, size_t fixlen)
+{
+	char p[GS_PATH_MAX], dir[GS_PATH_MAX], ver[64] = "", kernel[64], dkms_ver[64] = "", *data;
+	size_t dlen;
+	int found = 0, program = 0;
+	struct dirent *de;
+	DIR *d;
+
+	why[0] = fix[0] = '\0';
+	/* The stamp names the version that installed; the same version is no obstacle. */
+	if (!gs_pathf(p, sizeof(p), "%s%s", root, GS_FORMAT_PATH) && !gs_read_whole(p, &data, &dlen, sizeof(ver) - 1)) {
+		data[strcspn(data, "\n")] = '\0';
+		gs_copy(ver, sizeof(ver), data);
+		free(data);
+		if (strcmp(ver, GS_VERSION) == 0)
+			return 0;
+	}
+	/* The installed program counts only while the manifest lists it and it is unchanged: an uninstall keeps an edited one on purpose. */
+	if (!gs_pathf(p, sizeof(p), "%s%s/geforce-sriov", root, bindir)) {
+		struct manifest *m = calloc(1, sizeof(*m));
+		char target[GS_PATH_MAX], mf[GS_PATH_MAX];
+		struct entry *e = NULL;
+
+		if (m && !gs_pathf(target, sizeof(target), "%s/geforce-sriov", bindir) &&
+		    !gs_pathf(mf, sizeof(mf), "%s%s", root, GS_MANIFEST) && gs_manifest_load(mf, m) == 0)
+			e = gs_manifest_find(m, 'f', target);
+		program = e && gs_manifest_owns(p, e->sha) == OWN_YES;
+		free(m);
+	}
+	if (program)
+		add_to(why, len, "%sthe installed program %s/geforce-sriov", found++ ? "; " : "", bindir);
+	if (!gs_pathf(p, sizeof(p), "%s%s", root, GS_DRIVER_BUILD) && record_live(root, p, kernel, sizeof(kernel))) {
+		add_to(why, len, "%sthe build record %s (kernel %s)", found++ ? "; " : "", GS_DRIVER_BUILD, kernel);
+		add_to(fix, fixlen, "  restore NVIDIA's module for %s: %s/geforce-sriov-driver --restore --kernel %s\n", kernel, bindir, kernel);
+	}
+	if (!gs_pathf(dir, sizeof(dir), "%s%s/%s", root, GS_STATE_DIR, GS_DRIVER_BUILDS_NAME) && (d = opendir(dir))) {
+		while ((de = readdir(d))) {
+			if (de->d_name[0] == '.' || gs_pathf(p, sizeof(p), "%s/%s", dir, de->d_name) ||
+			    !record_live(root, p, kernel, sizeof(kernel)))
+				continue;
+			add_to(why, len, "%sthe build record %s/%s/%s", found++ ? "; " : "", GS_STATE_DIR, GS_DRIVER_BUILDS_NAME, de->d_name);
+			add_to(fix, fixlen, "  restore NVIDIA's module for %s: %s/geforce-sriov-driver --restore --kernel %s\n", kernel, bindir, kernel);
+			}
+		closedir(d);
+	}
+	if (!gs_pathf(p, sizeof(p), "%s/var/lib/dkms/%s", root, GS_DKMS_NAME) && (d = opendir(p))) {
+		while ((de = readdir(d)))
+			if (de->d_name[0] != '.') {
+				gs_copy(dkms_ver, sizeof(dkms_ver), de->d_name);
+				break;
+			}
+		closedir(d);
+		add_to(why, len, "%sthe DKMS registration of %s", found++ ? "; " : "", GS_DKMS_NAME);
+		add_to(fix, fixlen, "  dkms remove %s/%s --all\n", GS_DKMS_NAME, dkms_ver[0] ? dkms_ver : "<version>");
+	}
+	if (!gs_pathf(p, sizeof(p), "%s%s", root, GS_UNIT_WANTS_LIVEPATCH) && gs_exists(p)) {
+		add_to(why, len, "%sthe enabled unit %s", found++ ? "; " : "", GS_UNIT_LIVEPATCH);
+		add_to(fix, fixlen, "  systemctl disable %s %s\n", GS_UNIT_LIVEPATCH, GS_UNIT_ACTIVATE);
+	}
+	if (!gs_pathf(p, sizeof(p), "%s%s/sysinit.target.wants/%s", root, GS_UNIT_DIR, GS_LEGACY_UNIT_PREPARE) && gs_exists(p)) {
+		add_to(why, len, "%sthe enabled unit %s", found++ ? "; " : "", GS_LEGACY_UNIT_PREPARE);
+		add_to(fix, fixlen, "  systemctl disable %s\n", GS_LEGACY_UNIT_PREPARE);
+	}
+	if (found && ver[0]) {
+		char tmp[512];
+
+		snprintf(tmp, sizeof(tmp), "version %s: %s", ver, why);
+		gs_copy(why, len, tmp);
+	}
+	/* With the installed program present its uninstall does all of this; without it the user is given the commands. */
+	if (program)
+		fix[0] = '\0';
+	return found;
+}
+
+void gs_other_install_refusal(const char *root, const char *why, const char *fix)
+{
+	static const char *const keys[] = { "bdfs=", "display=", "host_cuda=", "host_desktop=", "vfs=", "type_ada=", "type_ampere=" };
+	char p[GS_PATH_MAX], *data, *text, *line, *save = NULL;
+	size_t dlen;
+
+	fprintf(stderr, "geforce-sriov: refused, nothing changed: another version of geforce-sriov than %s is installed on this host\n"
+		"(%s). This version does not take it over. Run the installed version's `sudo geforce-sriov uninstall`,\n"
+		"power the machine off and on, then run this install again.\n", GS_VERSION, why);
+	fprintf(stderr, "The installed version's uninstall removes %s (your card selection and settings; a config you edited by hand is\n"
+		"kept). The new install does not know them, so note the settings you want before you uninstall.\n", "/etc/geforce-sriov");
+	/* The file is another version's: read as text, so a key this version does not know cannot hide the settings. */
+	if (gs_pathf(p, sizeof(p), "%s%s", root, GS_CONFIG_PATH) || gs_read_whole(p, &data, &dlen, 65536 + 1)) {
+		fprintf(stderr, "%s could not be read (it may be missing); the settings are not shown.\n", GS_CONFIG_PATH);
+	} else if (!(text = malloc(dlen + 1))) {
+		free(data);
+	} else {
+		unsigned int shown = 0;
+
+		memcpy(text, data, dlen);
+		text[dlen] = '\0';
+		free(data);
+		fprintf(stderr, "The installed settings (%s):\n", GS_CONFIG_PATH);
+		for (line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
+			for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++)
+				if (strncmp(line, keys[k], strlen(keys[k])) == 0) {
+					fprintf(stderr, "  %s\n", line);
+					shown++;
+					break;
+				}
+		if (!shown)
+			fprintf(stderr, "  (none of bdfs, display, host_cuda, host_desktop, vfs, type_ada or type_ampere is set)\n");
+		free(text);
+	}
+	if (fix[0])
+		fprintf(stderr, "If that program is gone, clear what is named above by hand, as root, then power the machine off and on:\n%s", fix);
+}
+
 int gs_d3cold_usage(void)
 {
 	fprintf(stderr, "geforce-sriov: --disable-d3cold requires a selected laptop GPU. Nothing changed.\n"
@@ -235,7 +427,7 @@ static void str_add(char *buf, size_t len, const char *s)
 }
 
 void gs_d3cold_why(char *buf, size_t len, const struct gs_addr *laptops, unsigned int n, const struct gs_addr *sel,
-		   unsigned int nsel, const struct gs_addr *rel, unsigned int nrel, const char *indent)
+		   unsigned int nsel, const char *indent)
 {
 	unsigned int i;
 
@@ -256,10 +448,6 @@ void gs_d3cold_why(char *buf, size_t len, const struct gs_addr *laptops, unsigne
 	for (i = 0; i < nsel; i++) {
 		str_add(buf, len, " --device ");
 		str_add(buf, len, sel[i].str);
-	}
-	for (i = 0; i < nrel; i++) {
-		str_add(buf, len, " --boot-display-release ");
-		str_add(buf, len, rel[i].str);
 	}
 	str_add(buf, len, " --disable-d3cold\n");
 	str_add(buf, len, indent);
@@ -672,6 +860,8 @@ static enum gs_build_state build_read(const char *record, const char *release, c
 			b->host_cuda = 0;
 		else if (strcmp(line, "host_cuda=1") == 0)
 			b->host_cuda = 1;
+		else if (strncmp(line, "client_accept=", 14) == 0 && strspn(line + 14, "0123456789.") == strlen(line + 14))
+			gs_copy(b->client_accept, sizeof(b->client_accept), line + 14);
 	}
 	free(data);
 	if (strcmp(b->rec_kernel, release) != 0)
@@ -734,7 +924,7 @@ int gs_loaded_not_installed(const char *sysroot, const struct gs_build_src *src)
 }
 
 /*
- * The sentence doctor, activate and check print: 0 when the module is the driver step's build. A
+ * The sentence status, activate and check print: 0 when the module is the driver step's build. A
  * mismatch names both identities, the module's and the recorded one.
  */
 int gs_build_line(const struct gs_build *b, char *line, size_t len)

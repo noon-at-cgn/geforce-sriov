@@ -50,10 +50,12 @@ fx_stub() {
 	chmod 0755 "$path"
 }
 
-# A .text image of the size the plain gate needs, with its eight bytes set when patched.
+# A .text image of the size the plain gate needs, with its eight bytes set when patched, and with
+# the one that the Ada placement change adds when the third argument is 1.
 fx_plain_text() {
 	path=$1
 	patched=$2
+	ada=${3:-0}
 	truncate -s 0xd89671 "$path" 2>/dev/null || {
 		# truncate(1) is not POSIX; fall back to dd.
 		dd if=/dev/zero of="$path" bs=1 count=0 seek=$((0xd89671)) status=none
@@ -62,6 +64,9 @@ fx_plain_text() {
 	for at in 0x14a7c4 0x14a7c5 0x14a7c6 0x14a7c7 0xa16708 0xa16709 0xd8966f 0xd89670; do
 		printf '\220' | dd of="$path" bs=1 seek=$((at)) conv=notrunc status=none
 	done
+	[ "$ada" = 1 ] || return 0
+	at=0xf7c06
+	printf '\220' | dd of="$path" bs=1 seek=$((at)) conv=notrunc status=none
 }
 
 fx_init() {
@@ -111,15 +116,22 @@ esac
 base=${output##*/}
 base=${base%.out}
 case $base in
-	scheduler|module-gate|vf-count|plugin-mixed|plugin-div4|display-idx39) stage=$base ;;
+	scheduler|module-gate|vf-count|ada-placement|plugin-mixed|plugin-div4|display-idx39) stage=$base ;;
 	scheduler) stage=scheduler ;;
 	gate) stage=module-gate ;;
 	patched) stage=vf-count ;;
+	placed) stage=ada-placement ;;
 	patched39) stage=display-idx39 ;;
 	patched-plugin.mixed) stage=plugin-mixed ;;
 	patched-plugin) stage=plugin-div4 ;;
 	*) stage=scheduler ;;
 esac
+printf '%s\n' "$stage" >>"$fx/stages.log"
+# A fixture can make one revision fail to find its anchors, as a driver that the patch does not fit would.
+if [ -f "$fx/refuse-stage" ] && [ "$stage" = "$(cat "$fx/refuse-stage")" ]; then
+	printf 'geforce-sriov-patch: anchor %s: %s\n' "$stage" "$(cat "$fx/refuse-text" 2>/dev/null || echo 'the recorded context was not found')" >&2
+	exit 3
+fi
 case $base in
 	patched|patched39)
 		if [ "$mode" = elf ] && [ -f "$fx/objects/final-object" ]; then
@@ -127,7 +139,7 @@ case $base in
 		else
 			case $key in
 				gate-object) printf 'patched-object\n' >"$output" ;;
-				patched-object) printf 'patched39-object\n' >"$output" ;;
+				patched-object|placed-object) printf 'patched39-object\n' >"$output" ;;
 				*) cp "$input" "$output" ;;
 			esac
 		fi ;;
@@ -141,6 +153,7 @@ case $base in
 			case $key in
 				stock-object) printf 'scheduler-object\n' >"$output" ;;
 				scheduler-object) printf 'gate-object\n' >"$output" ;;
+				patched-object) printf 'placed-object\n' >"$output" ;;
 				stock-plugin) printf 'mixed-plugin\n' >"$output" ;;
 				mixed-plugin) printf 'patched-plugin\n' >"$output" ;;
 				*) cp "$input" "$output" ;;
@@ -173,6 +186,7 @@ if [ -z "\$d" ] && [ "\$mode" = known ]; then
 		scheduler-object) d=ce8a485bfaeebca3a9609f9415a6df81c160a0a53509aec093bc3361a6d12701 ;;
 		gate-object) d=f5b788cdb3e06aed18860cc6cf950dcc13143bd831d90d8e9c4bf9e744426f12 ;;
 		patched-object) d=946b27b8bcf0f08285335f47904516860c65b726619e5a36d89785981c70ba29 ;;
+		placed-object) d=20eaebcac4f5220d21f64bcd5145143abe8f806a25cb9e249088a1b98df7d157 ;;
 		stock-plugin) d=7e52b76dc7ca8490e7ffbc1fd724f5db07f3791a3a2ec07f2d595bf05abdcaa7 ;;
 		mixed-plugin) d=7ddfad458bbfdb0c4d6902a9e045bd15c84f63aea19314f3d3a60967224b73c6 ;;
 		patched-plugin) d=aa4fdeb5288b5e56e7d4972466813d78e10cfb428fcf62fb53b84fec718cf07c ;;
@@ -273,6 +287,16 @@ EOF
 +#define KMALLOC_LIMIT 131072
 EOF
 	printf '/* fixture allocation */\n#define KMALLOC_LIMIT 8192\n' >"$FX/src/nvidia/os-interface.c"
+	# The patch that makes nvidia.ko accept the second package's version: its marker takes the version.
+	cat >"$FX/patchdir/client-accept.patch" <<'EOF'
+--- a/nvidia/nv-version.c
++++ b/nvidia/nv-version.c
+@@ -1,2 +1,3 @@
+ /* fixture version check */
++#define GS_CLIENT_ACCEPT "@GS_CLIENT_ACCEPT@"
+ int fixture_check;
+EOF
+	printf '/* fixture version check */\nint fixture_check;\n' >"$FX/src/nvidia/nv-version.c"
 	# Header tree the script and the ABI gate read.
 	mkdir -p "$FX/root/lib/modules/$kdir/build"
 	printf '\n' >"$FX/root/lib/modules/$kdir/build/Makefile"
@@ -351,6 +375,8 @@ for number, (stage, name, inside) in enumerate(sites, 1):
     text[at:at + 2] = b'\x90\x90'
     open(objects + ('/patched.text' if number == 3 else '/stage%d.text' % number), 'wb').write(text)
     rows.append('%s %s 0x%x 0x%x' % (stage, name, inside, text_off + at))
+for stage in ('ada-placement',):
+    rows.append('%s f1 0 0x%x' % (stage, text_off + syms['f1']))
 open(table, 'w').write('\n'.join(rows) + '\n')
 PYSHIFT
 		for number in 1 2; do
@@ -499,247 +525,190 @@ record_set() {
 	sed "s|^$1=.*|$1=$2|" "$FX/root/var/lib/geforce-sriov/driver-build" >"$FX/record.edit" &&
 		cp "$FX/record.edit" "$FX/root/var/lib/geforce-sriov/driver-build"
 }
-
-# --- the owner of the Ada VFs' framebuffer slots (stage B of the build) -------
-
-# An ELF fixture host with the owner's files beside the source patches, and the module that the
-# build with the owner leaves. $1: the object the module's closed part is linked from; $2: the
-# owner's entry points that module defines; $3: a kernel symbol it imports.
-fx_owner_files() {
-	mkdir -p "$FX/patchdir/fb-owner"
-	printf '/* fixture owner */\n' >"$FX/patchdir/fb-owner/gs-fb-owner.c"
-	printf '/* fixture owner header */\n' >"$FX/patchdir/fb-owner/gs-fb-owner.h"
-	printf 'int open_layer;\n' >"$FX/src/nvidia/nv.c"
-	printf 'int pci_layer;\n' >"$FX/src/nvidia/nv-pci.c"
-	printf 'previous\n' >"$FX/src/nvidia/os-interface.o"
-	cat >"$FX/patchdir/fb-owner/fb-owner.patch" <<'PATCH'
---- a/nvidia/nv.c
-+++ b/nvidia/nv.c
-@@ -1 +1,2 @@
- int open_layer;
-+int gs_fb_called;
---- a/nvidia/nvidia-sources.Kbuild
-+++ b/nvidia/nvidia-sources.Kbuild
-@@ -1 +1,2 @@
- obj-m += nvidia.o
-+NVIDIA_SOURCES += nvidia/gs-fb-owner.c
-PATCH
-	{
-		printf 'extern int %s(int);\n' "$3"
-		printf 'const char gs_fb_mark[] = "geforce-sriov-fb-abi=1;";\n'
-		for entry in $2; do
-			printf '__attribute__((noinline)) int %s(int x) { return %s(x) + 1; }\n' "$entry" "$3"
-		done
-	} >"$FX/objects/owner.c"
-	"${CC:-gcc}" -O1 -c -fno-asynchronous-unwind-tables -fno-stack-protector "$FX/objects/owner.c" -o "$FX/objects/owner.o"
-	"${LD:-ld}" -r "$FX/objects/$1" "$FX/objects/owner.o" -o "$FX/objects/owner.ko"
-	objcopy --add-section ".modinfo=$FX/objects/core.modinfo" \
-		--add-section ".note.gnu.build-id=$FX/objects/buildid.bin" \
-		--add-section "__versions=$FX/objects/core.versions" \
-		"$FX/objects/owner.ko" "$FX/modules/nvidia-owner.ko"
+# Take a field out of the build record, as a build of an earlier release left it.
+record_unset() {
+	sed "/^$1=/d" "$FX/root/var/lib/geforce-sriov/driver-build" >"$FX/record.edit" &&
+		cp "$FX/record.edit" "$FX/root/var/lib/geforce-sriov/driver-build"
 }
-owner_entries='gs_fb_init gs_fb_exit gs_fb_ioctl_pre gs_fb_ioctl_post gs_fb_file_closed gs_fb_gpu_remove'
-installed_core() { printf '%s\n' "$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko"; }
-kept_tree() { printf '%s\n' "$FX/root/var/lib/geforce-sriov/build/$kernel"; }
-# A build with the owner that is not accepted: $1 names the case, $2 is what the record must say.
-# The verified module is installed, the tree is as it was verified, and the run succeeds.
-owner_falls_back() {
-	fx_exec unknown
-	check "$1: the run succeeds" test "$rc" -eq 0
-	check "$1: a warning says the module is installed without the owner" contains "$out" \
-		'warning: nvidia.ko is installed without the owner of the Ada framebuffer slots: '
-	check "$1: the reason" contains "$(record_field fb_owner_reason)" "$2"
-	check "$1: the record says so" test "$(record_field fb_owner)/$(record_field fb_owner_wanted)" = 0/1
-	check "$1: the verified module is the one installed" test \
-		"$(sha256sum "$(installed_core)" | cut -d' ' -f1)" = "$(sha256sum "$FX/modules/nvidia.ko" | cut -d' ' -f1)"
-	check "$1: the tree that is kept is the verified one" test \
-		"$(cat "$(kept_tree)/nvidia/nv.c")/$(test -e "$(kept_tree)/nvidia/gs-fb-owner.c" || echo gone)" = 'int open_layer;/gone'
+
+# --- the Ada placement change on an ELF fixture host, and an Ada card with a driver it cannot be placed on ----
+
+# One byte of the .text of a module, as two hex digits (the placement offset is 0x90 in an Ada build).
+text_byte() {
+	objcopy -O binary -j .text "$1" "$FX/tmp/module.text" 2>/dev/null &&
+		od -An -tx1 -j "$(($2))" -N 1 "$FX/tmp/module.text" | tr -d ' \n'
 }
-case_owner() {
-	fx_init "$FXROOT/owner" elf
+
+case_placement_elf() {
+	fx_init "$FXROOT/placement-elf" elf
 	if ! fx_elf_files plain; then
 		say 'SKIP: no C compiler or linker for the ELF fixtures'
 		return 0
 	fi
-	fx_owner_files final-object "$owner_entries" capable
+	# The module of an Ada build: the plain one with the one byte of the placement change.
+	cp "$FX/modules/nvidia.ko" "$FX/modules/nvidia.ko.plain"
+	fx_plain_text "$FX/objects/ada.text" 1 1
+	objcopy --update-section .text="$FX/objects/ada.text" "$FX/modules/nvidia.ko.plain" "$FX/modules/nvidia.ko"
+	cp "$FX/modules/nvidia.ko" "$FX/modules/nvidia.ko.ada"
+	installed=$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko
+	# An unrecorded driver whose placement window is found: the Ada build, with the byte rewritten.
+	fx_exec unknown --ada-selected
+	check "ada elf: installs" test "$rc" -eq 0
+	check "ada elf: the installed module carries the placement byte rewritten" test "$(text_byte "$installed" 0xf7c06)" = 90
+	check "ada elf: one build" test "$(printf '%s\n' "$out" | grep -c "^+ 'make' ")" -eq 1
+	# The record names it, and a build for another value is made again.
+	check "ada elf: said" contains "$out" 'geforce-sriov-driver: the build record names ada_placement=1'
+	check "ada elf: the record names ada_placement=1" test "$(record_field ada_placement)" = 1
+	check "ada elf: the record has no fb_placement key" test -z "$(record_field fb_placement)$(record_field fb_placement_setting)$(record_field fb_placement_measured)"
+	check "ada elf: the row is in the record, admitted by its window" test "$(record_field patch_ada_placement_admission)" = anchor
+	fx_exec unknown --ada-selected
+	check "ada elf, again: nothing to do" contains "$out" 'already prepared for'
+	# No Ada card selected: the row is not run, and a module that carries its offset is not the build of this request.
+	: >"$FX/stages.log"
 	fx_exec unknown
-	check "owner: installs" test "$rc" -eq 0
-	check "owner: the files are not the recorded ones, on a build that is not confirmed: taken as they are, and said" contains "$out" \
-		'the framebuffer owner is not recorded for driver 580.159.01; it is built as it is'
-	check "owner: the closed functions were compared" contains "$out" 'functions of the closed object that the modules name are the same bytes in both'
-	check "owner: said" contains "$out" 'nvidia.ko carries the owner of the Ada framebuffer slots (anchor)'
-	check "owner: two builds" test "$(printf '%s\n' "$out" | grep -c "^+ 'make' ")" -eq 2
-	check "owner: the record" test \
-		"$(record_field fb_owner)/$(record_field fb_owner_wanted)/$(record_field fb_owner_admission)/$(record_field fb_owner_abi)" = 1/1/anchor/1
-	check "owner: the record names the files" test "$(record_field fb_owner_patch_sha256)" = \
-		"$(sha256sum "$FX/patchdir/fb-owner/fb-owner.patch" | cut -d' ' -f1)"
-	check "owner: the record keeps the digest of the verified text" test "$(record_field base_text_sha256 | wc -c)" -eq 65
-	check "owner: the module with the owner is the one installed" grep -aqF 'geforce-sriov-fb-abi=1;' "$(installed_core)"
-	check "owner: the tree that is kept has the owner" test -f "$(kept_tree)/nvidia/gs-fb-owner.c" -a -f "$(kept_tree)/common/inc/gs-fb-owner.h"
+	check "no Ada card: a module with the placement offset is refused" contains "$out" \
+		'module .text differences are not the eight expected offsets; first unexpected offset: 0xf7c06'
+	check "no Ada card: the row was not run on the way" not_contains "$(cat "$FX/stages.log")" ada-placement
+	# The module of a build with no Ada card: the same, without the changed byte.
+	cp "$FX/modules/nvidia.ko.plain" "$FX/modules/nvidia.ko"
+	: >"$FX/stages.log"
 	fx_exec unknown
-	check "owner, again: nothing to do" contains "$out" 'already prepared for'
-	# A newer package whose owner changed: the installed module was built with other files, so it
-	# is built again, once. The same when the record says the owner's interface is another.
-	printf '/* a later revision */\n' >>"$FX/patchdir/fb-owner/gs-fb-owner.c"
+	check "no Ada card: built again" contains "$out" \
+		'the installed nvidia.ko was built with ada_placement=1 and ada_placement=0 is asked for; the modules are built again'
+	check "no Ada card: the record" test "$(record_field ada_placement)" = 0
+	check "no Ada card: the installed module has no placement byte" test "$(text_byte "$installed" 0xf7c06)" = 00
+	check "no Ada card: the row was not run" not_contains "$(cat "$FX/stages.log")" ada-placement
+	check "no Ada card: the plain chain was run" contains "$(cat "$FX/stages.log")" vf-count
+	check "no Ada card: no row in the record" test -z "$(record_field patch_ada_placement_admission)"
 	fx_exec unknown
-	check "owner changed: built again" contains "$out" \
-		'the owner of the Ada framebuffer slots in this package is not the one the installed nvidia.ko was built with; the modules are built again'
-	check "owner changed: not the shortcut" not_contains "$out" 'already prepared for'
-	check "owner changed: the module carries the owner" contains "$out" 'nvidia.ko carries the owner of the Ada framebuffer slots (anchor)'
-	check "owner changed: the record names the new file" test "$(record_field fb_owner_c_sha256)" = \
-		"$(sha256sum "$FX/patchdir/fb-owner/gs-fb-owner.c" | cut -d' ' -f1)"
-	fx_exec unknown
-	check "owner changed, again: nothing to do" contains "$out" 'already prepared for'
-	record_set fb_owner_abi 0
-	fx_exec unknown
-	check "another interface in the record: built again" not_contains "$out" 'already prepared for'
-	check "another interface in the record: the record is current" test "$(record_field fb_owner_abi)" = 1
-	fx_exec unknown
-	check "another interface in the record, again: nothing to do" contains "$out" 'already prepared for'
-	# Without the owner on request: built again, and said once without a warning.
-	fx_exec unknown --no-fb-owner
-	check "owner off: built again" not_contains "$out" 'already prepared for'
-	check "owner off: said, and no warning" test "$(printf '%s\n' "$out" | grep -c 'without the owner of the Ada framebuffer slots')/$(printf '%s\n' "$out" | grep -c 'warning: nvidia.ko')" = 1/0
-	check "owner off: the record" test "$(record_field fb_owner)/$(record_field fb_owner_wanted)" = 0/0
-	check "owner off: the module without the owner is installed" test \
-		"$(sha256sum "$(installed_core)" | cut -d' ' -f1)" = "$(sha256sum "$FX/modules/nvidia.ko" | cut -d' ' -f1)"
-	fx_exec unknown --no-fb-owner
-	check "owner off, again: nothing to do" contains "$out" 'already prepared for'
-	fx_exec unknown
-	check "owner wanted again: built again" contains "$out" 'nvidia.ko carries the owner'
-	# A build that carries test code (the hook proof) is replaced, whatever else its record says.
-	printf 'test_only=kofb-hook-proof\n' >>"$FX/root/var/lib/geforce-sriov/driver-build"
-	fx_exec unknown
-	check "test build: replaced" contains "$out" 'the installed build carries test code (kofb-hook-proof); the modules are built again'
-	check "test build: the new record has no such line" test -z "$(record_field test_only)"
-
-	# Each way the build with the owner can be wrong ends with the verified module installed.
-	fx_init "$FXROOT/owner-entry" elf
+	check "no Ada card, again: nothing to do" contains "$out" 'already prepared for'
+	fx_exec unknown --fb-placement default
+	check "the removed option is refused" test "$rc" -eq 2
+	check "the removed option: the refusal leaves the record" test "$(record_field ada_placement)" = 0
+	# An Ada card, with a module that lacks the placement offset: the row is expected, and missing.
+	: >"$FX/stages.log"
+	fx_exec unknown --ada-selected
+	check "ada: a module without the placement offset is refused" contains "$out" \
+		'module .text differences are not the eight expected offsets and the one that the Ada placement change adds; first unexpected offset: none (expected offset missing)'
+	check "ada: the row was run after vf-count" contains \
+		"$(grep -E '^(vf-count|ada-placement)' "$FX/stages.log" | tr '\n' ' ')" 'vf-count ada-placement '
+	cp "$FX/modules/nvidia.ko.ada" "$FX/modules/nvidia.ko"
+	fx_exec unknown --ada-selected
+	check "ada again: built again" not_contains "$out" 'already prepared for'
+	check "ada again: the record" test "$(record_field ada_placement)" = 1
+	# An unrecorded driver whose placement window is missing: refused with exit 3, the recommended driver named, nothing installed.
+	fx_init "$FXROOT/placement-elf-missing" elf
 	fx_elf_files plain || return 0
-	fx_owner_files final-object "${owner_entries% gs_fb_gpu_remove}" capable
-	owner_falls_back "owner without an entry point" 'the module built with it does not define gs_fb_gpu_remove'
+	printf 'ada-placement\n' >"$FX/refuse-stage"
+	fx_exec unknown --ada-selected
+	check "ada elf, window missing: refused with exit 3" test "$rc" -eq 3
+	check "ada elf, window missing: says why" contains "$out" \
+		"the VMs of an Ada card cannot be placed from free video memory with driver 580.159.01: the code window of the placement change was not found in the driver."
+	check "ada elf, window missing: names the recommended driver" contains "$out" \
+		"Install NVIDIA's vGPU host driver 580.159.01, the recommended confirmed version, and run this again; nothing was installed"
+	check "ada elf, window missing: nothing installed" test ! -e "$FX/root/var/lib/geforce-sriov/driver-build"
+	check "ada elf, window missing: no fallback to fixed slots" not_contains "$out" 'built again'
+	# A window found more than once is not "not found".
+	printf 'unique: 2 windows of ada-placement in .text (want 1)\n' >"$FX/refuse-text"
+	fx_exec unknown --ada-selected
+	check "ada elf, window twice: refused with exit 3" test "$rc" -eq 3
+	check "ada elf, window twice: says found more than once" contains "$out" "was found more than once in the driver."
+	check "ada elf, window twice: does not say not found" not_contains "$out" "placement change was not found"
+	rm -f "$FX/refuse-text"
+	# Without an Ada card the same driver builds: the row is not run.
 	fx_exec unknown
-	check "owner without an entry point, again: not built again for the same request" contains "$out" 'already prepared for'
-	check "owner without an entry point: the record names the files that were tried" test "$(record_field fb_owner_c_sha256)" = \
-		"$(sha256sum "$FX/patchdir/fb-owner/gs-fb-owner.c" | cut -d' ' -f1)"
-	# The package now has an owner that may be accepted: the build is tried again.
-	fx_owner_files final-object "$owner_entries" capable
-	printf '/* a later revision */\n' >>"$FX/patchdir/fb-owner/gs-fb-owner.c"
-	fx_exec unknown
-	check "an owner that was refused, and a newer one: built again, with the owner" contains "$out" 'nvidia.ko carries the owner'
+	check "no Ada card, window missing: the same driver installs" test "$rc" -eq 0
+}
 
-	fx_init "$FXROOT/owner-closed" elf
-	fx_elf_files plain || return 0
-	# The same object with one byte of its first function changed.
-	python3 - "$FX/objects/patched.text" "$FX/objects/changed.text" <<'PY'
-import sys
-text = bytearray(open(sys.argv[1], 'rb').read())
-text[0] ^= 0xff
-open(sys.argv[2], 'wb').write(text)
-PY
-	objcopy --update-section .text="$FX/objects/changed.text" "$FX/objects/compiled-object" "$FX/objects/changed-object"
-	fx_owner_files changed-object "$owner_entries" capable
-	owner_falls_back "closed code changed" "NVIDIA's closed code is not the same in the module with it"
-
-	fx_init "$FXROOT/owner-import" elf
-	fx_elf_files plain || return 0
-	fx_owner_files final-object "$owner_entries" klp_enable_patch
-	owner_falls_back "an import that is not on the list" 'imports klp_enable_patch, which is not on the list recorded for it'
-
-	fx_init "$FXROOT/owner-object" elf
-	fx_elf_files plain || return 0
-	fx_owner_files final-object "$owner_entries" capable
-	: >"$FX/owner-extra-object"
-	owner_falls_back "another object changed" 'changed an object it has no business with: ./nvidia/os-interface.o'
-
-	fx_init "$FXROOT/owner-compile" elf
-	fx_elf_files plain || return 0
-	fx_owner_files final-object "$owner_entries" capable
-	: >"$FX/owner-build-fails"
-	owner_falls_back "the owner does not compile" 'it did not compile'
-
-	# The same on a display build: the companion modules and the symbol table that the failed build
-	# left half written are the verified ones again, so the ABI check passes and they are installed.
-	fx_init "$FXROOT/owner-compile-display" elf
-	fx_elf_files display || return 0
-	fx_owner_files final-object "$owner_entries" capable
-	: >"$FX/owner-build-fails"
-	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
-	check "the owner does not compile, display build: the run succeeds" test "$rc" -eq 0
-	check "the owner does not compile, display build: the reason" contains "$(record_field fb_owner_reason)" 'it did not compile'
-	check "the owner does not compile, display build: the verified core is installed" test \
-		"$(sha256sum "$(installed_core)" | cut -d' ' -f1)" = "$(sha256sum "$FX/modules/nvidia.ko" | cut -d' ' -f1)"
-	for name in nvidia-modeset nvidia-drm; do
-		check "the owner does not compile, display build: the verified $name is installed" test \
-			"$(sha256sum "$FX/root/lib/modules/$kdir/updates/dkms/$name.ko" | cut -d' ' -f1)" = "$(sha256sum "$FX/modules/$name.ko" | cut -d' ' -f1)"
-	done
-	check "the owner does not compile, display build: no half written symbol table is kept" not_contains \
-		"$(cat "$(kept_tree)/Module.symvers" 2>/dev/null)" 'half written'
-
-	# Without python3 the owner cannot be added or checked: the verified module, and the reason.
-	fx_init "$FXROOT/owner-python" elf
-	fx_elf_files plain || return 0
-	fx_owner_files final-object "$owner_entries" capable
-	printf '#!/bin/sh\nexit 127\n' >"$FX/bin/python3"
-	chmod +x "$FX/bin/python3"
-	owner_falls_back "no python3" 'python3 is not installed'
-	check "no python3: one build only" test "$(printf '%s\n' "$out" | grep -c "^+ 'make' ")" -eq 1
-
-	# The ABI check refuses the module that was built with the owner: the verified one is checked and installed.
-	fx_init "$FXROOT/owner-abi" elf
-	fx_elf_files plain || return 0
-	fx_owner_files final-object "$owner_entries" capable
-	python3 - "$FX/objects/owner.modinfo" <<'PY'
-import sys
-fields = ['vermagic=other SMP mod_unload', 'version=580.159.01', 'license=NVIDIA']
-open(sys.argv[1], 'wb').write(b''.join(f.encode() + b'\0' for f in fields))
-PY
-	objcopy --update-section ".modinfo=$FX/objects/owner.modinfo" "$FX/modules/nvidia-owner.ko" "$FX/modules/nvidia-owner.ko.new"
-	mv "$FX/modules/nvidia-owner.ko.new" "$FX/modules/nvidia-owner.ko"
-	owner_falls_back "the ABI check refuses the module with the owner" 'the ABI check refused the modules built with it'
-	check "the ABI check refuses the module with the owner: checked twice" test "$(printf '%s\n' "$out" | grep -c "abi-check")" -ge 2
-
-	fx_init "$FXROOT/owner-hunk" elf
-	fx_elf_files plain || return 0
-	fx_owner_files final-object "$owner_entries" capable
-	printf 'int another_open_layer;\n' >"$FX/src/nvidia/nv.c"
-	fx_exec unknown
-	check "a hunk that does not match: the run succeeds" test "$rc" -eq 0
-	check "a hunk that does not match: the reason" contains "$(record_field fb_owner_reason)" \
-		'its hunks do not match the open layer of driver 580.159.01 exactly once'
-	check "a hunk that does not match: the verified module is installed" test \
-		"$(sha256sum "$(installed_core)" | cut -d' ' -f1)" = "$(sha256sum "$FX/modules/nvidia.ko" | cut -d' ' -f1)"
-
-	# A confirmed build takes only the files that are recorded for its version.
-	fx_init "$FXROOT/owner-confirmed" marker
+# An Ada card is never built without the placement change: when its byte patch cannot be applied to
+# the driver, the step stops and names the confirmed driver to use, and nothing is installed. A build
+# with no Ada card does not run the row at all.
+case_ada_refusals() {
+	fx_init "$FXROOT/ada-anchor" marker
 	fx_marker_files
-	mkdir -p "$FX/patchdir/fb-owner"
-	printf 'other\n' >"$FX/patchdir/fb-owner/gs-fb-owner.c"
-	printf 'int open_layer;\n' >"$FX/src/nvidia/nv.c"
-	printf 'int pci_layer;\n' >"$FX/src/nvidia/nv-pci.c"
-	cp "$here/../../driver-patches/fb-owner/gs-fb-owner.h" "$here/../../driver-patches/fb-owner/fb-owner.patch" "$FX/patchdir/fb-owner/"
+	printf 'ada-placement\n' >"$FX/refuse-stage"
+	# The recorded digests are all known: the row is run in the staged build, and it does not apply.
+	fx_exec known --driver-file "$FX/host.run" --ada-selected
+	check "ada, anchor not found (staged build): refused with exit 3" test "$rc" -eq 3
+	check "ada, anchor not found (staged build): says why and names the recommended driver" contains "$out" \
+		"the VMs of an Ada card cannot be placed from free video memory with driver 580.159.01: the placement change did not apply to the driver. Install NVIDIA's vGPU host driver 580.159.01, the recommended confirmed version, and run this again; nothing was installed"
+	check "ada, anchor not found (staged build): no fallback to fixed slots" not_contains "$out" 'built again'
+	check "ada, anchor not found (staged build): nothing installed" test \
+		"$(exists "$FX/root/var/lib/geforce-sriov/driver-build" && echo record)$(exists "$FX/root/etc/modprobe.d/geforce-sriov-nvidia.conf" && echo config)$(exists "$FX/root/usr/lib/x86_64-linux-gnu/libnvidia-vgpu.so.580.159.01.geforce-sriov" && echo plugin)" = ''
+	check "ada, anchor not found (staged build): the module is untouched" test \
+		"$(cat "$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko")" = "$(printf 'text=BBBB\nid=installed-id\n')"
+	# Digests the table does not know: the anchor preflight runs the row first.
+	fx_exec unknown --ada-selected
+	check "ada, anchor not found (preflight): refused with exit 3" test "$rc" -eq 3
+	check "ada, anchor not found (preflight): the failed anchor is named" contains "$out" 'preflight ada-placement: geforce-sriov-patch: anchor ada-placement'
+	check "ada, anchor not found (preflight): says why and names the recommended driver" contains "$out" \
+		"the code window of the placement change was not found in the driver. Install NVIDIA's vGPU host driver 580.159.01, the recommended confirmed version"
+	check "ada, anchor not found (preflight): nothing installed" test ! -e "$FX/root/var/lib/geforce-sriov/driver-build"
+	# Another row failing is the plain refusal, not a placement one.
+	printf 'vf-count\n' >"$FX/refuse-stage"
+	fx_exec unknown --ada-selected
+	check "other anchor not found: refused" test "$rc" -eq 3
+	check "other anchor not found: not the placement message" not_contains "$out" 'VMs of an Ada card'
+	# A build with no Ada card does not run the row: the same driver builds.
+	printf 'ada-placement\n' >"$FX/refuse-stage"
+	rm -f "$FX/AAAA.text"
+	fx_plain_text "$FX/AAAA.text" 1
 	fx_exec known --driver-file "$FX/host.run"
-	check "confirmed build, other files: the run succeeds" test "$rc" -eq 0
-	check "confirmed build, other files: not applied" test "$(record_field fb_owner)/$(record_field fb_owner_reason)" = \
-		'0/its source files are not the ones recorded for driver 580.159.01'
-	check "confirmed build, other files: still confirmed" test "$(record_field confirmation)" = confirmed-inputs
-	# The recorded files are admitted by their digests; the fixture tree has no open layer for them to match.
-	cp "$here/../../driver-patches/fb-owner/gs-fb-owner.c" "$FX/patchdir/fb-owner/"
-	fx_exec known --driver-file "$FX/host.run" --no-fb-owner
+	check "no Ada card: the same driver installs" test "$rc" -eq 0
+	check "no Ada card: no placement refusal" not_contains "$out" 'VMs of an Ada card'
+	check "no Ada card: the record names ada_placement=0" test "$(record_field ada_placement)" = 0
+}
+
+# An Ada build on the recorded driver is confirmed: its row was measured on hardware (B9), so the table
+# records no 'not yet confirmed' state and the record has no placement-measured key.
+case_ada_confirmed() {
+	fx_init "$FXROOT/ada-confirmed" marker
+	fx_marker_files
+	rm -f "$FX/AAAA.text"
+	fx_plain_text "$FX/AAAA.text" 1 1
+	fx_exec known --driver-file "$FX/host.run" --ada-selected
+	check "ada confirmed: installs" test "$rc" -eq 0
+	check "ada confirmed: the record is confirmed" test \
+		"$(record_field confirmation)/$(record_field evidence_profile)/$(record_field driver_version_confirmed)/$(record_field ada_placement)" = \
+		confirmed-inputs/host-580.159.01-plain/1/1
+	check "ada confirmed: nothing is said about an unconfirmed placement" not_contains "$out" 'not yet confirmed on hardware'
+	check "ada confirmed: no combination sentence" not_contains "$out" 'this combination'
+	check "ada confirmed: the module is built the same" contains "$out" 'NVIDIA'"'"'s module and plugin are prepared'
+	fx_exec known --driver-file "$FX/host.run" --ada-selected
+	check "ada confirmed, again: nothing is rebuilt" contains "$out" 'already prepared for'
+	# The record of a build that is not the one asked for: built again, once.
+	rm -f "$FX/AAAA.text"
+	fx_plain_text "$FX/AAAA.text" 1
+	: >"$FX/stages.log"
 	fx_exec known --driver-file "$FX/host.run"
-	check "confirmed build, the recorded files: admitted, and the hunks decide" test "$(record_field fb_owner_reason)" = \
-		'its hunks do not match the open layer of driver 580.159.01 exactly once'
+	check "ada confirmed, no Ada card after: built for 0" test "$(record_field ada_placement)" = 0
+	check "ada confirmed, no Ada card after: the row was not run" not_contains "$(cat "$FX/stages.log")" ada-placement
+	check "ada confirmed, no Ada card after: still confirmed" test "$(record_field confirmation)" = confirmed-inputs
+	# A record from before the key (a build of an earlier release) is built again when an Ada card is selected.
+	record_unset ada_placement
+	rm -f "$FX/AAAA.text"
+	fx_plain_text "$FX/AAAA.text" 1 1
+	fx_exec known --driver-file "$FX/host.run" --ada-selected
+	check "ada, a record without the key: built again" contains "$out" 'the installed nvidia.ko was built with ada_placement=absent and ada_placement=1 is asked for; the modules are built again'
+	check "ada, a record without the key: the record now has it" test "$(record_field ada_placement)" = 1
 }
 
 # --- marker-mode cases -------------------------------------------------------
 
+# A build with no Ada card selected is exactly what it was: confirmed when its inputs are the recorded
+# ones. (An Ada build is confirmed on the same inputs: case_ada_confirmed.)
 case_plain() {
 	fx_init "$FXROOT/plain" marker
 	fx_marker_files
+	rm -f "$FX/AAAA.text"
+	fx_plain_text "$FX/AAAA.text" 1
 	fx_exec known --driver-file "$FX/host.run"
 	check "plain: installs with the recorded digests" test "$rc" -eq 0
 	check "plain: completion line" contains "$out" 'NVIDIA'"'"'s module and plugin are prepared'
 	check "plain: record says confirmed inputs" test "$(record_field confirmation)" = confirmed-inputs
+	check "plain: record names no Ada placement" test "$(record_field ada_placement)" = 0
+	check "plain: record has no fb_placement key" test -z "$(grep -a fb_placement "$FX/root/var/lib/geforce-sriov/driver-build")"
+	check "plain: nothing is said about the placement" not_contains "$out" 'not yet confirmed on hardware'
 	check "plain: record names the host version" test "$(record_field driver_version)" = 580.159.01
 	check "plain: record flags" test "$(record_field display)/$(record_field host_cuda)" = 0/0
 	check "plain: patched plugin copy installed" exists \
@@ -752,22 +721,6 @@ case_plain() {
 	fx_exec known --driver-file "$FX/host.run"
 	check "plain rerun: no-op" contains "$out" 'already prepared for'
 	check "plain rerun: the result is unchanged" contains "$out" 'install_result=unchanged'
-	# A record written under an earlier version policy is classified again; nothing is rebuilt.
-	record_set confirmation unconfirmed
-	record_set evidence_profile none
-	record_set driver_version_confirmed 0
-	before=$(sha256sum "$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko")
-	fx_exec known --driver-file "$FX/host.run"
-	check "plain reclassify: exit 0" test "$rc" -eq 0
-	check "plain reclassify: the result is record-only" contains "$out" 'install_result=record-only'
-	check "plain reclassify: the record is confirmed again" test \
-		"$(record_field confirmation)/$(record_field evidence_profile)/$(record_field driver_version_confirmed)" = \
-		confirmed-inputs/host-580.159.01-plain/1
-	check "plain reclassify: the module is untouched" test \
-		"$(sha256sum "$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko")" = "$before"
-	check "plain reclassify: no temporary record is left" test ! -e "$FX/root/var/lib/geforce-sriov/driver-build.gs-tmp"
-	fx_exec known --driver-file "$FX/host.run"
-	check "plain reclassify: the next run changes nothing" contains "$out" 'install_result=unchanged'
 	# A plugin copy with the wrong mode is fixed, and that is a change.
 	chmod 0644 "$FX/root/usr/lib/x86_64-linux-gnu/libnvidia-vgpu.so.580.159.01.geforce-sriov"
 	fx_exec known --driver-file "$FX/host.run"
@@ -779,10 +732,13 @@ case_plain() {
 	printf 'foreign\n' >"$module"
 	fx_exec known --restore
 	check "plain restore: foreign module kept" contains "$out" 'it is not the module this script installed'
+	check "plain restore: a kept core is a failed restore (exit 1)" test "$rc" -eq 1
+	check "plain restore: the failure is reported as failed" contains "$out" \
+		"was kept: it is not the module this script installed"
 	check "plain restore: foreign module untouched" test "$(cat "$module")" = foreign
 	check "plain restore: the backup stays for a later attempt" test -f \
 		"$FX/root/var/lib/geforce-sriov/stock/$kernel/nvidia.ko"
-	check "plain restore: the record stays with the kept module" test -f \
+	check "plain restore: a failed restore keeps the record, so the restore can be run again" test -e \
 		"$FX/root/var/lib/geforce-sriov/driver-build"
 	# A foreign file at the plugin copy's name is not removed.
 	pcopy=$FX/root/usr/lib/x86_64-linux-gnu/libnvidia-vgpu.so.580.159.01.geforce-sriov
@@ -790,6 +746,94 @@ case_plain() {
 	fx_exec known --restore
 	check "plain restore: foreign plugin copy kept" contains "$out" "left $pcopy"
 	check "plain restore: foreign plugin copy untouched" test "$(cat "$pcopy")" = 'foreign plugin'
+}
+
+# A restore with no module for the kernel (it was purged) has nothing to restore: it ends clean and the record goes,
+# so that no record outlives a finished uninstall.
+case_restore_gone() {
+	fx_init "$FXROOT/restore-gone" marker
+	fx_marker_files
+	rm -f "$FX/AAAA.text"
+	fx_plain_text "$FX/AAAA.text" 1
+	fx_exec known --driver-file "$FX/host.run"
+	check "restore gone: installs" test "$rc" -eq 0
+	check "restore gone: a record exists" test -f "$FX/root/var/lib/geforce-sriov/driver-build"
+	rm -f "$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko"
+	fx_exec known --restore
+	check "restore gone: nothing to restore" contains "$out" 'nothing to restore'
+	check "restore gone: exits 0" test "$rc" -eq 0
+	check "restore gone: the record is removed" test ! -e "$FX/root/var/lib/geforce-sriov/driver-build"
+}
+
+# NVIDIA's host package is installed again for the same kernel and install runs once more: the installed
+# module is NVIDIA's new one, which is what an uninstall must put back, not the backup of the old one.
+case_stock_replaced() {
+	fx_init "$FXROOT/stock-replaced" marker
+	fx_marker_files
+	fx_exec known --driver-file "$FX/host.run"
+	check "stock replaced: the first install succeeds" test "$rc" -eq 0
+	module=$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko
+	backup=$FX/root/var/lib/geforce-sriov/stock/$kernel/nvidia.ko
+	old_stock=$(sha256sum "$backup" | cut -d' ' -f1)
+	printf 'text=BBBB\nid=replaced-id\n' >"$module"
+	new_stock=$(sha256sum "$module" | cut -d' ' -f1)
+	check "stock replaced: the fixture's two stock modules differ" test "$old_stock" != "$new_stock"
+	fx_exec known --driver-file "$FX/host.run"
+	check "stock replaced: the second install succeeds" test "$rc" -eq 0
+	check "stock replaced: the backup is the module NVIDIA installed last" test \
+		"$(sha256sum "$backup" | cut -d' ' -f1)" = "$new_stock"
+	check "stock replaced: the record names that backup" test "$(record_field stock_sha256)" = "$new_stock"
+	fx_exec known --restore
+	check "stock replaced: uninstall puts NVIDIA's last module back" test \
+		"$(sha256sum "$module" | cut -d' ' -f1)" = "$new_stock"
+	check "stock replaced: the restore succeeds" test "$rc" -eq 0
+}
+
+# A copy of our build signed for Secure Boot (same build-id, other bytes) is still our build: installing
+# again keeps the backup of NVIDIA's module and does not replace it with our own output.
+case_signed_reinstall() {
+	fx_init "$FXROOT/signed-reinstall" marker
+	fx_marker_files
+	fx_exec known --driver-file "$FX/host.run"
+	module=$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko
+	backup=$FX/root/var/lib/geforce-sriov/stock/$kernel/nvidia.ko
+	old_stock=$(sha256sum "$backup" | cut -d' ' -f1)
+	printf 'text=AAAA\nid=built-id\nsignature\n' >"$module"
+	fx_exec known --driver-file "$FX/host.run"
+	check "signed reinstall: the install succeeds" test "$rc" -eq 0
+	check "signed reinstall: the backup is still NVIDIA's original module" test \
+		"$(sha256sum "$backup" | cut -d' ' -f1)" = "$old_stock"
+}
+
+# --restore tells our own build, changed since install, from a module that is not ours. The same build-id
+# with other bytes (a signed copy for Secure Boot) is ours: it stays and the restore fails. Another build-id
+# is NVIDIA's package installed again: nothing is put back and the old backup and record are removed.
+case_restore_modified_and_replaced() {
+	fx_init "$FXROOT/restore-signed" marker
+	fx_marker_files
+	fx_exec known --driver-file "$FX/host.run"
+	check "restore kinds: the install succeeds" test "$rc" -eq 0
+	module=$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko
+	state=$FX/root/var/lib/geforce-sriov
+	printf 'text=AAAA\nid=built-id\nsignature\n' >"$module"
+	fx_exec known --restore
+	check "signed build: the restore fails (exit 1)" test "$rc" -eq 1
+	check "signed build: the module stays" test "$(sed -n '3p' "$module")" = signature
+	check "signed build: the backup and the record stay" test -f "$state/stock/$kernel/nvidia.ko" -a -f "$state/driver-build"
+	check "signed build: the failure is named" contains "$out" "was kept: it is not the module this script installed"
+	fx_init "$FXROOT/restore-replaced" marker
+	fx_marker_files
+	fx_exec known --driver-file "$FX/host.run"
+	module=$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko
+	state=$FX/root/var/lib/geforce-sriov
+	printf 'text=BBBB\nid=replaced-id\n' >"$module"
+	fx_exec known --restore
+	check "replaced module: the restore succeeds" test "$rc" -eq 0
+	check "replaced module: NVIDIA's module is untouched" test "$(sed -n '2p' "$module")" = id=replaced-id
+	check "replaced module: the stale backup is gone" test ! -e "$state/stock/$kernel/nvidia.ko"
+	check "replaced module: no stock directory is left" test ! -e "$state/stock"
+	check "replaced module: the stale record is gone" test ! -e "$state/driver-build"
+	check "replaced module: it is reported" contains "$out" 'it is another build, so nothing is put back'
 }
 
 case_unknown_anchors() {
@@ -802,6 +846,12 @@ case_unknown_anchors() {
 	check "unknown inputs: admission recorded as anchor" test "$(record_field patch_scheduler_admission)" = anchor
 	check "unknown inputs: state recorded" test "$(record_field patch_scheduler_state)" = 'unconfirmed:unknown'
 	check "unknown inputs: confirmed flag is 0" test "$(record_field driver_version_confirmed)" = 0
+	# Both Ada rows reach the copy of a plugin whose digest is not recorded: plugin-mixed and plugin-div4.
+	# The fixture's patcher chooses each row by the state of its input, so one apply gives only the mixed copy.
+	check "unknown inputs: the plugin copy carries both rows" test \
+		"$(cat "$FX/root/usr/lib/x86_64-linux-gnu/libnvidia-vgpu.so.580.159.01.geforce-sriov")" = patched-plugin
+	check "unknown inputs: the record's plugin digest is that of the full copy" test \
+		"$(record_field plugin_sha256)" = "$(real_digest patched-plugin)"
 	# A rerun must not promote the local output to confirmed.
 	fx_exec unknown
 	check "unknown inputs: rerun keeps the classification" test "$(record_field confirmation)" = unconfirmed
@@ -901,6 +951,25 @@ case_second_version() {
 		'require exactly the eight .text offsets 0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x30, 0x31'
 	check "second version, plan: its own plugin" contains "$out" "/libnvidia-vgpu.so.999.1.2'"
 	check "second version, plan: classified from its digests" contains "$out" 'version classification: confirmed-inputs'
+	# A version whose block records no ada-placement row is built for an Ada card when the window is found, as the
+	# other rows are, and says so as unconfirmed. When it is not, the step stops, naming the highest confirmed
+	# driver that has the row; there is no fallback to fixed slots.
+	printf '\nhost=999.9.9\nplacement_object=%s\nplacement_offsets=0x1\n' \
+		"$(real_digest placed-object)" >>"$FX/synth/gs-driver-versions.tbl"
+	printf 'ada-placement\n' >"$FX/refuse-stage"
+	fx_exec unknown --ada-selected
+	check "second version, Ada, window not found: refused" test "$rc" -eq 3
+	check "second version, Ada, window not found: names the driver and the reason" contains "$out" \
+		'the VMs of an Ada card cannot be placed from free video memory with driver 999.1.2: the code window of the placement change was not found in the driver'
+	check "second version, Ada, window not found: names the highest confirmed driver that has it" contains "$out" \
+		"Install NVIDIA's vGPU host driver 999.9.9, the recommended confirmed version, and run this again; nothing was installed"
+	check "second version, Ada, window not found: no way out by fixed slots" not_contains "$out" 'fixed slots'
+	check "second version, Ada, window not found: nothing installed" test ! -e "$FX/root/var/lib/geforce-sriov/driver-build"
+	rm -f "$FX/refuse-stage"
+	fx_exec unknown --ada-selected
+	check "second version, Ada, window found: the build installs best effort" test "$rc" -eq 0
+	check "second version, Ada, window found: the record names ada_placement=1, unconfirmed" test \
+		"$(record_field ada_placement)/$(record_field confirmation)" = 1/unconfirmed
 	fx_exec unknown
 	check "second version: the build installs" test "$rc" -eq 0
 	check "second version: confirmed inputs" test "$(record_field confirmation)" = confirmed-inputs
@@ -950,6 +1019,17 @@ case_second_version() {
 	driver=$shipped
 	fx_exec unknown --dry-run
 	check "unlisted version, plan: not confirmed" contains "$out" 'version classification: unconfirmed'
+	fx_exec unknown --ada-selected
+	check "unlisted version, Ada: the window is looked for, as for the other rows" test "$rc" -eq 3
+	check "unlisted version, Ada: no .text offsets, as without an Ada card" contains "$out" \
+		'no .text offsets are recorded for driver 999.1.2'
+	printf 'ada-placement\n' >"$FX/refuse-stage"
+	fx_exec unknown --ada-selected
+	check "unlisted version, Ada, window not found: refused" test "$rc" -eq 3
+	check "unlisted version, Ada, window not found: names the recommended driver" contains "$out" \
+		"with driver 999.1.2: the code window of the placement change was not found in the driver. Install NVIDIA's vGPU host driver 580.159.01, the recommended confirmed version"
+	check "unlisted version, Ada, window not found: nothing installed" test ! -e "$FX/root/var/lib/geforce-sriov/driver-build"
+	rm -f "$FX/refuse-stage"
 	fx_exec unknown
 	check "unlisted version: refused" test "$rc" -eq 3
 	check "unlisted version: the notice names it and the confirmed version" contains "$out" \
@@ -1145,6 +1225,105 @@ RUN
 	check "CUDA libraries, a kept package that was changed: nothing is staged" test ! -e "$stage"
 }
 
+# NVIDIA's graphics libraries for the host desktop: with --display and --desktop-stage the driver step
+# copies them from the second package into a directory of their own, with an index.
+fx_desktop_libs() {
+	for lib in libEGL_nvidia:libEGL_nvidia.so.0 libGLX_nvidia:libGLX_nvidia.so.0 libnvidia-glcore:libnvidia-glcore.so.$2 libnvidia-tls:libnvidia-tls.so.$2 \
+		libnvidia-glsi:libnvidia-glsi.so.$2 libnvidia-glvkspirv:libnvidia-glvkspirv.so.$2 libnvidia-gpucomp:libnvidia-gpucomp.so.$2 \
+		libGLESv2_nvidia:libGLESv2_nvidia.so.2 libGLESv1_CM_nvidia:libGLESv1_CM_nvidia.so.1 libnvidia-eglcore:libnvidia-eglcore.so.$2 \
+		libnvidia-allocator:libnvidia-allocator.so.1; do
+		printf 'int fixture_%s(void) { return %s; }\n' "$(printf '%s' "${lib%%:*}" | tr -c 'a-z\n' '_')" "$1" >"$FX/objects/lib.c"
+		"${CC:-gcc}" -shared -fPIC -Wl,-soname,"${lib#*:}" -o "$FX/companion/${lib%%:*}.so.$2" "$FX/objects/lib.c"
+	done
+	# The four libraries that have a version of their own in their names.
+	for lib in libnvidia-egl-gbm:1.1.3:libnvidia-egl-gbm.so.1 libnvidia-egl-wayland:1.1.20:libnvidia-egl-wayland.so.1 \
+		libnvidia-egl-xcb:1.0.5:libnvidia-egl-xcb.so.1 libnvidia-egl-xlib:1.0.5:libnvidia-egl-xlib.so.1; do
+		name=${lib%%:*}
+		rest=${lib#*:}
+		"${CC:-gcc}" -shared -fPIC -Wl,-soname,"${rest#*:}" -o "$FX/companion/$name.so.${rest%%:*}" "$FX/objects/lib.c"
+	done
+	"${CC:-gcc}" -shared -fPIC -o "$FX/companion/nvidia_drv.so" "$FX/objects/lib.c"
+	"${CC:-gcc}" -shared -fPIC -o "$FX/companion/libglxserver_nvidia.so.$2" "$FX/objects/lib.c"
+	for json in 10_nvidia.json 15_nvidia_gbm.json 10_nvidia_wayland.json 20_nvidia_xcb.json 20_nvidia_xlib.json nvidia_icd.json; do
+		printf '{ "file_format_version" : "1.0.0", "name" : "%s" }\n' "$json" >"$FX/companion/$json"
+	done
+	printf 'Section "OutputClass"\n    Identifier     "nvidia"\n    MatchDriver    "nvidia-drm"\n    Driver         "nvidia"\nEndSection\n' \
+		>"$FX/companion/nvidia-drm-outputclass.conf"
+	printf 'profiles\n' >"$FX/companion/nvidia-application-profiles-$2-rc"
+	printf 'keys\n' >"$FX/companion/nvidia-application-profiles-$2-key-documentation"
+	ln -sf "libEGL_nvidia.so.$2" "$FX/companion/libEGL_nvidia.so.0"
+}
+case_desktop_libs() {
+	fx_init "$FXROOT/desktop-libs" elf
+	if ! fx_elf_files display; then
+		say 'SKIP: no C compiler or linker for the ELF fixtures'
+		return 0
+	fi
+	stage=$FX/root/var/lib/geforce-sriov/host-desktop
+	fx_desktop_libs 1 580.159.03
+	# Without --desktop-stage nothing is looked for.
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+	check "graphics libraries, not asked for: installs" test "$rc" -eq 0
+	check "graphics libraries, not asked for: none is staged" test ! -e "$stage"
+	# Without --display they are not taken either: there is no console for them to draw on.
+	fx_init "$FXROOT/desktop-libs-plain" elf
+	fx_elf_files plain || return 0
+	fx_desktop_libs 1 580.159.03
+	fx_exec unknown --host-cuda --companion-source "$FX/companion" --desktop-stage "$stage"
+	check "graphics libraries, no display build: the run succeeds" test "$rc" -eq 0
+	check "graphics libraries, no display build: nothing is staged" test ! -e "$stage"
+	# After a display build.
+	fx_init "$FXROOT/desktop-libs-built" elf
+	fx_elf_files display || return 0
+	fx_desktop_libs 1 580.159.03
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms" --desktop-stage "$stage"
+	check "graphics libraries: installs" test "$rc" -eq 0
+	check "graphics libraries: said" contains "$out" "NVIDIA's graphics libraries 580.159.03 are ready to be installed: libEGL_nvidia.so.580.159.03 libGLX_nvidia.so.580.159.03"
+	check "graphics libraries: the index names the version" test "$(sed -n 's/^version=//p' "$stage/index")" = 580.159.03
+	check "graphics libraries: libEGL_nvidia first, with its digest and the name the loader asks for" test \
+		"$(sed -n 's/^lib=//p' "$stage/index" | sed -n '1p')" = \
+		"libEGL_nvidia.so.580.159.03 $(sha256sum "$FX/companion/libEGL_nvidia.so.580.159.03" | cut -d' ' -f1) libEGL_nvidia.so.0"
+	check "graphics libraries: fifteen libraries" test "$(grep -c '^lib=' "$stage/index")" -eq 15
+	check "graphics libraries: the four with a version of their own, under their own names" contains "$(cat "$stage/index")" \
+		'lib=libnvidia-egl-wayland.so.1.1.20 '
+	check "graphics libraries: the X driver and its GLX module" test \
+		"$(grep -c '^xmod=drivers/nvidia_drv.so \|^xmod=extensions/libglxserver_nvidia.so.580.159.03 [0-9a-f]* libglxserver_nvidia.so$' "$stage/index")" -eq 2
+	check "graphics libraries: nine small files" test "$(grep -c '^etc=' "$stage/index")" -eq 9
+	check "graphics libraries: the output-class file is one of them" contains "$(cat "$stage/index")" 'etc=xconf nvidia-drm-outputclass.conf '
+	check "graphics libraries: the profiles carry the version" contains "$(cat "$stage/index")" 'etc=profile nvidia-application-profiles-580.159.03-rc '
+	check "graphics libraries: the GBM backend is the allocator" contains "$(cat "$stage/index")" 'gbm=libnvidia-allocator.so.1'
+	check "graphics libraries: the copy is the file" cmp -s "$FX/companion/libGLX_nvidia.so.580.159.03" "$stage/libGLX_nvidia.so.580.159.03"
+	check "graphics libraries: no link is copied" test ! -e "$stage/libEGL_nvidia.so.0"
+	check "graphics libraries: no copy of libglvnd is taken" test ! -e "$stage/libGLX.so.0" -a ! -e "$stage/libEGL.so.1"
+	check "graphics libraries: a library is executable, a small file is not" test \
+		"$(stat -c %a "$stage/libGLX_nvidia.so.580.159.03")/$(stat -c %a "$stage/10_nvidia.json")" = 755/644
+	# The build is installed: the kept second package is opened for the libraries alone.
+	rm -rf "$stage"
+	fx_exec unknown --retained --display --desktop-stage "$stage"
+	check "graphics libraries, build installed: nothing is built" contains "$out" 'already prepared for'
+	check "graphics libraries, build installed: taken from the kept package" test "$(grep -c '^lib=' "$stage/index")" -eq 15
+	# A package without one of them: nothing is staged, one warning.
+	rm -rf "$stage"
+	rm -f "$FX/companion/libnvidia-egl-wayland.so.1.1.20"
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms" --desktop-stage "$stage"
+	check "graphics libraries, one missing: the run succeeds" test "$rc" -eq 0
+	check "graphics libraries, one missing: one warning" contains "$out" \
+		"warning: NVIDIA's graphics libraries were not taken from the second package: the second package has no libnvidia-egl-wayland"
+	check "graphics libraries, one missing: nothing is staged" test ! -e "$stage" -a ! -e "$stage.gs-new"
+	# Libraries of another version than the NVKMS core was stamped with: refused, X could not start. A stage that an earlier run left goes too.
+	rm -rf "$stage"
+	mkdir -p "$stage"
+	printf 'version=580.159.03\n' >"$stage/index"
+	rm -f "$FX"/companion/lib*.so.* "$FX"/companion/nvidia_drv.so
+	fx_desktop_libs 1 580.159.05
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms" --desktop-stage "$stage"
+	check "graphics libraries, another version: the run succeeds" test "$rc" -eq 0
+	check "graphics libraries, another version: one warning" contains "$out" \
+		"its graphics libraries are version 580.159.05 and NVIDIA's NVKMS core is stamped 580.159.03"
+	check "graphics libraries, another version: nothing is staged" test ! -e "$stage"
+	check "graphics libraries, another version: a stage left by an earlier run is removed, so the CLI cannot install it" test ! -e "$stage/index"
+}
+
 # A display build is installed, and the next request has no display: host CUDA alone, or plain.
 # The display build's own .text differs from NVIDIA's at more than the eight offsets (the idx 39
 # change and the allocation threshold), so the new build is compared with NVIDIA's module, which is
@@ -1308,6 +1487,18 @@ case_plain_other_version() {
 		return 0
 	fi
 	fx_other_version
+	printf 'ada-placement\n' >"$FX/refuse-stage"
+	fx_exec unknown --ada-selected
+	check "other version, Ada, window not found: refused" test "$rc" -eq 3
+	check "other version, Ada, window not found: the reason" contains "$out" \
+		"with driver 570.1.2: the code window of the placement change was not found in the driver. Install NVIDIA's vGPU host driver 580.159.01, the recommended confirmed version"
+	check "other version, Ada, window not found: nothing installed" test ! -e "$FX/root/var/lib/geforce-sriov/driver-build"
+	rm -f "$FX/refuse-stage"
+	# The window is found: the build goes on, as best effort, compared at the offsets the tool reported.
+	fx_exec unknown --ada-selected
+	check "other version, Ada, window found: the build installs best effort" test "$rc" -eq 0
+	check "other version, Ada, window found: the record names ada_placement=1, and its row was admitted by its window" test \
+		"$(record_field ada_placement)/$(record_field patch_ada_placement_admission)/$(record_field confirmation)" = 1/anchor/unconfirmed
 	fx_exec unknown
 	check "other version, plain: the build installs" test "$rc" -eq 0
 	check "other version, plain: the notice names it and the confirmed version" contains "$out" \
@@ -1367,6 +1558,31 @@ case_display() {
 		"$(cat "$FX/root/var/lib/geforce-sriov/build/$kernel/nvidia-drm/nvidia-drm-drv.c")" 'fixture: selected GPU IDs'
 	check "display: allocation-threshold patch applied" contains \
 		"$(cat "$FX/root/var/lib/geforce-sriov/build/$kernel/nvidia/os-interface.c")" 'KMALLOC_LIMIT 131072'
+	check "display: client-accept patch applied with the second package's version" contains \
+		"$(cat "$FX/root/var/lib/geforce-sriov/build/$kernel/nvidia/nv-version.c")" '#define GS_CLIENT_ACCEPT "580.159.03"'
+	check "display: the record names the version nvidia.ko accepts" test "$(record_field client_accept)" = 580.159.03
+	check "display: said" contains "$out" 'nvidia.ko accepts programs of version 580.159.03 besides its own'
+	# A record that lacks it: the module is built again, once.
+	record_unset client_accept
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+	check "display, record without client_accept: built again" contains "$out" \
+		'the installed nvidia.ko does not accept the programs of the second package (client_accept= is recorded, 580.159.03 is wanted); the modules are built again'
+	check "display, record without client_accept: recorded again" test "$(record_field client_accept)" = 580.159.03
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+	check "display, the rerun: nothing is built" contains "$out" 'already prepared for'
+	# A source the client-accept patch does not fit: the display build is not refused (host_desktop=off needs it); it is made without the
+	# patch, says so, records no client_accept and records that the patch did not match, so that the next run does not build it again.
+	record_unset client_accept
+	printf '/* another version check */\nint other_check;\n' >"$FX/src/nvidia/nv-version.c"
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+	check "display, patch that does not match: the build is not refused" test "$rc" -eq 0
+	check "display, patch that does not match: said once" contains "$out" \
+		"warning: the client-accept patch does not match this driver's source, so nvidia.ko is built without it and does not accept programs of version 580.159.03; NVIDIA's graphics libraries are not installed"
+	check "display, patch that does not match: no client_accept recorded" test -z "$(record_field client_accept)"
+	check "display, patch that does not match: the record says why" test "$(record_field client_accept_unmatched)" = 580.159.03
+	check "display, patch that does not match: the module was built" exists "$FX/root/lib/modules/$kdir/updates/dkms/nvidia-drm.ko"
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+	check "display, patch that does not match: the rerun builds nothing" contains "$out" 'already prepared for'
 	check "display: uvm not built" test ! -e \
 		"$FX/root/lib/modules/$kdir/updates/dkms/nvidia-uvm.ko"
 	# A foreign change to a companion module is preserved by --restore.
@@ -1379,52 +1595,6 @@ case_display() {
 	check "display restore: owned modules removed" test ! -e \
 		"$FX/root/lib/modules/$kdir/updates/dkms/nvidia-modeset.ko"
 	check "display restore: core restored" test "$(cat "$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko")" != ''
-}
-
-# A display and host CUDA build made before the version policy had a profile for that combination:
-# its record says unconfirmed. The rerun finds the build already installed and applies the current
-# policy to the record. The fixture objects are synthetic, so the record is given the input digests
-# and the digest admissions that a build from NVIDIA's files has.
-case_reclassify() {
-	fx_init "$FXROOT/reclassify" elf
-	if ! fx_elf_files display; then
-		say 'SKIP: no C compiler or linker for the ELF fixtures'
-		return 0
-	fi
-	fx_exec unknown --display --host-cuda --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
-	check "reclassify: the display and host CUDA build installs" test "$rc" -eq 0
-	check "reclassify: the synthetic build is unconfirmed" test "$(record_field confirmation)" = unconfirmed
-	for stage in scheduler module_gate vf_count plugin_mixed plugin_div4 display_idx39; do
-		record_set "patch_${stage}_admission" digest
-	done
-	record_set host_sha256 none
-	record_set second_sha256 8de9c10cfda77a89a8056acec476c13549f8f6dc7c7f9675da38dc9a73208a81
-	record_set public_sha256 none
-	record_set driver_public_version 580.159.03
-	record_set confirmation unconfirmed
-	record_set evidence_profile none
-	record_set driver_version_confirmed 0
-	before=$(sha256sum "$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko")
-	fx_exec unknown --display --host-cuda --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
-	check "reclassify: exit 0" test "$rc" -eq 0
-	check "reclassify: already prepared, nothing is built" contains "$out" 'already prepared for'
-	check "reclassify: the change is reported" contains "$out" \
-		'the build record now reads confirmation=confirmed-inputs, evidence_profile=display-cuda-580.159.01-idx39; it read confirmation=unconfirmed, evidence_profile=none'
-	check "reclassify: the record is confirmed for display with host CUDA" test \
-		"$(record_field confirmation)/$(record_field evidence_profile)/$(record_field driver_version_confirmed)" = \
-		confirmed-inputs/display-cuda-580.159.01-idx39/1
-	check "reclassify: the other fields stay" test "$(record_field display)/$(record_field host_cuda)" = 1/1
-	check "reclassify: the module is untouched" test \
-		"$(sha256sum "$FX/root/lib/modules/$kdir/updates/dkms/nvidia.ko")" = "$before"
-	# A revision that was admitted by its anchors keeps the build unconfirmed.
-	record_set patch_display_idx39_admission anchor
-	record_set confirmation unconfirmed
-	record_set evidence_profile none
-	record_set driver_version_confirmed 0
-	fx_exec unknown --display --host-cuda --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
-	check "reclassify: an anchor admission stays unconfirmed" test \
-		"$(record_field confirmation)/$(record_field evidence_profile)" = unconfirmed/none
-	check "reclassify: and no change is reported" not_contains "$out" 'the build record now reads'
 }
 
 # A power loss at each point of the commit. The process is killed there, so nothing is rolled back
@@ -1562,6 +1732,25 @@ case_power_loss() {
 	check "power loss, foreign plugin: it says the file was changed" contains "$out" 'so it was changed since'
 	check "power loss, foreign plugin: the file is untouched" test "$(cat "$pcopy")" = 'foreign plugin'
 	check "power loss, foreign plugin: the journal is kept" test -f "$rec.gs-new"
+}
+
+# A display build whose installed core was signed for Secure Boot (the same build-id, bytes appended) is
+# still our build: installing again reaches the backup plan, and the backup of NVIDIA's core stays.
+case_signed_reinstall_elf() {
+	fx_init "$FXROOT/signed-reinstall-elf" elf
+	if ! fx_elf_files display; then
+		say 'SKIP: no C compiler or linker for the ELF fixtures'
+		return 0
+	fi
+	mods=$FX/root/lib/modules/$kdir/updates/dkms
+	stock_core=$(sha256sum "$mods/nvidia.ko" | cut -d' ' -f1)
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+	check "signed reinstall, display: the first install succeeds" test "$rc" -eq 0
+	printf 'module signature appended by sign-file\n' >>"$mods/nvidia.ko"
+	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+	check "signed reinstall, display: the install succeeds" test "$rc" -eq 0
+	check "signed reinstall, display: the backup is still NVIDIA's core" test \
+		"$(sha256sum "$FX/root/var/lib/geforce-sriov/stock/$kernel/nvidia.ko" | cut -d' ' -f1)" = "$stock_core"
 }
 
 # --restore puts back a companion module that was there before the install, and then its backup is
@@ -2201,10 +2390,49 @@ case_two_kernels() {
 	fx_first_kernel
 }
 
+# A record that an earlier build of this version wrote with the guest framebuffer cap in it: the keys of the cap are read and
+# ignored, a build that carries the cap is built again without it, and the new record has none of the keys.
+case_earlier_cap_record() {
+	fx_init "$FXROOT/cap-record" marker
+	fx_marker_files
+	rm -f "$FX/AAAA.text"
+	fx_plain_text "$FX/AAAA.text" 1
+	fx_exec known --driver-file "$FX/host.run"
+	check "earlier cap record: installs" test "$rc" -eq 0
+	check "earlier cap record: a new record has no cap key" test -z "$(record_field guest_fb)$(record_field guest_fb_reason)$(record_field guest_fb_abi)$(record_field guest_fb_h_sha256)"
+	check "earlier cap record: nothing about a cap is printed" not_contains "$out" 'guest framebuffer'
+	# A build that left the cap out (guest_fb=0 and its reason) is not built again: the keys are only read.
+	printf 'guest_fb=0\nguest_fb_reason=python3 is not installed\nguest_fb_h_sha256=%s\nguest_fb_patch_sha256=%s\n' \
+		0000000000000000000000000000000000000000000000000000000000000000 0000000000000000000000000000000000000000000000000000000000000000 \
+		>>"$FX/root/var/lib/geforce-sriov/driver-build"
+	fx_exec known --driver-file "$FX/host.run"
+	check "earlier cap record, no cap built: nothing to do" contains "$out" 'already prepared for'
+	# A build that carries the cap is built again, once, and the record is the new one.
+	record_set guest_fb 1
+	printf 'guest_fb_abi=1\n' >>"$FX/root/var/lib/geforce-sriov/driver-build"
+	: >"$FX/stages.log"
+	fx_exec known --driver-file "$FX/host.run"
+	check "earlier cap record, cap built: installs" test "$rc" -eq 0
+	check "earlier cap record, cap built: says why it is built again" contains "$out" \
+		'the installed nvidia.ko was built with a guest framebuffer cap, which this package does not build; the modules are built again'
+	check "earlier cap record, cap built: not the shortcut" not_contains "$out" 'already prepared for'
+	check "earlier cap record, cap built: the record has no cap key" test -z "$(record_field guest_fb)$(record_field guest_fb_abi)$(record_field guest_fb_reason)$(record_field guest_fb_h_sha256)$(record_field guest_fb_patch_sha256)"
+	fx_exec known --driver-file "$FX/host.run"
+	check "earlier cap record, again: nothing to do" contains "$out" 'already prepared for'
+}
+
 FXROOT=$(mktemp -d "${TMPDIR:-/tmp}/gs-driver-fixtures.XXXXXX")
 trap 'rm -rf "$FXROOT"' EXIT HUP INT TERM
 case_plain
-case_owner
+case_restore_gone
+case_stock_replaced
+case_signed_reinstall
+case_signed_reinstall_elf
+case_restore_modified_and_replaced
+case_ada_confirmed
+case_placement_elf
+case_ada_refusals
+case_earlier_cap_record
 case_unknown_anchors
 case_identity_refused
 case_unknown_refused
@@ -2213,12 +2441,12 @@ case_second_version
 case_interrupted_commit
 case_cuda
 case_cuda_libs
+case_desktop_libs
 case_after_display
 case_cuda_crc_and_provider
 case_plain_gate
 case_plain_other_version
 case_display
-case_reclassify
 case_power_loss
 case_restore_companion
 case_rollback

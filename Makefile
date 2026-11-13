@@ -5,7 +5,7 @@
 #   driver/geforce-sriov-patch     driver patcher      (driver/)
 #   kernel/geforce_sriov.ko        livepatch module    (kernel/Makefile, `make module`)
 
-VERSION := 0.3.0
+VERSION := 0.4.0
 
 CC ?= cc
 CFLAGS ?= -O2 -g
@@ -22,7 +22,7 @@ DEVICES ?=
 VFS ?=
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-CLI_SRCS := src/activate.c src/config.c src/hostinfo.c src/install.c src/nvpackage.c src/dkms.c src/cudalibs.c src/uninstall.c src/lifecycle.c src/loadedpatch.c src/doctor.c src/status.c src/check.c src/fbslot.c src/modules.c src/pci.c src/setup.c src/sha256.c src/util.c
+CLI_SRCS := src/activate.c src/config.c src/hostinfo.c src/install.c src/nvpackage.c src/dkms.c src/nvlibs.c src/uninstall.c src/lifecycle.c src/loadedpatch.c src/hostcheck.c src/status.c src/check.c src/modules.c src/notify.c src/pci.c src/setup.c src/sha256.c src/util.c
 # The confirmed NVIDIA versions: one table, read by the driver step as it is and turned into the
 # CLI's rows here, so that a version is added in one place.
 VERSIONS_TBL := scripts/gs-driver-versions.tbl
@@ -33,14 +33,14 @@ CLI_HDRS := include/gs_lifecycle.h include/gs_devices.h include/gs_hook.h src/gs
 PATCH_MAIN := driver/main.c
 PATCH_LIB := $(filter-out $(PATCH_MAIN),$(wildcard driver/*.c))
 PATCH_HDRS := $(wildcard driver/*.h)
-PATCH_TESTS := $(patsubst %.c,%,$(wildcard tests/test_patch*.c tests/test_modcheck.c))
+PATCH_TESTS := $(patsubst %.c,%,$(wildcard tests/test_patch*.c tests/test_modcheck.c tests/test_insn_find.c))
 
-TESTS := tests/test_lifecycle tests/test_devices tests/test_contracts tests/test_fbowner $(PATCH_TESTS)
+TESTS := tests/test_lifecycle tests/test_devices tests/test_contracts $(PATCH_TESTS)
 # Shell fixtures for the driver step and its libraries; they build synthetic trees in a
 # temporary directory and never touch NVIDIA's files.
 FIXTURES := $(wildcard tests/fixtures-driver/test-*.sh)
 
-.PHONY: all hook module check test trace trace-diff install uninstall clean fb-owner-digests
+.PHONY: all hook module check test trace trace-diff install uninstall clean
 
 all: geforce-sriov hook driver/geforce-sriov-patch
 
@@ -79,21 +79,6 @@ tests/test_devices: tests/test_devices.c include/gs_devices.h
 
 tests/test_contracts: tests/test_contracts.c src/main.c src/config.c $(CLI_HDRS)
 	$(CC) $(ALL_CPPFLAGS) $(CLI_CFLAGS) -ffunction-sections -Wl,--gc-sections -o $@ tests/test_contracts.c src/config.c $(LDFLAGS)
-
-# The owner of the Ada VFs' framebuffer slots: the file that goes into nvidia.ko, compiled for
-# userspace against declarations of what it uses and run against a model of the RM.
-FB_OWNER := driver-patches/fb-owner
-tests/test_fbowner: tests/fbowner/test_fbowner.c tests/fbowner/stub.h $(FB_OWNER)/gs-fb-owner.c $(FB_OWNER)/gs-fb-owner.h
-	$(CC) $(ALL_CPPFLAGS) -DGS_FB_TEST -Itests/fbowner -I$(FB_OWNER) $(ALL_CFLAGS) -Wdeclaration-after-statement \
-		-Wno-unused-parameter -o $@ tests/fbowner/test_fbowner.c $(LDFLAGS)
-
-# After a reviewed change to the owner's files: record their digests in the table of confirmed
-# versions (every block that records the owner). tests/fixtures-driver/test-fb-owner.sh fails until then.
-fb-owner-digests:
-	@c=$$(sha256sum $(FB_OWNER)/gs-fb-owner.c | cut -d' ' -f1); h=$$(sha256sum $(FB_OWNER)/gs-fb-owner.h | cut -d' ' -f1); \
-	p=$$(sha256sum $(FB_OWNER)/fb-owner.patch | cut -d' ' -f1); \
-	sed "s/^owner_c=.*/owner_c=$$c/; s/^owner_h=.*/owner_h=$$h/; s/^owner_patch=.*/owner_patch=$$p/" $(VERSIONS_TBL) >$(VERSIONS_TBL).tmp && \
-	mv $(VERSIONS_TBL).tmp $(VERSIONS_TBL) && echo "$(VERSIONS_TBL): owner_c=$$c owner_h=$$h owner_patch=$$p"
 
 $(PATCH_TESTS): %: %.c $(PATCH_LIB) $(PATCH_HDRS)
 	$(CC) $(ALL_CPPFLAGS) -Idriver $(ALL_CFLAGS) -o $@ $< $(PATCH_LIB) $(LDFLAGS)

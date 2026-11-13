@@ -3,7 +3,7 @@
  * geforce-sriov: setup, the guided path from a clean host to a ready VF.
  *
  * The user runs one command. It reads the host's state and runs the next steps of a first install
- * (doctor, install) or of an existing install (doctor, install or migration when the state needs it,
+ * (install --dry-run, install) or of an existing install (install --dry-run, install when the state needs it,
  * the single activation transaction, check), each as a child process of this binary, and ends by
  * naming the guest drivers of each selected card. Attaching a VF to a VM stays the user's step.
  *
@@ -54,7 +54,7 @@ static int step(const struct gs_host *h, const char *self, const char *cmd, cons
 	for (k = 0; extra && extra[k] && n < STEP_MAX_ARGS - 1; k++)
 		argv[n++] = extra[k];
 	argv[n] = NULL;
-	printf("\n== %s\n", cmd);
+	printf("\n== %s%s\n", cmd, extra && extra[0] && strcmp(extra[0], "--dry-run") == 0 ? " --dry-run" : "");
 	fflush(stdout);
 	r = h->run(argv);
 	if (r < 0) {
@@ -72,7 +72,7 @@ static unsigned int push_opt(const char *argv[], unsigned int n, const char *nam
 	return n;
 }
 
-/* The --device of a first install, for the doctor and install steps. */
+/* The --device of a first install, for the install --dry-run and install steps. */
 static unsigned int push_devices(const struct gs_install_opts *o, const char *argv[], unsigned int n)
 {
 	for (unsigned int i = 0; i < o->ndevices; i++)
@@ -81,18 +81,16 @@ static unsigned int push_devices(const struct gs_install_opts *o, const char *ar
 }
 
 /*
- * doctor with the configuration this process read: children get a fixed environment, so a config
- * named by the environment would otherwise be lost between steps. o: this run's options, whose
- * selection, features and build inputs doctor judges as install will use them.
+ * The checks before install, as `install --dry-run` runs them. o: this run's options, whose selection,
+ * features and build inputs are judged as install will use them. The child reads /etc/geforce-sriov/config
+ * as install does: setup refuses a $GEFORCE_SRIOV_CONFIG that names another file.
  */
-static int step_doctor(const struct gs_host *h, const char *self, const struct gs_install_opts *o)
+static int step_preflight(const struct gs_host *h, const char *self, const struct gs_install_opts *o)
 {
-	const char *cfg = getenv(GS_CONFIG_ENV);
 	const char *argv[STEP_MAX_ARGS];
 	unsigned int n = 0;
 
-	if (cfg && cfg[0])
-		n = push_opt(argv, n, "--config", cfg);
+	argv[n++] = "--dry-run";
 	if (o && o->nvidia_source)
 		n = push_opt(argv, n, "--nvidia-source", o->nvidia_source);
 	if (o && o->driver_file)
@@ -102,22 +100,24 @@ static int step_doctor(const struct gs_host *h, const char *self, const struct g
 	/* The D3cold consent the user chose (flag or yes) is judged as install will write it. */
 	if (o && o->disable_d3cold)
 		argv[n++] = "--disable-d3cold";
-	/* The features and their build inputs, so doctor names a missing one before install starts. */
+	/* The features and their build inputs, so the check names a missing one before install starts. */
 	if (o && o->display_set)
 		argv[n++] = o->display == GS_DISPLAY_ON ? "--display" : "--no-display";
 	if (o && o->host_cuda_set)
 		argv[n++] = o->host_cuda ? "--host-cuda" : "--no-host-cuda";
+	if (o && o->host_desktop_set)
+		argv[n++] = o->host_desktop ? "--host-desktop" : "--no-host-desktop";
 	if (o && o->companion_file)
 		n = push_opt(argv, n, "--companion-file", o->companion_file);
 	if (o && o->companion_source)
 		n = push_opt(argv, n, "--companion-source", o->companion_source);
 	if (o && o->nvkms_source)
 		n = push_opt(argv, n, "--nvkms-source", o->nvkms_source);
-	/* --driver=skip builds nothing, so doctor asks for no build input. */
+	/* --driver=skip builds nothing, so the check asks for no build input. */
 	if (o && o->skip_driver)
 		argv[n++] = "--driver=skip";
 	argv[n] = NULL;
-	return step(h, self, "doctor", argv);
+	return step(h, self, "install", argv);
 }
 
 /* The generation of the card behind pf, from its sysfs device ID; -1 when it cannot be read. */
@@ -234,7 +234,7 @@ static unsigned int eligible_cards(const char *sys, struct pick *list, unsigned 
 		    vendor != GS_VENDOR_NVIDIA)
 			continue;
 		gs_card_inspect(sys, &a, &c);
-		if (gs_check_selectable(&c, 1, why, sizeof(why)))
+		if (gs_check_selectable(&c, why, sizeof(why)))
 			continue;
 		/* All of them first: which ones are listed must not depend on the directory's order. */
 		if (n == cap) {
@@ -506,7 +506,7 @@ static int ask_d3cold(const struct gs_setup_host *s, const struct gs_addr *sel, 
 		gs_d3cold_notice(stdout);
 	}
 	fflush(stdout);
-	gs_d3cold_why(why, sizeof(why), laptops, n, sel, nsel, NULL, 0, "");
+	gs_d3cold_why(why, sizeof(why), laptops, n, sel, nsel, "");
 	fprintf(stderr, "geforce-sriov: refused, nothing changed: %s\n", why);
 	return GS_EXIT_REFUSED;
 }
@@ -593,8 +593,8 @@ static const struct gs_confirmed_version *input_row(const struct gs_install_opts
 
 /*
  * The optional features, asked after the GPUs are known: host CUDA (default no), then the inputs
- * the display and host CUDA builds need. The end of input leaves a question unanswered, and doctor
- * then names what is missing.
+ * the display and host CUDA builds need. The end of input leaves a question unanswered, and the checks
+ * before install then name what is missing.
  */
 static void ask_features(const struct gs_setup_host *s, struct gs_install_opts *a)
 {
@@ -683,6 +683,8 @@ static void flag_set(const struct gs_install_opts *a, int allow_unsupported, cha
 		flag_add(buf, len, a->display == GS_DISPLAY_ON ? "--display" : "--no-display");
 	if (a->host_cuda_set)
 		flag_add(buf, len, a->host_cuda ? "--host-cuda" : "--no-host-cuda");
+	if (a->host_desktop_set)
+		flag_add(buf, len, a->host_desktop ? "--host-desktop" : "--no-host-desktop");
 	if (a->companion_file) {
 		flag_add(buf, len, "--companion-file");
 		flag_add(buf, len, a->companion_file);
@@ -727,12 +729,12 @@ static void summary(const struct gs_setup_host *s, const struct gs_install_opts 
 	else if (a->nvidia_source)
 		printf("NVIDIA's kernel tree at %s\n", a->nvidia_source);
 	else
-		printf("%s\n", s->driver_present ? "the NVIDIA driver found on this host" : "none (doctor names what is missing)");
+		printf("%s\n", s->driver_present ? "the NVIDIA driver found on this host" : "none (the checks name what is missing)");
 	printf("  GPUs:         ");
 	for (i = 0; i < a->ndevices; i++)
 		printf("%s%s%s", i ? ", " : "", a->devices[i].str, i + 1 == a->ndevices ? "\n" : "");
 	if (!a->ndevices)
-		printf("%s\n", ncards ? "none selected" : "none eligible (doctor names why)");
+		printf("%s\n", ncards ? "none selected" : "none eligible (the checks name why)");
 	if (!gs_install_version_named(a, version, sizeof(version)) && !gs_version_confirmed(GS_VERSION_HOST, version))
 		allow = 1;
 	/* The display and host-CUDA features are recorded by install; display follows the boot display card. */
@@ -779,7 +781,7 @@ static int ask_missing(const struct gs_setup_host *s, struct gs_install_opts *a,
 	return GS_EXIT_OK;
 }
 
-/* Without questions: the flags that would let the run continue, when doctor stopped it. */
+/* Without questions: the flags that would let the run continue, when the checks before install stopped it. */
 static void missing_flags(const struct gs_setup_host *s, const struct gs_install_opts *o, unsigned int ncards)
 {
 	char need[160] = "", why[256];
@@ -930,18 +932,6 @@ static int features_recorded(const struct gs_config *cfg, int display)
 	return b.display == display && b.host_cuda == (cfg->host_cuda == GS_SW_ON);
 }
 
-/* 1 when a 0.2.x artifact is still on the host and install has not migrated it yet. */
-static int migration_pending(void)
-{
-	char p[GS_PATH_MAX];
-
-	if (!gs_pathf(p, sizeof(p), "%s/%s", GS_UNIT_DIR, GS_LEGACY_UNIT_PREPARE) && gs_exists(p))
-		return 1;
-	if (gs_exists(GS_LEGACY_HOLD))
-		return 1;
-	return gs_exists(GS_LEGACY_DEFERRED);
-}
-
 /* The install step of this run, with the feature selection and the D3cold consent it should write. */
 static int run_install(const struct gs_setup_host *s, const char *self, const struct gs_install_opts *o, int d3cold)
 {
@@ -963,6 +953,8 @@ static int run_install(const struct gs_setup_host *s, const char *self, const st
 		argv[n++] = o->display == GS_DISPLAY_ON ? "--display" : "--no-display";
 	if (o->host_cuda_set)
 		argv[n++] = o->host_cuda ? "--host-cuda" : "--no-host-cuda";
+	if (o->host_desktop_set)
+		argv[n++] = o->host_desktop ? "--host-desktop" : "--no-host-desktop";
 	if (o->companion_file)
 		n = push_opt(argv, n, "--companion-file", o->companion_file);
 	if (o->companion_source)
@@ -1086,13 +1078,13 @@ static int installed_host(const struct gs_setup_host *s, const char *self, const
 	const char *destdir = getenv("DESTDIR");
 	struct gs_config cfg;
 	char err[512], why[256];
-	int r, ready = 0, need_install, consent_new, display, wrote = 0, d3cold;
+	int r, ready = 0, need_install, consent_new, display, d3cold;
 
 	/* Once, before any installation or runtime change. */
 	if ((r = version_consent(s, o)))
 		return r;
 	/*
-	 * A staged run describes another host: install and migrate below DESTDIR and stop there.
+	 * A staged run describes another host: install below DESTDIR and stop there.
 	 * Nothing on this host is inspected, activated or restarted.
 	 */
 	if (destdir && destdir[0]) {
@@ -1100,19 +1092,8 @@ static int installed_host(const struct gs_setup_host *s, const char *self, const
 		return run_install(s, self, o, o->disable_d3cold);
 	}
 	if (gs_config_load(path, &cfg, err, sizeof(err))) {
-		/* A 0.2.x package-owned config is migrated by install, which owns the file's history. */
-		if (!strstr(err, "boot_display_release")) {
-			fprintf(stderr, "setup: %s: %s\n", path, err);
-			return GS_EXIT_REFUSED;
-		}
-		printf("The config holds a 0.2.x key; install migrates it.\n");
-		if ((r = run_install(s, self, o, 0)))
-			return r;
-		wrote = 1;
-		if (gs_config_load(path, &cfg, err, sizeof(err))) {
-			fprintf(stderr, "setup: %s: %s\n", path, err);
-			return GS_EXIT_REFUSED;
-		}
+		fprintf(stderr, "setup: %s: %s\n", path, err);
+		return GS_EXIT_REFUSED;
 	}
 	if ((r = same_devices(o, &cfg, path)))
 		return r;
@@ -1129,14 +1110,13 @@ static int installed_host(const struct gs_setup_host *s, const char *self, const
 	if (r == GS_EXIT_OK) {
 		ready = 1;
 	} else if (r != GS_EXIT_FAIL) {
-		printf("\nStopped: check refused (exit %d). %s\n", r,
-		       wrote ? "The install above completed; no GPU state changed." : "Nothing changed.");
+		printf("\nStopped: check refused (exit %d). Nothing changed.\n", r);
 		return r;
 	}
 	display = gs_display_effective(h->sys, &cfg, why, sizeof(why));
 	if (!display && cfg.display == GS_DISPLAY_ON)
 		printf("%s\n", why);
-	need_install = !ready || !features_recorded(&cfg, display) || migration_pending() ||
+	need_install = !ready || !features_recorded(&cfg, display) ||
 		       (o->display_set && o->display != cfg.display) ||
 		       (o->host_cuda_set && (cfg.host_cuda == GS_SW_ON) != o->host_cuda) ||
 		       (o->vfs && o->vfs != cfg.vfs) ||
@@ -1155,10 +1135,9 @@ static int installed_host(const struct gs_setup_host *s, const char *self, const
 		closing(h->sys, &cfg, 0);
 		return GS_EXIT_OK;
 	}
-	r = step_doctor(h, self, o);
+	r = step_preflight(h, self, o);
 	if (r != GS_EXIT_OK) {
-		printf("\nStopped: fix what doctor names above, then run setup again. %s\n",
-		       wrote ? "The install above completed; no GPU state changed." : "Nothing changed.");
+		printf("\nStopped: fix what the checks above name, then run setup again. Nothing changed.\n");
 		return r;
 	}
 	if ((r = run_install(s, self, o, consent_new)))
@@ -1177,7 +1156,7 @@ static int installed_host(const struct gs_setup_host *s, const char *self, const
 	return finish(s, self, &cfg);
 }
 
-/* A host with no config: the questions, doctor, install, then the first activation when it can run. */
+/* A host with no config: the questions, the checks before install, install, then the first activation when it can run. */
 static int first_install(const struct gs_setup_host *s, const char *self, const char *path, const struct gs_install_opts *o)
 {
 	const struct gs_host *h = s->h;
@@ -1206,7 +1185,7 @@ static int first_install(const struct gs_setup_host *s, const char *self, const 
 				return GS_EXIT_REFUSED;
 			}
 			if (!a.ndevices && !ncards && !more)
-				printf("No NVIDIA GPU was found; doctor names what is missing.\n");
+				printf("No NVIDIA GPU was found; the checks that follow name what is missing.\n");
 			/* The D3cold consent cannot be asked here: a laptop GPU without it changes nothing. */
 			if ((r = ask_d3cold(s, a.devices, a.ndevices, 0, &a.disable_d3cold)))
 				return r;
@@ -1214,15 +1193,15 @@ static int first_install(const struct gs_setup_host *s, const char *self, const 
 	}
 	if ((r = version_consent(s, &a)))
 		return r;
-	r = step_doctor(h, self, &a);
+	r = step_preflight(h, self, &a);
 	if (r != GS_EXIT_OK && !staged) {
-		printf("\nStopped: fix what doctor names above, then run setup again. Nothing changed.\n");
+		printf("\nStopped: fix what the checks above name, then run setup again. Nothing changed.\n");
 		if (s->in < 0)
 			missing_flags(s, &a, ncards + more);
 		return r;
 	}
 	if (r != GS_EXIT_OK)
-		printf("\nStaging anyway: a staged install changes nothing here. Fix doctor's failures on the\n"
+		printf("\nStaging anyway: a staged install changes nothing here. Fix the failures above on the\n"
 		       "target host before running the steps below.\n");
 	if ((r = run_install(s, self, &a, a.disable_d3cold)))
 		return r;
@@ -1257,6 +1236,17 @@ int gs_setup(const struct gs_setup_host *s, const struct gs_install_opts *o)
 	if (self_path(self, sizeof(self)))
 		return GS_EXIT_FAIL;
 	printf("geforce-sriov %s setup\n", GS_VERSION);
+	{
+		const char *dd = getenv("DESTDIR");
+		const char *root = dd && dd[0] ? dd : s->h->root ? s->h->root : "";
+		char bindir[GS_PATH_MAX], older[512], fixes[1024];
+
+		gs_pathf(bindir, sizeof(bindir), "%s/bin", o->prefix ? o->prefix : GS_DEFAULT_PREFIX);
+		if (gs_other_install(root, bindir, older, sizeof(older), fixes, sizeof(fixes))) {
+			gs_other_install_refusal(root, older, fixes);
+			return GS_EXIT_REFUSED;
+		}
+	}
 	if (!gs_exists(path))
 		return first_install(s, self, path, o);
 	if (!s->config && getenv(GS_CONFIG_ENV) && getenv(GS_CONFIG_ENV)[0] &&
@@ -1269,7 +1259,7 @@ int gs_setup(const struct gs_setup_host *s, const struct gs_install_opts *o)
 	return installed_host(s, self, path, o);
 }
 
-/* NVIDIA's kernel tree where doctor looks for it, or its vGPU userspace where install looks. */
+/* NVIDIA's kernel tree where the preflight looks for it, or its vGPU userspace where install looks. */
 static int driver_present(const struct gs_install_opts *o)
 {
 	static const char *const libs[] = { "/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib" };

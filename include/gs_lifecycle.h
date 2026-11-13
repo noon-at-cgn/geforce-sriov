@@ -2,7 +2,7 @@
 /*
  * geforce-sriov host CLI: configuration, sysfs inspection and lifecycle commands.
  *
- * Read-only commands (devices, doctor, status) accept a diagnostic sysfs root.
+ * Read-only commands (devices, status) accept a diagnostic sysfs root.
  * Every mutating function in this interface takes no root argument: it acts on
  * the live /sys only, so a fixture root can never reach a mutation path.
  */
@@ -55,6 +55,13 @@
 #define GS_MANIFEST GS_STATE_DIR "/" GS_MANIFEST_NAME
 /* The driver step's whole output during install, rewritten by each run (mode 0600). */
 #define GS_DRIVER_LOG GS_STATE_DIR "/driver-step.log"
+/*
+ * The kernel hook's report: one file per kernel release whose automatic build failed, holding one
+ * line with the cause; a successful `rebuild` for that release removes it. Each run's log is
+ * GS_KERNEL_HOOK_LOGS/<release>.log, so one apt run for two kernels keeps both.
+ */
+#define GS_KERNEL_HOOK_FAILED GS_STATE_DIR "/kernel-hook-failed"
+#define GS_KERNEL_HOOK_LOGS GS_STATE_DIR "/kernel-hook-logs"
 /* Written by install when it replaces nvidia.ko: kernel=, module_sha256=, module_build_id= lines. */
 #define GS_DRIVER_BUILD_NAME "driver-build"
 #define GS_DRIVER_BUILD GS_STATE_DIR "/" GS_DRIVER_BUILD_NAME
@@ -64,6 +71,9 @@
 /* Host CUDA: where the driver step puts NVIDIA's CUDA libraries for install, and the loader's file for their directory. */
 #define GS_CUDA_STAGE GS_STATE_DIR "/host-cuda"
 #define GS_CUDA_CONF "/etc/ld.so.conf.d/geforce-sriov-cuda.conf"
+/* Host desktop: the same for NVIDIA's graphics libraries (the library directory is <prefix>/lib/geforce-sriov/gl). */
+#define GS_GL_STAGE GS_STATE_DIR "/host-desktop"
+#define GS_GL_CONF "/etc/ld.so.conf.d/geforce-sriov-gl.conf"
 #define GS_RUN_DIR "/run/geforce-sriov"
 #define GS_LOCK_PATH GS_RUN_DIR "/lock"
 #define GS_LIVE_SYSFS "/sys"
@@ -94,9 +104,8 @@ int gs_addr_parse(const char *s, struct gs_addr *out);
 #define GS_SW_ON 1
 
 enum gs_display_mode { GS_DISPLAY_AUTO, GS_DISPLAY_ON, GS_DISPLAY_OFF };
-/* fb_slots=: hold the framebuffer slots of Ada VFs. auto and on mean the same today; off is the way out. */
-enum gs_fb_slots { GS_FB_SLOTS_AUTO, GS_FB_SLOTS_ON, GS_FB_SLOTS_OFF };
-
+/* host_desktop=: NVIDIA's graphics libraries for the host desktop. auto (what an absent key means) is on when the display build is. */
+enum gs_host_desktop { GS_DESKTOP_AUTO, GS_DESKTOP_ON, GS_DESKTOP_OFF };
 /*
  * /etc/geforce-sriov/config, shared with the identity hook. Syntax: at most
  * 65536 bytes; lines split on '\n' (the last may lack one); empty lines and
@@ -108,8 +117,9 @@ struct gs_config {
 	struct gs_addr bdfs[GS_CFG_MAX_BDFS];
 	unsigned int nbdfs;
 	enum gs_display_mode display;
-	enum gs_fb_slots fb_slots;
+	int fb_slots_ignored;        /* the config had the removed fb_slots= line; it is read and dropped */
 	int host_cuda;
+	enum gs_host_desktop host_desktop;
 	int ari;                 /* default on */
 	int msix;                /* default on */
 	unsigned int vfs;        /* VFs per card, 1..GS_VFS_MAX; 0: not set, GS_DEFAULT_VFS applies */
@@ -205,9 +215,8 @@ int gs_check_presented(const struct gs_card *c, const struct gs_config *cfg, cha
 /* The most companion functions one card may have unbound in one transaction (activation). */
 #define GS_PLAN_MAX_UNBIND 8
 
-/* Install-time selection check: the PF may legitimately be bound to nvidia or to no driver.
- * release_granted is kept for source compatibility and ignored (console releases were removed). */
-int gs_check_selectable(const struct gs_card *card, int release_granted, char *reason, size_t len);
+/* Install-time selection check: the PF may legitimately be bound to nvidia or to no driver. */
+int gs_check_selectable(const struct gs_card *card, char *reason, size_t len);
 
 /*
  * Console users of a boot display PF, read by gs_display_inspect(). The only firmware framebuffer
@@ -258,6 +267,7 @@ struct gs_build {
 	char driver_version[128];
 	int driver_version_confirmed; /* -1 when not recorded */
 	int display, host_cuda;       /* -1 when not recorded */
+	char client_accept[32];       /* the version of the libraries nvidia.ko accepts besides its own (client_accept=); empty: none */
 };
 
 enum gs_version_package { GS_VERSION_HOST, GS_VERSION_COMPANION };
@@ -315,7 +325,7 @@ struct gs_resource_fit {
 enum gs_build_state gs_driver_build_read(const char *record, const char *release, const char *module,
 					 struct gs_build *out);
 /*
- * The sentence doctor, check and activate print for b: 0 when the module is the driver step's build,
+ * The sentence check and activate print for b: 0 when the module is the driver step's build,
  * 1 otherwise, with the command that rebuilds it and the features the record names.
  */
 int gs_build_line(const struct gs_build *b, char *line, size_t len);
@@ -342,26 +352,36 @@ int gs_loaded_not_installed(const char *sysroot, const struct gs_build_src *src)
 /* Read-only commands. sysroot NULL means the live /sys. */
 struct gs_diag_opts {
 	const char *sysroot;
-	/* doctor: the feature selection and build inputs install would get, judged before it runs. */
+	/* The feature selection and build inputs install would get, judged before it runs. */
 	int display_set, host_cuda_set, host_cuda;
+	int host_desktop_set, host_desktop; /* --host-desktop / --no-host-desktop */
 	int skip_driver;           /* --driver=skip: install builds nothing, so no build input is needed */
 	enum gs_display_mode display;
 	const char *companion_file, *companion_source, *nvkms_source;
-	const char *config_path;   /* NULL: default rules (see gs_cmd_doctor) */
+	const char *config_path;   /* NULL: default rules (see gs_diag_config) */
 	struct gs_addr devices[GS_CFG_MAX_BDFS];
 	unsigned int ndevices;
-	int disable_d3cold;       /* doctor --disable-d3cold: install writes d3cold=off (needs a laptop GPU among those judged) */
-	const char *nvidia_source; /* doctor: NVIDIA's kernel tree to check; NULL: gs_nvidia_source_default() */
-	const char *driver_file;   /* doctor --driver-file: install extracts NVIDIA's tree from this package */
-	const struct gs_build_src *build; /* doctor, status: NULL: the live host's, skipped on a fixture root */
-	const char *modprobe_dir; /* doctor: modprobe.d to read; NULL: /etc/modprobe.d, skipped on a fixture root */
-	const char *plugin;       /* doctor: libnvidia-vgpu.so to check; NULL: NVIDIA's plugin link, skipped on a fixture root */
-	const char *unit_dir;     /* doctor: unit directory whose vGPU daemon drop-ins to read; NULL: systemd's unit
+	int disable_d3cold;       /* install writes d3cold=off (needs a laptop GPU among those judged) */
+	const char *nvidia_source; /* NVIDIA's kernel tree to check; NULL: gs_nvidia_source_default() */
+	const char *driver_file;   /* install extracts NVIDIA's tree from this package */
+	const struct gs_build_src *build; /* NULL: the live host's, skipped on a fixture root */
+	const char *modprobe_dir; /* modprobe.d to read; NULL: /etc/modprobe.d, skipped on a fixture root */
+	const char *plugin;       /* libnvidia-vgpu.so to check; NULL: NVIDIA's plugin link, skipped on a fixture root */
+	const char *unit_dir;     /* unit directory whose vGPU daemon drop-ins to read; NULL: systemd's unit
 				   * directories, skipped on a fixture root */
-	const char *run_dir;      /* doctor, status: where GS_ACTIVATING_NAME is; NULL: GS_RUN_DIR, skipped on a fixture root */
+	const char *run_dir;      /* status: where GS_ACTIVATING_NAME is; NULL: GS_RUN_DIR, skipped on a fixture root */
+	const char *kernel_hook_dir; /* status: where the kernel hook's failure files are; NULL: GS_KERNEL_HOOK_FAILED, skipped on a fixture root */
 };
 int gs_cmd_devices(void);
-int gs_cmd_doctor(const struct gs_diag_opts *opts);
+/*
+ * The host checks (the old doctor), one function with two callers. GS_HOSTCHECK_PRE: what install would meet on
+ * this host, printed with every [OK|INFO|WARN|FAIL] line and the failure count; `install --dry-run` and setup
+ * run it. GS_HOSTCHECK_POST: the state of an installed host, printed only as INFO, WARN and FAIL lines, for
+ * status to follow its own lines with. Returns GS_EXIT_REFUSED when a line is a FAIL, GS_EXIT_USAGE for
+ * --disable-d3cold without a laptop GPU, else GS_EXIT_OK.
+ */
+enum gs_hostcheck_mode { GS_HOSTCHECK_PRE, GS_HOSTCHECK_POST };
+int gs_hostcheck(const struct gs_diag_opts *opts, enum gs_hostcheck_mode mode);
 int gs_cmd_status(const struct gs_diag_opts *opts);
 
 /*
@@ -376,64 +396,16 @@ int gs_cmd_status(const struct gs_diag_opts *opts);
  * this structure, never a test of which one it is: root prefixes the host's other files, build
  * says where the build record is, and enable_prereq vets the programs the real runner will execute.
  */
+/* 1 when one of the n addresses of sel is an Ada card by its device attribute below sys. */
+int gs_fb_ada_selected(const char *sys, const struct gs_addr *sel, unsigned int n);
 /*
- * The framebuffer slots of Ada VFs (src/fbslot.c). The owner inside nvidia.ko holds them and is
- * told what to hold through GS_FB_PROC below the procfs root; its presence is how the CLI knows
- * that the loaded module carries the owner.
+ * The line status and check print for an Ada card with numvfs VFs enabled, read from the placement_id
+ * file of each VF below sys (no nvidia-smi, which can hang). The line starts with "VM video memory:".
+ * Every VF reads "Not Applicable": a VM takes free memory when it starts. A VF reads a number: fixed
+ * slots, the loaded nvidia.ko does not carry the Ada placement change. A file that cannot be read, or
+ * reads anything else: that is said. Told, never judged. Returns 1 for the first state, 0 for the others.
  */
-#define GS_FB_PROC "driver/nvidia/geforce-sriov-fb"
-/* The alignment of the vGPU plugin's request, in 580.159.01: 32 MiB. */
-#define GS_FB_ALIGN 0x2000000ull
-#define GS_FB_NO_PLACEMENT 0xffffu
-#define GS_VFS_MAX_QUERY 64
-/* What NVIDIA's driver answers for one VF: its status, and then the placement and the range. */
-struct gs_fb_answer {
-	unsigned int status, placement;
-	unsigned long long offset, length;
-};
-struct gs_fb_query {
-	unsigned long long ram_size, segment; /* the GPU's memory, and the size its ranges are multiples of */
-	struct gs_fb_answer vf[GS_VFS_MAX_QUERY];
-};
-struct gs_fb_range {
-	unsigned long long offset, size;
-};
-/*
- * The slots the answers for nvf VFs name, into out (room for nvf); *n may be 0, as for an Ampere
- * card. -1 with why when one answer does not hold together: then no slot of that GPU is held.
- */
-int gs_fb_validate(const struct gs_fb_query *q, unsigned int nvf, struct gs_fb_range *out, unsigned int *n, char *why,
-		   size_t len);
-enum gs_fb_slot_kind { GS_FB_HELD, GS_FB_GIVEN_UP, GS_FB_FAILED };
-struct gs_fb_slot_state {
-	char bdf[16];
-	unsigned long long offset, size;
-	enum gs_fb_slot_kind state;
-	unsigned int dups, answered, status;
-	char why[160];
-};
-#define GS_FB_STATE_MAX 128
-struct gs_fb_state {
-	int present, abi;
-	unsigned int n;
-	struct gs_fb_slot_state slot[GS_FB_STATE_MAX];
-};
-/* What the owner in the loaded nvidia.ko holds: 0, -ENOENT when that module has no owner, or another negative errno. */
-int gs_fb_state_read(const char *procroot, struct gs_fb_state *st);
-struct gs_vgpu_card;
-struct gs_config;
-struct gs_host;
-/* activate, before anything is unloaded or re-probed: the owner lets go of everything. Never fails the caller. */
-void gs_fb_release(const struct gs_host *h);
-/* activate, once the VFs have their vGPU types: ask, check and hold the slots of each Ada card. Never fails the caller. */
-void gs_fb_hold(const struct gs_host *h, const struct gs_config *cfg, const struct gs_vgpu_card *vc, unsigned int n);
-/*
- * The sentence status, doctor and check print about the slots of the Ada GPU pf. record is the
- * path of the build record or NULL; ver the running driver version or "". 1: every known slot is
- * held; 0: off by the config; -1: not held, or not all; -2: the owner could not be read.
- */
-int gs_fb_line(const char *procroot, const struct gs_config *cfg, const char *record, const char *pf, const char *ver,
-	       char *line, size_t len);
+int gs_ada_placement_line(const char *sys, const struct gs_addr *pf, unsigned int numvfs, char *line, size_t len);
 
 struct gs_host {
 	const char *sys;       /* sysfs root */
@@ -453,11 +425,6 @@ struct gs_host {
 	int (*capture)(const char *const argv[], char *out, size_t len);
 	int (*write_attr_deadline)(const struct gs_host *, const char *, const char *, unsigned int);
 	int (*run_deadline)(const struct gs_host *, const char *const [], unsigned int);
-	/*
-	 * Where NVIDIA's driver puts the framebuffer of each VF of a card (src/fbslot.c): 0, or -1 with
-	 * why. NULL: the driver itself is asked, through its device files below root.
-	 */
-	int (*fb_query)(const struct gs_host *, const struct gs_vgpu_card *, struct gs_fb_query *, char *why, size_t len);
 };
 extern const struct gs_host gs_host_live;
 /* The live host's build record and module: every field NULL, so each takes its default. */
@@ -479,16 +446,16 @@ struct gs_overrides {
 unsigned int gs_laptop_gpus(const char *sys, const struct gs_addr *list, unsigned int n, struct gs_addr *out);
 int gs_d3cold_usage(void);
 /*
- * Why prepare refuses the laptop GPUs laptops (n of them) while the config has no d3cold=off: the text after
- * "refused, nothing changed: ", ending with the install command that keeps the selection sel and its grants rel.
+ * Why activate refuses the laptop GPUs laptops (n of them) while the config has no d3cold=off: the text after
+ * "refused, nothing changed: ", ending with the install command that keeps the selection sel.
  * Each line after the first starts with indent. buf takes GS_D3COLD_WHY_SIZE bytes.
  */
 #define GS_D3COLD_WHY_SIZE 1536
 void gs_d3cold_why(char *buf, size_t len, const struct gs_addr *laptops, unsigned int n, const struct gs_addr *sel,
-		   unsigned int nsel, const struct gs_addr *rel, unsigned int nrel, const char *indent);
+		   unsigned int nsel, const char *indent);
 
 /*
- * Ada and Ampere CPU-RM host stack (docs/driver-patch.md#byte-patches). activate: enable the VFs of a
+ * Ada and Ampere CPU-RM host stack (docs/driver-patch.md#revisions). activate: enable the VFs of a
  * selected PF that has none, load nvidia_vgpu_vfio, restart nvidia-vgpud and nvidia-vgpu-mgr,
  * re-probe each selected PF (driver unbind/bind, never remove/rescan), set its vGPU type on each of
  * its VFs, then power/control=on on each VF, gated on the readback, and print what check prints.
@@ -534,7 +501,7 @@ int gs_parse_vgpu_type(const char *value, unsigned int *out);
  */
 int gs_plugin_verdict(const char *path, const char *real, const char *sha, char *why, size_t len);
 /* 0 when ver is the version this build targets ("supported"); 1 for any other version
- * ("not supported"), with the sentence doctor, check and activate print in line. */
+ * ("not supported"), with the sentence check and activate print in line. */
 int gs_driver_version_line(const char *ver, char *line, size_t len);
 int gs_cmd_activate(const struct gs_activate_opts *o);
 /* activate after the root check, lock and config load. */
@@ -557,6 +524,7 @@ struct gs_install_opts {
 	enum gs_display_mode display;
 	int display_set;
 	int host_cuda, host_cuda_set;
+	int host_desktop, host_desktop_set; /* --host-desktop is on, --no-host-desktop off */
 	const char *companion_file, *companion_source, *nvkms_source;
 	int allow_unsupported_driver;
 	int from_setup;            /* --from-setup: setup runs this install and prints the closing instructions itself */
@@ -568,8 +536,25 @@ struct gs_install_opts {
 	const char *driver_file;   /* --driver-file PATH: NVIDIA's .run package (absolute, resolved) */
 	int accept_nvidia_license; /* --accept-nvidia-license: run NVIDIA's installer from driver_file */
 	int disable_d3cold;        /* --disable-d3cold: write d3cold=off (needs a laptop GPU selected) */
+	int dry_run;               /* install --dry-run: run the checks before install on this host, change nothing */
 };
 int gs_cmd_install(const struct gs_install_opts *opts);
+/*
+ * install from the installed copy with only selection options (--device, --disable-d3cold, --display,
+ * --no-display): checks each address, runs the driver step as rebuild does when the display need no longer
+ * matches the installed build, then writes the config and the selection record. It copies no files.
+ * env is the host it acts on: tests pass a fixture; the real one is the live system.
+ */
+struct gs_select_env {
+	const char *sys;       /* sysfs root */
+	const char *destdir;   /* prefix of the config, the manifest and the state directory; "" for the live host */
+	const struct gs_build_src *build; /* the installed build's record, as gs_build_identity takes it */
+	const char *driver;    /* geforce-sriov-driver */
+	const char *driver_log;
+	const char *release;   /* the kernel the driver step builds for; NULL: the running one */
+	int (*before_driver)(const char *release); /* run before the driver step; NULL: nothing */
+};
+int gs_install_select(const struct gs_install_opts *opts, const struct gs_select_env *env);
 /*
  * The framed notice before setup's D3cold question for a laptop GPU: what D3cold does, what d3cold=off keeps
  * powered and what it costs, what the user must configure, and how to revert. In red when gs_color(f);
@@ -581,16 +566,16 @@ void gs_d3cold_notice_color(FILE *f, int color);
 int gs_color(FILE *f);
 /*
  * The end of a live install: the early livepatch unit and the activation unit, how to enable them,
- * and the next step (doctor, then activate or the reboot the first install needs).
+ * and the next step (the power cycle the first install needs, then status).
  */
 /* The closing lines of an install that a boot has to pick up. from_setup: setup gives the instructions itself. */
-void gs_install_next(const char *bindir, const struct gs_config *cfg, int from_setup);
+void gs_install_next(const struct gs_config *cfg, int from_setup);
 int gs_cmd_uninstall(int unload);
 /* setup's questions: AUTO asks when standard input is a terminal, ON always (--interactive), OFF never (--no-prompt). */
 enum gs_prompt { GS_PROMPT_AUTO, GS_PROMPT_ON, GS_PROMPT_OFF };
 /*
- * setup: from the host's state, the next steps of a first install (doctor, install, then activation
- * when it is safe) or of an installed host (doctor, check, activate, check), each run as a child
+ * setup: from the host's state, the next steps of a first install (install --dry-run, install, then activation
+ * when it is safe) or of an installed host (install --dry-run, check, activate, check), each run as a child
  * process of this binary; ends with the guest drivers of each selected card. o carries the selection
  * and install's feature and package options; on an installed host --device must name exactly the
  * configured GPUs. On a terminal or with --interactive it asks once per run: version consent for a
@@ -632,7 +617,7 @@ int gs_uninstall_file(const char *path, const char *want);
  */
 int gs_uninstall_files(const char *path, const char *modprobe_dir, const char *const keep[]);
 
-/* Prerequisites of a live install; install refuses, and doctor names them, with GS_PREREQ_MSG. */
+/* Prerequisites of a live install; install refuses, and `install --dry-run` names them, with GS_PREREQ_MSG. */
 enum gs_dep { GS_DEP_HEADERS, GS_DEP_DKMS, GS_DEP_PCIUTILS, GS_DEP_TOOLCHAIN, GS_DEP_COUNT };
 #define GS_PREREQ_MSG \
 	"A live install needs kernel headers for the running release, dkms, pciutils, a C compiler and make; " \
@@ -659,6 +644,8 @@ int gs_kept_input(const char *dir, const char *name);
  * the config selects and the inputs an earlier install kept. It runs from the installed copy.
  */
 int gs_cmd_rebuild(const char *release);
+/* The closing text of `rebuild` for the kernel `release` while `running` is the running kernel (a kernel that is not running needs no power cycle). */
+void gs_rebuild_done_text(const char *release, const char *running, char *out, size_t len);
 /*
  * NVIDIA's .run package file: extract it (`sh file --extract-only --target`) into base/<version, or
  * the first 16 hex digits of its SHA-256>/, reusing an earlier extraction of the same file. When
@@ -679,31 +666,24 @@ int gs_unit_file_present(const char *name);
  * NULL: its output passes through. Otherwise its standard output and error go to log (truncated,
  * mode 0600), only its own "geforce-sriov-driver:" lines reach standard output, and a failure prints
  * the last 40 lines of log and its path. result (NULL: not wanted) says what a step that succeeded
- * changed, read from its line `install_result=unchanged|record-only|changed`; without that line,
+ * changed, read from its line `install_result=unchanged|changed`; without that line,
  * or with another value, it is GS_DRIVER_CHANGED. No message text is parsed.
  */
 enum gs_driver_result {
 	GS_DRIVER_CHANGED,     /* a module or the plugin copy was built or replaced, or the step did not say */
 	GS_DRIVER_UNCHANGED,   /* the build was already installed and nothing was written */
-	GS_DRIVER_RECORD_ONLY, /* the build was already installed; only the record's version fields changed */
 };
 int gs_driver_step(const char *const argv[], const char *log, char *why, size_t len, enum gs_driver_result *result);
 /*
  * install's DKMS step for GS_DKMS_NAME/GS_VERSION, each command run by run (gs_run; tests record them).
- * registered: DKMS holds this version already. status: the output of `dkms status -m GS_DKMS_NAME`
- * (NULL or "": none), whose other versions of GS_DKMS_NAME (an upgrade) are replaced as well. When any
- * is registered, the new tree is first built in a scratch DKMS tree below the directory scratch
- * (`dkms --dkmstree`), which leaves the registered modules and their installed copies alone; only when
- * that succeeds are they removed (`dkms remove --all`, the other versions first) and the new one added,
- * built and installed for the running kernel. When that fails after the removal, the boot units are
- * disabled. After a successful install, the source tree /usr/src/GS_DKMS_NAME-<v> of each other version v
- * it removed goes too, but only when it is a real directory holding only files the install manifest at
- * manifest records and install still owns; the manifest drops the entries that are gone. Paths on disk
- * are below root ("" for the live system); a tree that stays is a warning only. 0, or GS_EXIT_FAIL with
- * what was removed and the way back printed.
+ * registered: DKMS holds this version already (a re-install). The new tree is then first built in a scratch
+ * DKMS tree below the directory scratch (`dkms --dkmstree`), which leaves the registered module and its
+ * installed copies alone; only when that succeeds is it removed (`dkms remove --all`) and added, built and
+ * installed for the running kernel again. When that fails after the removal, the boot units are disabled.
+ * Another version of GS_DKMS_NAME is not handled: install refuses while one is installed
+ * (gs_other_install). 0, or GS_EXIT_FAIL with what was removed and the way back printed.
  */
-int gs_dkms_step(int (*run)(const char *const argv[]), int registered, const char *status, const char *scratch,
-		 const char *root, const char *manifest);
+int gs_dkms_step(int (*run)(const char *const argv[]), int registered, const char *scratch);
 /*
  * rebuild: the livepatch module of this version must be installed for the kernel NVIDIA's module is
  * built for. DKMS builds for a kernel only when that kernel's package is installed, so a kernel
@@ -712,33 +692,70 @@ int gs_dkms_step(int (*run)(const char *const argv[]), int registered, const cha
  * `dkms install -k release` (run). GS_EXIT_OK, or GS_EXIT_FAIL when that install failed; named is
  * the kernel the user named, for the command the message repeats.
  */
-/* ---- NVIDIA's CUDA libraries for host CUDA (src/cudalibs.c) ---------------- */
+/* ---- NVIDIA's libraries from the second package: host CUDA and host desktop (src/nvlibs.c) ---- */
 
 /* How the commands that install them are run: NULL members on a staged install, fixtures in the tests. */
-struct gs_cuda_io {
+struct gs_nvlibs_io {
 	int (*run)(const char *const argv[]);
 	int (*capture)(const char *const argv[], char *out, size_t len);
 };
+/* The two sets; what a set is lives in nvlibs.c. */
+struct gs_nvset;
+extern const struct gs_nvset gs_nvset_cuda, gs_nvset_desktop;
 /*
- * Brings the libraries in dir in line with want, on the install manifest at path manifest: installs
- * them from stage when the driver step left them there, removes them when want is 0. 0, or a
- * negative errno when the manifest cannot be read or written.
+ * Where a set goes: its library directory, the loader's file naming it, and the driver step's staging directory.
+ * accept: the version of the programs the installed nvidia.ko accepts (its own, or the client_accept of the
+ * build); the desktop set is not installed from a stage of another version. NULL or "": not known, not checked.
  */
-int gs_cuda_libs_apply(const char *manifest, const char *dir, const char *conf, const char *stage, int want,
-		       const struct gs_cuda_io *io);
+struct gs_nvdest {
+	const char *dir, *conf, *stage, *accept;
+};
+/* The small files of the desktop set, in the directories NVIDIA's installer uses; the fixtures point them into a temporary tree. */
+struct gs_nvgl_paths {
+	char etc_vendor[GS_PATH_MAX], etc_platform[GS_PATH_MAX], etc_vulkan[GS_PATH_MAX], share_nvidia[GS_PATH_MAX], xconf[GS_PATH_MAX];
+	/* Where another NVIDIA graphics driver would have put its files: install does not mix with them. */
+	char share_vendor[GS_PATH_MAX], share_platform[GS_PATH_MAX], xorg_drivers[GS_PATH_MAX];
+};
+extern struct gs_nvgl_paths gs_nvgl;
+/* want: 0 the set is off, GS_NVLIBS_ON it is asked for, GS_NVLIBS_AUTO it is on when its inputs are there. */
+#define GS_NVLIBS_ON 1
+#define GS_NVLIBS_AUTO 2
 /*
- * What the manifest lists of them: 1 complete, 0 nothing, -1 a file is missing or changed (bad).
- * dir and version are those of the installed libcuda.
+ * Brings the set in line with want, on the install manifest at path manifest: installs it from the
+ * staging directory when the driver step left one there, removes it when want is 0. 0, or a negative
+ * errno when the manifest cannot be read or written.
  */
-int gs_cuda_libs_state(const char *manifest, char *dir, size_t dlen, char *version, size_t vlen, char *bad, size_t blen);
-/* Which libcuda.so.1 the loader takes, from `ldconfig -p`: 1 the one in dir, 0 another (found), -1 not known. */
-int gs_cuda_loader(int (*capture)(const char *const argv[], char *out, size_t len), const char *dir, char *found, size_t len);
+int gs_nvlibs_apply(const struct gs_nvset *set, const char *manifest, const struct gs_nvdest *d, int want,
+		    const struct gs_nvlibs_io *io);
 /*
- * The sentence status and doctor print after "host CUDA libraries: ". 1 in place, -1 not (a
- * warning), 2 installed although host CUDA is off, 0 nothing to say. capture NULL: the loader is not asked.
+ * What the manifest lists of a set: 1 complete, 0 nothing, -1 a file is missing or changed (bad).
+ * dir and version are those of its first library (libcuda, libEGL_nvidia).
  */
-int gs_cuda_libs_line(const char *manifest, int want, int (*capture)(const char *const argv[], char *out, size_t len),
-		      char *line, size_t len);
+int gs_nvlibs_state(const struct gs_nvset *set, const char *manifest, char *dir, size_t dlen, char *version, size_t vlen,
+		    char *bad, size_t blen);
+/* Which library the loader takes, from `ldconfig -p`: 1 the one in dir, 0 another (found), -1 not known. */
+int gs_nvlibs_loader(const struct gs_nvset *set, int (*capture)(const char *const argv[], char *out, size_t len), const char *dir,
+		     char *found, size_t len);
+/*
+ * The sentence status and the host checks print after "host CUDA libraries: " or "host desktop libraries: ". 1 in
+ * place, -1 not (a warning), 2 installed although the feature is off, 0 nothing to say. capture NULL:
+ * the loader is not asked.
+ */
+int gs_nvlibs_line(const struct gs_nvset *set, const char *manifest, int want,
+		   int (*capture)(const char *const argv[], char *out, size_t len), char *line, size_t len);
+/* "auto", "on" or "off". */
+const char *gs_host_desktop_name(enum gs_host_desktop m);
+/*
+ * The display server of the host, from the processes below proc (an X server or a compositor), and whether its
+ * memory map holds NVIDIA's graphics libraries: 1 it draws with NVIDIA's driver, 0 it does not, -1 no display
+ * server is running, -2 one is running and its memory map cannot be read (another user's: only root can tell).
+ */
+int gs_desktop_servers(const char *proc, char *line, size_t len);
+/*
+ * The host desktop verdict of the host checks from gs_desktop_servers' answer sv for server, and whether the running nvidia module
+ * is stale (loaded: the sentence that says so). Returns 0 nothing to say, 1 INFO, 2 WARN, 3 FAIL, with line set.
+ */
+int gs_desktop_draw_line(int sv, const char *server, int stale, const char *loaded, char *line, size_t len);
 
 int gs_dkms_ensure(int (*run)(const char *const argv[]), int (*capture)(const char *const argv[], char *out, size_t len),
 		   int managed, const char *release, const char *named);
@@ -767,7 +784,7 @@ extern const char *const gs_recovery_msg;
 
 struct gs_module_state {
 	int loaded;
-	char ari[8], msix[8], vfs[8], bdfs[256];
+	char ari[8], msix[8], vfs[8], bdfs[GS_BDF_LIST_STR_SIZE];
 	int lp_present;
 	unsigned int lp_enabled, lp_transition;
 	int lp_ok;
@@ -797,6 +814,68 @@ int gs_vf_list(const char *sys, const struct gs_addr *pf, unsigned int numvfs, s
 	       size_t len);
 int gs_select_cards(const char *sys, const struct gs_config *cfg, const struct gs_activate_opts *o,
 		    struct gs_vgpu_card *out, unsigned int *n);
+
+/*
+ * The selection record: what install saw at each selected address, so that a card that is not the one
+ * that was selected is told from it before anything is written to it. One line per card in
+ * GS_STATE_DIR/selection: "address vendor:device subsystem_vendor:subsystem_device". Only install
+ * writes it. An address without a line (a config edited by hand after install) is judged as before; status says so once.
+ */
+#define GS_SELECTION_NAME "selection"
+#define GS_SELECTION GS_STATE_DIR "/" GS_SELECTION_NAME
+struct gs_ident {
+	struct gs_addr pf;
+	unsigned int vendor, device, subvendor, subdevice;
+};
+/* The record in state_dir: 0; -ENOENT when there is none; -EINVAL when it cannot be parsed. */
+int gs_selection_read(const char *state_dir, struct gs_ident *out, unsigned int *n);
+/* The record's text: its length, or -1 when buf is too small. */
+int gs_selection_render(const struct gs_ident *ids, unsigned int n, char *buf, size_t len);
+/*
+ * The identities to record for the n addresses: refresh 1 reads each card now; refresh 0 keeps the line
+ * old already has for an address and reads only the others. A card that is absent or not in the device
+ * table gets no line. Returns how many lines are in out.
+ */
+unsigned int gs_selection_collect(const char *sys, const struct gs_addr *bdfs, unsigned int n,
+				  const struct gs_ident *old, unsigned int nold, int refresh, struct gs_ident *out);
+/*
+ * Buffer sizes of the selection texts, all from GS_MAX_PFS so that a host with the most cards the
+ * module takes is told its whole command: GS_SEL_ARGS_MAX holds the options of one selection
+ * (" --device <BDF>" for every card, --disable-d3cold, room for one more option), GS_SEL_CMD_MAX the
+ * command with them, GS_SEL_FORMS_MAX the two forms gs_display_forms prints (the options appear in each),
+ * GS_SEL_LINE_MAX a status line that carries the command, GS_SEL_MSG_MAX the verdict (a block of lines for
+ * every card that is not the one selected, then the command or the forms).
+ */
+#define GS_SEL_ARGS_MAX (GS_MAX_PFS * (sizeof(" --device ") - 1 + GS_BDF_STR_SIZE) + 64)
+#define GS_SEL_CMD_MAX (GS_SEL_ARGS_MAX + 64)
+#define GS_SEL_FORMS_MAX (2 * GS_SEL_ARGS_MAX + 512)
+#define GS_SEL_LINE_MAX (GS_SEL_CMD_MAX + 512)
+#define GS_SEL_MSG_MAX (GS_MAX_PFS * 640 + GS_SEL_FORMS_MAX + GS_SEL_CMD_MAX + 1024)
+/* "sudo geforce-sriov install --device A --device B" plus --disable-d3cold, then extra. */
+void gs_selection_command(const struct gs_addr *list, unsigned int n, int d3cold, const char *extra, char *out,
+			  size_t len);
+/*
+ * Compare the card at each selected address (only those of o->devices when o names some) with its record.
+ * 0 when every recorded card is the card there, or nothing is recorded; 1 with msg set (the lines after
+ * "refused, nothing changed: ") when one is not, naming the command that selects the cards that are there.
+ */
+int gs_selection_verdict(const struct gs_host *h, const struct gs_config *cfg, const struct gs_activate_opts *o,
+			 char *msg, size_t len);
+/* gs_selection_verdict, printed as a refusal on standard error: 0 or GS_EXIT_REFUSED. */
+int gs_selection_verify(const struct gs_host *h, const struct gs_config *cfg, const struct gs_activate_opts *o);
+/* 1 with line set when some selected address has no recorded identity yet (status says it once). */
+int gs_selection_unrecorded(const char *state_dir, const struct gs_config *cfg, char *line, size_t len);
+/*
+ * When the inputs for the display modules (NVIDIA's second package and public kernel source) were not
+ * kept, the two forms of the command that give a selection a display build: 1 with text set (selection_args
+ * are the --device options to repeat, or ""). 0 when they were kept, which makes the plain command enough.
+ */
+int gs_display_forms(const struct gs_host *h, const char *selection_args, char *text, size_t len);
+/*
+ * 1 when the installed build (src, as gs_build_identity reads it; sys is the sysfs root) records no display
+ * modules and the selection cfg has a boot display card that needs them.
+ */
+int gs_display_lacking(const struct gs_build_src *src, const char *sys, const struct gs_config *cfg);
 const char *gs_plugin_link(void);
 
 /* ---- NVIDIA's kernel modules (src/modules.c) --------------------------------- */
@@ -817,7 +896,7 @@ int gs_module_loaded(const struct gs_host *h, const char *name);
  * that create them, "" when nothing of theirs is missing; argv holds the same commands for
  * gs_host_run, each ended by NULL.
  */
-#define GS_DEV_NODES_MAX 24
+#define GS_DEV_NODES_MAX (GS_MAX_PFS + 8) /* nvidiactl, a node per GPU, modeset, two caps, two uvm */
 #define GS_NVIDIA_CTL_MINOR 255u
 struct gs_dev_nodes {
 	char missing[GS_DEV_NODES_MAX][48];
@@ -863,6 +942,71 @@ int gs_run(const char *const argv[]);
 int gs_run_capture(const char *const argv[], char *out, size_t len);
 int gs_find_program(const char *name, char *out, size_t len);
 void gs_sleep_ms(unsigned int ms);
+/*
+ * Tell systemd that the step about to run may take up to ms (plus GS_NOTIFY_MARGIN_MS): sends
+ * EXTEND_TIMEOUT_USEC to $NOTIFY_SOCKET. Does nothing without the variable (every run outside the
+ * activation unit) and never fails.
+ */
+#define GS_NOTIFY_MARGIN_MS 30000u
+void gs_notify_extend(unsigned int ms);
+/*
+ * The limits of activation's own waits and writes (src/activate.c), kept here because the start
+ * timeout install writes into geforce-sriov-activate.service is built from them.
+ */
+#define POLL_MS 50u
+#define LIVEPATCH_WAIT_MS 10000u
+#define VF_BIND_WAIT_MS 30000u
+#define MGR_ACTIVE_WAIT_MS 30000u
+#define MGR_SETTLE_MS 2000u
+#define PF_REBIND_WAIT_MS 10000u
+#define VF_ACTIVE_WAIT_MS 5000u
+#define VF_TYPES_WAIT_MS 15000u
+#define REMOVE_WAIT_MS 5000u
+#define RETURN_WAIT_MS 15000u
+#define SRIOV_ATTR_WAIT_MS 5000u
+#define FN_RETURN_WAIT_MS 5000u
+#define BRIDGE_WAKE_MS 5000u
+#define PF_WAKE_MS 5000u
+#define DM_ACTIVE_WAIT_MS 10000u
+#define SYSFS_DEADLINE_MS 10000u
+#define RELEASE_WAIT_MS 5000u
+
+/*
+ * The start timeout install writes into geforce-sriov-activate.service (TimeoutStartSec): an upper
+ * bound of activation with every wait, write and process at its own limit, so that activation ends
+ * through its own limits before systemd ends it, even on a systemd that ignores the extension above.
+ * Normal activation takes seconds per card; the bound matters only in a real hang.
+ * Scope: the polling loops end on CLOCK_MONOTONIC time, so the cost of one iteration does not extend
+ * them beyond one final iteration (sysfs reads; `systemctl is-active`, which has a GS_CAPTURE_TIMEOUT_MS
+ * deadline). The sum counts that final `is-active` once.
+ *
+ * Per card (every branch counted; the functions are in src/activate.c):
+ *   sysfs writes of SYSFS_DEADLINE_MS, GS_ACT_CARD_WRITES: bridge_hold 1, wake_card 2, unwake 3,
+ *     handoff_fb 1, remove_lock 2, audio unbind and rebind 2 x (GS_SLOT_FNS - 1), remove of every
+ *     function of the slot GS_SLOT_FNS, of the PF 1, rescan 1, d3cold 1, laptop_hold 3, re-probe 6
+ *   waits: BRIDGE_WAKE, PF_WAKE, RELEASE, REMOVE x (GS_SLOT_FNS + 1), RETURN, SRIOV_ATTR,
+ *     FN_RETURN x GS_SLOT_FNS, PF_REBIND x 2, VF_BIND, the boot bind wait
+ *   one sriov-manage run of GS_MODULE_DEADLINE_MS
+ * Per VF: two writes (type, power), the VF_ACTIVE wait and two VF_TYPES waits.
+ * Once per run: GS_ACT_MODULE_RUNS modprobe, rmmod, systemctl and nvidia-modprobe runs of
+ *   GS_MODULE_DEADLINE_MS, the livepatch and display-manager waits, the manager wait with its last
+ *   `is-active` call (GS_CAPTURE_TIMEOUT_MS), the settle pause and one nvidia-smi capture.
+ * tests/test_lifecycle.c (test_start_timeout) fails when a limit or a call count here no longer
+ * matches src/activate.c.
+ */
+#define GS_ACT_CARD_WRITES (1 + 2 + 3 + 1 + 2 + 2 * (GS_SLOT_FNS - 1) + GS_SLOT_FNS + 1 + 1 + 1 + 3 + 6)
+#define GS_ACT_MODULE_RUNS 27
+#define GS_ACTIVATE_CARD_MS \
+	(GS_ACT_CARD_WRITES * SYSFS_DEADLINE_MS + BRIDGE_WAKE_MS + PF_WAKE_MS + RELEASE_WAIT_MS + \
+	 REMOVE_WAIT_MS * (GS_SLOT_FNS + 1) + RETURN_WAIT_MS + SRIOV_ATTR_WAIT_MS + FN_RETURN_WAIT_MS * GS_SLOT_FNS + \
+	 PF_REBIND_WAIT_MS * 2 + VF_BIND_WAIT_MS + GS_BOOT_BIND_WAIT_MS + GS_MODULE_DEADLINE_MS)
+#define GS_ACTIVATE_VF_MS (2 * SYSFS_DEADLINE_MS + VF_ACTIVE_WAIT_MS + 2 * VF_TYPES_WAIT_MS)
+#define GS_ACTIVATE_BASE_MS \
+	(GS_ACT_MODULE_RUNS * GS_MODULE_DEADLINE_MS + LIVEPATCH_WAIT_MS + DM_ACTIVE_WAIT_MS + MGR_ACTIVE_WAIT_MS + \
+	 GS_CAPTURE_TIMEOUT_MS + MGR_SETTLE_MS + GS_CAPTURE_TIMEOUT_MS)
+/* 10 % margin on the sum, and the floor of the previous releases' order of magnitude. */
+#define GS_ACTIVATE_START_MIN_S 900u
+unsigned int gs_activate_start_timeout_s(unsigned int ncards, unsigned int nvfs);
 int gs_boot_id(char *buf, size_t len);
 int gs_validate_abs_path(const char *p);
 int gs_lock(void);
@@ -899,11 +1043,28 @@ int gs_cmd_livepatch(const struct gs_livepatch_opts *o);
 /* ---- setup, install and the boot units (owner: V030SetupInstall) ----------------- */
 /* The supported VM autostart units, NULL-terminated. Unrelated hypervisors are never touched. */
 extern const char *const gs_vm_autostart_units[];
-/* The 0.2.x artifacts migration removes; nothing in the current flow uses them. */
+/*
+ * The stamp install writes (one line: GS_VERSION) and a successful uninstall removes. A host is changed only
+ * by the version that installed it: any other version is uninstalled first, then the machine is power cycled.
+ */
+#define GS_FORMAT_NAME "format"
+#define GS_FORMAT_PATH GS_STATE_DIR "/" GS_FORMAT_NAME
+/* The early unit of 0.2.x, whose enablement link is one sign of an older install. */
 #define GS_LEGACY_UNIT_PREPARE "geforce-sriov-prepare.service"
-#define GS_LEGACY_UNIT_WANTS GS_UNIT_DIR "/sysinit.target.wants/" GS_LEGACY_UNIT_PREPARE
-#define GS_LEGACY_HOLD "/etc/modprobe.d/nvidia-manual-load.conf"
-#define GS_LEGACY_DEFERRED GS_RUN_DIR "/deferred"
+/*
+ * 1 when a geforce-sriov of another version than this one is installed below root ("" on a live host), with the
+ * signs found in why; 0 when there is none, or when the stamp names this version. A sign is something the uninstall
+ * of any version removes: a build record, the installed program at bindir, the DKMS registration of the livepatch
+ * module, an enabled boot unit. Never a file an uninstall keeps on purpose (the config, manifest entries of
+ * kept files, the activation lock). A build record is a sign only while the module it names is installed with
+ * its recorded digest (a restore would still have something to do). fix: the commands that clear the signs by hand
+ * when the installed program is gone ("" when it is there: its uninstall does that). Reads only; never writes.
+ */
+int gs_other_install(const char *root, const char *bindir, char *why, size_t len, char *fix, size_t fixlen);
+/* The refusal install and setup print for it, to stderr. */
+void gs_other_install_refusal(const char *root, const char *why, const char *fix);
+/* uninstall: removes the stamp in state_dir (and the directory, when empty) only when rc is GS_EXIT_OK. */
+void gs_format_release(const char *state_dir, int rc);
 /* The x.y.z version the selected input names, if its name states one: 0, or -1 when it states none. */
 int gs_install_version_named(const struct gs_install_opts *o, char *out, size_t len);
 /*

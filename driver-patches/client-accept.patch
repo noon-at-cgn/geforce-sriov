@@ -1,0 +1,46 @@
+geforce-sriov: the host driver accepts the programs of NVIDIA's second package, and only those.
+
+Every NVIDIA library opens /dev/nvidiactl and sends NV_ESC_CHECK_VERSION_STR with its own version string.
+The host package's driver (580.159.01) compares it with its own, byte for byte. The libraries of the second
+package (580.159.03) are the same code for the same major version, and NVIDIA's own check has a relaxed
+form, which compares the strings up to the first decimal point and is what the libraries ask for when
+__RM_NO_VERSION_CHECK is in their environment.
+
+A strict request whose version string is exactly the second package's version is passed to that check as a
+relaxed one, and the reply is the one a strict success has (the request's cmd is put back). NVIDIA's check
+still runs and still refuses another major version. A request of any other version string, including the
+host's own (nvidia-smi, NVML, the vGPU manager), takes the path it took before.
+
+The driver step replaces @GS_CLIENT_ACCEPT@ with the version of the second package before it applies this
+patch, and only in a display build whose second package is not of the host's version. The string is also a
+modinfo field of the built module (gs_client_accept), so the installed file says what it accepts.
+Every hunk must match exactly once (gs_apply_source_patch); the line numbers are those of 580.159.01.
+
+--- a/nvidia/nv.c
++++ b/nvidia/nv.c
+@@ -964,1 +964,7 @@
++/* geforce-sriov: the version string of the second package's programs, which nvidia_ioctl accepts (see NV_ESC_CHECK_VERSION_STR). */
++#define GS_CLIENT_ACCEPT "@GS_CLIENT_ACCEPT@"
++MODULE_INFO(gs_client_accept, GS_CLIENT_ACCEPT);
++
+ static void __exit nvidia_exit_module(void)
+@@ -2587,8 +2593,22 @@
+         case NV_ESC_CHECK_VERSION_STR:
+         {
++            nv_ioctl_rm_api_version_t *gs_v = arg_copy;
++            NvBool gs_accept;
++
+             NV_CTL_DEVICE_ONLY(nv);
+ 
++            /* geforce-sriov: a strict request of exactly the second package's version is checked as a relaxed one. */
++            gs_accept = arg_size == sizeof(*gs_v) && gs_v->cmd == NV_RM_API_VERSION_CMD_STRICT &&
++                        strnlen(gs_v->versionString, NV_RM_API_VERSION_STRING_LENGTH) == sizeof(GS_CLIENT_ACCEPT) - 1 &&
++                        memcmp(gs_v->versionString, GS_CLIENT_ACCEPT, sizeof(GS_CLIENT_ACCEPT)) == 0;
++            if (gs_accept)
++                gs_v->cmd = NV_RM_API_VERSION_CMD_RELAXED;
+             rmStatus = rm_perform_version_check(sp, arg_copy, arg_size);
++            if (gs_accept)
++                gs_v->cmd = NV_RM_API_VERSION_CMD_STRICT;
+             status = ((rmStatus == NV_OK) ? 0 : -EINVAL);
+             break;
+         }

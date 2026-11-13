@@ -15,10 +15,10 @@ retained=0
 kernel_given=0
 display=0
 host_cuda=0
-# The owner of the Ada VFs' framebuffer slots is built into nvidia.ko unless --no-fb-owner is given.
-fb_owner_want=1
-# The interface between the owner in nvidia.ko and the CLI (its mark in the module: geforce-sriov-fb-abi=N;).
-fb_owner_abi=1
+# --ada-selected: a selected GPU is an Ada card (the CLI passes it). The build then carries the ada-placement
+# row, so that an Ada VM takes one contiguous free piece of video memory when it starts. The value is recorded
+# with the build as ada_placement=1 or 0; a build for another value is made again.
+ada_selected=0
 driver_file=
 driver_work=
 driver_package_sha=none
@@ -30,6 +30,14 @@ source_given=0
 # --cuda-stage DIR: with --host-cuda, NVIDIA's CUDA libraries are copied from the second package
 # into DIR, for the CLI to install. Without it they are not looked for.
 cuda_stage=
+# --desktop-stage DIR: with --display, NVIDIA's graphics libraries are copied from the second package
+# into DIR, for the CLI to install (host desktop). Without it they are not looked for.
+desktop_stage=
+# The version of the second package's programs that nvidia.ko accepts besides its own (client_accept):
+# set by a display build whose second package is not of the host's version, and recorded.
+client_accept=
+# The second package's version when the patch above did not match this source: recorded, so that the build is not repeated for it.
+client_accept_unmatched=
 while [ "$#" -gt 0 ]; do
     case $1 in
         --dry-run) dry=1 ;;
@@ -40,10 +48,9 @@ while [ "$#" -gt 0 ]; do
         --no-display) display=0 ;;
         --host-cuda) host_cuda=1 ;;
         --no-host-cuda) host_cuda=0 ;;
-        --fb-owner) fb_owner_want=1 ;;
-        --no-fb-owner) fb_owner_want=0 ;;
+        --ada-selected) ada_selected=1 ;;
         # --root DIR: every fixed path below DIR instead of / (the tests' fixture hosts).
-        --source|--kernel|--root|--driver-file|--companion-file|--companion-source|--nvkms-source|--cuda-stage)
+        --source|--kernel|--root|--driver-file|--companion-file|--companion-source|--nvkms-source|--cuda-stage|--desktop-stage)
             [ "$#" -ge 2 ] || { printf '%s requires a value\n' "$1" >&2; exit 2; }
             case $1 in
                 --source) src=$2; source_given=1 ;;
@@ -54,6 +61,7 @@ while [ "$#" -gt 0 ]; do
                 --companion-source) companion_source=$2 ;;
                 --nvkms-source) nvkms_source=$2 ;;
                 --cuda-stage) cuda_stage=$2 ;;
+                --desktop-stage) desktop_stage=$2 ;;
             esac
             shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -66,7 +74,8 @@ done
 }
 # A path becomes part of a line in a record and of a message: none may hold a control character.
 case $cuda_stage in ''|/*) ;; *) printf 'invalid --cuda-stage: %s\n' "$cuda_stage" >&2; exit 2 ;; esac
-for given in "$src" "$root" "$driver_file" "$companion_file" "$companion_source" "$nvkms_source" "$cuda_stage"; do
+case $desktop_stage in ''|/*) ;; *) printf 'invalid --desktop-stage: %s\n' "$desktop_stage" >&2; exit 2 ;; esac
+for given in "$src" "$root" "$driver_file" "$companion_file" "$companion_source" "$nvkms_source" "$cuda_stage" "$desktop_stage"; do
     [ "$(printf '%s' "$given" | LC_ALL=C tr -d '\000-\037\177')" = "$given" ] ||
         { printf '%s\n' 'a path given to this script holds a control character, such as a line break; rename the file or directory' >&2; exit 2; }
 done
@@ -433,17 +442,146 @@ stage_cuda_built() {
     [ -n "$cuda_stage" ] && [ "$host_cuda" -eq 1 ] || return 0
     stage_cuda "$1" || cuda_not_staged
 }
+
+# ---- NVIDIA's graphics libraries, for the host desktop -----------------------
+#
+# With --display and --desktop-stage DIR the graphics libraries of a consumer driver are copied from
+# the second package into DIR, with an index (version=, lib=, xmod=, etc=, gbm=; read by src/nvlibs.c),
+# and the CLI installs them from there into geforce-sriov's own directories. The set is what NVIDIA's
+# installer installs for GLX, EGL, Vulkan and GBM, without its copies of libglvnd (the distribution
+# has them): the libraries and the two X modules, the JSON files that name them, NVIDIA's application
+# profiles and its output-class file. A set that is not complete is not taken at all: half of a
+# desktop driver is worse than none. Refused too when the libraries are not of the version the NVKMS
+# core was stamped with: NVKMS compares its clients' versions exactly, and X would not start.
+# Nothing here is a reason to refuse a build: a set that cannot be taken is one warning.
+desktop_libs='libEGL_nvidia libGLX_nvidia libnvidia-glcore libnvidia-tls libnvidia-glsi libnvidia-glvkspirv libnvidia-gpucomp libGLESv2_nvidia libGLESv1_CM_nvidia libnvidia-eglcore libnvidia-allocator'
+desktop_own_libs='libnvidia-egl-gbm libnvidia-egl-wayland libnvidia-egl-xcb libnvidia-egl-xlib'
+desktop_etc='egl_vendor:10_nvidia.json egl_platform:15_nvidia_gbm.json egl_platform:10_nvidia_wayland.json egl_platform:20_nvidia_xcb.json egl_platform:20_nvidia_xlib.json vulkan_icd:nvidia_icd.json xconf:nvidia-drm-outputclass.conf'
+# desk_take FILE: copy a file of the package into the staging directory; its digest in d_sha.
+desk_take() {
+    cp -- "$d_src/$1" "$d_new/$1" && chmod "$2" "$d_new/$1" && d_sha=$(sha "$d_new/$1") ||
+        { rm -rf "$d_new"; desktop_why="$1 could not be copied to $desktop_stage"; return 1; }
+}
+# stage_desktop DIR VERSION: DIR is the second package as extracted, or its kernel directory; VERSION is
+# the version the NVKMS core is stamped with. $desktop_why says why not.
+stage_desktop() {
+    desktop_why=
+    d_src=
+    for d_try in "$1" "$1/.."; do
+        for d_lib in "$d_try"/libEGL_nvidia.so.[0-9]*; do
+            if [ -f "$d_lib" ] && [ ! -L "$d_lib" ]; then
+                d_src=$d_try
+                d_version=${d_lib##*/libEGL_nvidia.so.}
+                break 2
+            fi
+        done
+    done
+    [ -n "$d_src" ] || { desktop_why="it has no libEGL_nvidia.so.<version> ($1)"; return 1; }
+    case $d_version in ''|*[!0-9.]*) desktop_why="its libEGL_nvidia has no version in its name (libEGL_nvidia.so.$d_version)"; return 1 ;; esac
+    [ "$d_version" = "$2" ] ||
+        { desktop_why="its graphics libraries are version $d_version and NVIDIA's NVKMS core is stamped $2, which compares the version of its clients exactly, so NVIDIA's X driver could not start"; return 1; }
+    d_new=$desktop_stage.gs-new
+    rm -rf "$d_new"
+    mkdir -p "$d_new" && chmod 0755 "$d_new" || { desktop_why="$d_new could not be made"; return 1; }
+    printf 'version=%s\n' "$d_version" >"$d_new/index"
+    d_list=
+    d_sonames=
+    d_gbm=
+    for d_name in $desktop_libs $desktop_own_libs; do
+        d_file=$d_name.so.$d_version
+        case " $desktop_own_libs " in
+            *" $d_name "*)
+                # A library with a version of its own: the one file of that name.
+                d_file=
+                for d_lib in "$d_src/$d_name".so.[0-9]*; do
+                    [ -f "$d_lib" ] && [ ! -L "$d_lib" ] || continue
+                    [ -z "$d_file" ] || { d_file=; break; }
+                    d_file=${d_lib##*/}
+                done ;;
+        esac
+        { [ -n "$d_file" ] && [ -f "$d_src/$d_file" ] && [ ! -L "$d_src/$d_file" ]; } ||
+            { rm -rf "$d_new"; desktop_why="the second package has no $d_name"; return 1; }
+        desk_take "$d_file" 0755 || return 1
+        d_soname=$(readelf -d -- "$d_new/$d_file" 2>/dev/null | sed -n 's/.*(SONAME).*\[\(lib[A-Za-z0-9_.+-]*\)\]$/\1/p' | sed -n '1p')
+        [ -n "$d_soname" ] || d_soname=$d_file
+        printf 'lib=%s %s %s\n' "$d_file" "$d_sha" "$d_soname" >>"$d_new/index"
+        d_list="$d_list $d_file"
+        d_sonames="$d_sonames $d_soname"
+        [ "$d_name" != libnvidia-allocator ] || d_gbm=$d_soname
+    done
+    # The X driver and its GLX module.
+    desk_take nvidia_drv.so 0755 || return 1
+    printf 'xmod=drivers/nvidia_drv.so %s\n' "$d_sha" >>"$d_new/index"
+    desk_take "libglxserver_nvidia.so.$d_version" 0755 || return 1
+    printf 'xmod=extensions/libglxserver_nvidia.so.%s %s libglxserver_nvidia.so\n' "$d_version" "$d_sha" >>"$d_new/index"
+    # The small files, and NVIDIA's application profiles, which carry the version in their name.
+    for d_item in $desktop_etc "profile:nvidia-application-profiles-$d_version-rc" "profile:nvidia-application-profiles-$d_version-key-documentation"; do
+        d_name=${d_item#*:}
+        { [ -f "$d_src/$d_name" ] && [ ! -L "$d_src/$d_name" ]; } || { rm -rf "$d_new"; desktop_why="the second package has no $d_name"; return 1; }
+        desk_take "$d_name" 0644 || return 1
+        printf 'etc=%s %s %s\n' "${d_item%%:*}" "$d_name" "$d_sha" >>"$d_new/index"
+    done
+    [ -z "$d_gbm" ] || printf 'gbm=%s\n' "$d_gbm" >>"$d_new/index"
+    # What a library of the set links against from NVIDIA must be in the set too.
+    for d_file in $d_list; do
+        for d_need in $(readelf -d -- "$d_new/$d_file" 2>/dev/null |
+            sed -n 's/.*(NEEDED).*\[\(lib\(nvidia-\|GLX_nvidia\|EGL_nvidia\)[A-Za-z0-9_.+-]*\)\]$/\1/p'); do
+            case " $d_sonames " in
+                *" $d_need "*) ;;
+                *) printf 'geforce-sriov-driver: warning: %s links against %s, which is not one of the graphics libraries taken from the second package; a program that draws may fail to start\n' "$d_file" "$d_need" >&2 ;;
+            esac
+        done
+    done
+    rm -rf "$desktop_stage" && mv "$d_new" "$desktop_stage" ||
+        { rm -rf "$d_new"; desktop_why="$desktop_stage could not be written"; return 1; }
+    printf "geforce-sriov-driver: NVIDIA's graphics libraries %s are ready to be installed:%s\n" "$d_version" "$d_list"
+}
+desktop_not_staged() {
+    printf "geforce-sriov-driver: warning: NVIDIA's graphics libraries were not taken from the second package: %s\n" "$desktop_why" >&2
+    # A stage left by an earlier run is of another package: the CLI must not install it.
+    [ -z "$desktop_stage" ] || rm -rf "$desktop_stage" "$desktop_stage.gs-new"
+}
+# After a build: the second package is extracted, or was given as a directory.
+stage_desktop_built() {
+    [ -n "$desktop_stage" ] && [ "$display" -eq 1 ] || return 0
+    stage_desktop "$1" "$public_version" || desktop_not_staged
+}
+# What the second package is asked for: its CUDA libraries (--host-cuda --cuda-stage) and its graphics
+# libraries (--display --desktop-stage). libs_not_taken REASON says why neither could be taken.
+libs_wanted() {
+    { [ -n "$cuda_stage" ] && [ "$host_cuda" -eq 1 ]; } || { [ -n "$desktop_stage" ] && [ "$display" -eq 1 ]; }
+}
+libs_not_taken() {
+    if [ -n "$cuda_stage" ] && [ "$host_cuda" -eq 1 ]; then
+        cuda_why=$1
+        cuda_not_staged
+    fi
+    if [ -n "$desktop_stage" ] && [ "$display" -eq 1 ]; then
+        desktop_why=$1
+        desktop_not_staged
+    fi
+}
+stage_wanted() {
+    if [ -n "$cuda_stage" ] && [ "$host_cuda" -eq 1 ]; then
+        stage_cuda "$1" || cuda_not_staged
+    fi
+    if [ -n "$desktop_stage" ] && [ "$display" -eq 1 ]; then
+        stage_desktop "$1" "$desktop_nvkms" || desktop_not_staged
+    fi
+}
 # For a build that is installed already, which reads no input: the second package that was given, or
-# the one an earlier install kept, is opened for the libraries alone.
-stage_cuda_prepared() {
-    [ -n "$cuda_stage" ] && [ "$host_cuda" -eq 1 ] || return 0
+# the one an earlier install kept, is opened for the libraries alone. The NVKMS core of the installed
+# build was stamped with the public source's version, which its record has.
+stage_libs_prepared() {
+    libs_wanted || return 0
+    desktop_nvkms=$(gs_record_get "$record" driver_public_version)
     c_file=$companion_file
     c_tree=$companion_source
     if [ -z "$c_file$c_tree" ]; then
         # The same checks as for a build; what would refuse a build is only the reason here.
         c_kept=$(use_kept companion "NVIDIA's second package" '--companion-file PATH (or --companion-source DIR)' >/dev/null 2>&1 &&
             printf '%s:%s' "$kept_kind" "$kept_path") ||
-            { cuda_why='none was given, and none that an earlier install kept can be used; pass --companion-file PATH (or --companion-source DIR)'; cuda_not_staged; return 0; }
+            { libs_not_taken 'none was given, and none that an earlier install kept can be used; pass --companion-file PATH (or --companion-source DIR)'; return 0; }
         case $c_kept in
             file:*) c_file=${c_kept#file:} ;;
             *) c_tree=${c_kept#*:} ;;
@@ -451,38 +589,37 @@ stage_cuda_prepared() {
     fi
     if [ -n "$c_tree" ]; then
         if [ -d "$c_tree" ]; then
-            stage_cuda "$c_tree" || cuda_not_staged
+            stage_wanted "$c_tree"
         else
-            cuda_why="$c_tree is not a directory"
-            cuda_not_staged
+            libs_not_taken "$c_tree is not a directory"
         fi
         return 0
     fi
     # A package is a shell script: only a copy that nobody else can write to is checked and run.
     c_work=$(mktemp -d "${TMPDIR:-/tmp}/geforce-sriov-driver.XXXXXX") ||
-        { cuda_why='no temporary directory could be made'; cuda_not_staged; return 0; }
+        { libs_not_taken 'no temporary directory could be made'; return 0; }
     c_copy=$c_work/${c_file##*/}
-    cuda_why=
+    c_why=
     if ! { [ -f "$c_file" ] && cp -P --no-preserve=ownership -- "$c_file" "$c_copy" && [ -f "$c_copy" ] && [ ! -L "$c_copy" ] &&
         chmod ug-s,go-w "$c_copy"; }; then
-        cuda_why="$c_file could not be copied"
+        c_why="$c_file could not be copied"
     elif ! gs_package_check second "$c_copy" "$c_file"; then
-        cuda_why="$c_file was not run; the line above says why"
+        c_why="$c_file was not run; the line above says why"
     elif ! { mkdir "$c_work/x" && ( cd "$c_work/x" && sh "$c_copy" --extract-only ) >"$c_work/log" 2>&1; }; then
-        cuda_why="$c_file could not be extracted with --extract-only"
+        c_why="$c_file could not be extracted with --extract-only"
     else
         c_found=
         for c_dir in "$c_work"/x/*/; do
             [ ! -d "$c_dir" ] || c_found=${c_dir%/}
         done
         if [ -z "$c_found" ]; then
-            cuda_why="the extraction of $c_file produced no directory"
+            c_why="the extraction of $c_file produced no directory"
         else
-            stage_cuda "$c_found" || :
+            stage_wanted "$c_found"
         fi
     fi
     rm -rf "$c_work"
-    [ -z "$cuda_why" ] || cuda_not_staged
+    [ -z "$c_why" ] || libs_not_taken "$c_why"
 }
 
 # A journal left by a run that was cut off: finish that commit, or undo it.
@@ -584,22 +721,6 @@ find_patch_dir() {
         [ -n "$candidate" ] || continue
         if [ -f "$candidate/gpu-allow.patch" ] && [ -f "$candidate/allocation-threshold.patch" ]; then
             patch_dir=$candidate
-            return 0
-        fi
-    done
-    return 1
-}
-# The owner of the Ada VFs' framebuffer slots: two C files that are copied into NVIDIA's tree, and
-# the hunks that call them. They are beside the other source patches.
-owner_dir=
-find_owner_dir() {
-    owner_dir=
-    for candidate in "${GS_DRIVER_PATCH_DIR:-}" "$libdir/driver-patches" \
-        "$libdir/../share/geforce-sriov/driver-patches" "$libdir/../driver-patches"; do
-        [ -n "$candidate" ] || continue
-        if [ -f "$candidate/fb-owner/gs-fb-owner.c" ] && [ -f "$candidate/fb-owner/gs-fb-owner.h" ] &&
-            [ -f "$candidate/fb-owner/fb-owner.patch" ]; then
-            owner_dir=$candidate/fb-owner
             return 0
         fi
     done
@@ -878,8 +999,13 @@ if [ "$restore" -eq 1 ]; then
     command -v modinfo >/dev/null 2>&1 || refuse 'modinfo not found: cannot locate the installed module'
     module=$(modinfo -k "$kernel" -n nvidia 2>/dev/null || true)
     put_back=0
+    # A record whose module is gone or is no longer the one this script installed has nothing to restore: it goes with a clean restore.
+    drop_record=0
+    core_kept=0
+    stale=0
     if [ -z "$module" ]; then
         printf 'geforce-sriov-driver: no nvidia module installed for %s; nothing to restore\n' "$kernel"
+        drop_record=1
     elif [ ! -f "$record" ]; then
         printf 'geforce-sriov-driver: %s absent: this script did not prepare %s; nothing to restore\n' "$record" "$kernel"
     else
@@ -887,8 +1013,24 @@ if [ "$restore" -eq 1 ]; then
         rec_hash=$(gs_record_get "$record" module_sha256)
         rec_stock=$(gs_record_get "$record" stock_sha256)
         installed=$(sha "$module") || fail "could not hash $module"
-        if [ "$rec_kernel" != "$kernel" ] || [ "$rec_hash" != "$installed" ]; then
+        if [ "$rec_kernel" != "$kernel" ]; then
             printf 'geforce-sriov-driver: kept %s: it is not the module this script installed\n' "$module"
+            drop_record=1
+        elif [ "$rec_hash" != "$installed" ]; then
+            # Another module than this script's build. When it has another build-id, or is the module the
+            # backup holds, it is NVIDIA's (installed again) or someone else's: nothing of this script's is
+            # installed, so there is nothing to put back and the old backup and record are stale. The same
+            # build-id with other bytes is this script's build, changed since (for example signed): it stays
+            # and the restore fails. When the build-id cannot be read the module stays and the restore fails.
+            rec_id=$(gs_record_get "$record" module_build_id)
+            installed_id=$(readelf -n "$module" 2>/dev/null | awk '$1 == "Build" && $2 == "ID:" {print $3; exit}' || true)
+            if [ "$installed" = "$rec_stock" ] || { [ -n "$rec_id" ] && [ -n "$installed_id" ] && [ "$installed_id" != "$rec_id" ]; }; then
+                printf 'geforce-sriov-driver: %s is not the module this script installed; it is another build, so nothing is put back and the backup of the earlier stock module and the build record are removed\n' "$module"
+                stale=1
+            else
+                printf 'geforce-sriov-driver: kept %s: it is not the module this script installed\n' "$module"
+                core_kept=1
+            fi
         else
             [ -f "$backup" ] || refuse "backup missing: $backup"
             [ -n "$rec_stock" ] || refuse "$record records no stock_sha256, so the backup $backup cannot be verified"
@@ -926,7 +1068,11 @@ if [ "$restore" -eq 1 ]; then
             eval "restore_${name}=done"
         elif [ -z "$want" ] || [ "$(sha "$path")" != "$want" ]; then
             printf 'geforce-sriov-driver: kept %s: it is not the module this script installed\n' "$path"
-            eval "restore_${name}=failed"
+            if [ "$stale" -eq 1 ]; then
+                eval "restore_${name}=stale"
+            else
+                eval "restore_${name}=failed"
+            fi
         elif [ "$previous" = present ]; then
             if [ -f "$state/stock/$kernel/$disk.ko" ] &&
                 [ "$(sha "$state/stock/$kernel/$disk.ko")" = "$saved" ]; then
@@ -980,8 +1126,8 @@ if [ "$restore" -eq 1 ]; then
     if [ -f "$config" ] && [ ! -L "$config" ] && [ "$(cat "$config")" = 'options nvidia NVreg_EnableGpuFirmware=0' ]; then
         own_config=1
     fi
-    # The plugin copy is removed only while it is the copy this script installed: the recorded
-    # digest on a new record, or a digest this step's own revisions produce on an older one.
+    # The plugin copy is removed only while it is the copy this script installed: the recorded digest
+    # on a record, or the digest of the patched copy this step's revisions produce.
     copy_owned=0
     copy_path=$plugdir/$plugin_name.geforce-sriov
     if [ -n "$plugdir" ] && [ -f "$copy_path" ] && [ ! -L "$copy_path" ]; then
@@ -991,8 +1137,6 @@ if [ "$restore" -eq 1 ]; then
         if [ -n "$rec_plugin" ] && [ "$copy_digest_now" = "$rec_plugin" ]; then
             copy_owned=1
         elif [ -n "$gs_patched_plugin" ] && [ "$copy_digest_now" = "$gs_patched_plugin" ]; then
-            copy_owned=1
-        elif [ -n "$gs_mixed_plugin" ] && [ "$copy_digest_now" = "$gs_mixed_plugin" ]; then
             copy_owned=1
         fi
     fi
@@ -1017,10 +1161,16 @@ if [ "$restore" -eq 1 ]; then
         [ -z "$plugdir" ] || show rm -f "$copy_path"
         [ "$own_config" -eq 0 ] || show rm -f "$config"
         [ "$put_back" -eq 0 ] || show rm -rf "${backup%/*}"
+        [ "$drop_record" -eq 0 ] || [ -z "$record" ] || show rm -f "$record"
+        [ "$stale" -eq 0 ] || show rm -f "$record" "$backup"
         show rmdir "$state/build" "$state/stock"
         exit 0
     fi
     status=0
+    if [ "$core_kept" -eq 1 ]; then
+        printf 'geforce-sriov-driver: failed: %s was kept: it is not the module this script installed\n' "$module" >&2
+        status=1
+    fi
     if [ -e "$build" ] || [ -L "$build" ]; then
         if rm -rf "$build"; then
             printf 'geforce-sriov-driver: removed %s\n' "$build"
@@ -1038,6 +1188,11 @@ if [ "$restore" -eq 1 ]; then
             printf 'geforce-sriov-driver: failed: could not restore %s from %s\n' "$module" "$backup" >&2
             status=1
         fi
+    fi
+    if [ "$stale" -eq 1 ]; then
+        rm -f "$record" "$records/$kernel" "$backup"
+        [ ! -d "$records" ] || rmdir "$records" 2>/dev/null || :
+        printf 'geforce-sriov-driver: removed the build record and the backup of the earlier stock module for %s\n' "$kernel"
     fi
     for name in $reversed; do
         eval "path=\$restore_path_$name"
@@ -1063,6 +1218,10 @@ if [ "$restore" -eq 1 ]; then
                     printf 'geforce-sriov-driver: failed: could not remove %s\n' "$path" >&2
                     status=1
                 fi ;;
+            stale)
+                # NVIDIA's package replaced this module too: the old backup of it is stale.
+                rm -f "$state/stock/$kernel/$disk.ko"
+                printf 'geforce-sriov-driver: removed the stale backup of %s\n' "$name" ;;
             failed) status=1 ;;
         esac
     done
@@ -1094,6 +1253,10 @@ if [ "$restore" -eq 1 ]; then
             status=1
         fi
     fi
+    if [ "$status" -eq 0 ] && [ "$drop_record" -eq 1 ] && [ -n "$record" ]; then
+        rm -f "$record" "$records/$kernel"
+        [ ! -d "$records" ] || rmdir "$records" 2>/dev/null || :
+    fi
     if [ "$status" -eq 0 ]; then
         # The directory goes only once it is empty: a kept foreign core or a kept module still
         # needs its verified backup for a later attempt.
@@ -1118,6 +1281,19 @@ if [ "$dry" -eq 1 ] && [ "$restore" -eq 0 ]; then
         refuse 'the table of confirmed driver versions has no usable first block'
     plugin_name=libnvidia-vgpu.so.${plan_version:-$gs_host_version}
     plain_offsets_list=$(printf '%s' "$gs_plain_offsets" | sed 's/ /, /g')
+    # What the build's module is compared at, and which object the build goes on with: the plain
+    # chain's last object, or with an Ada card selected the one after the ada-placement row.
+    plan_final=patched
+    plan_require=$gs_patched_object
+    plan_eight='the eight expected offsets'
+    if [ "$ada_selected" -eq 1 ]; then
+        plan_final=placed
+        [ -z "$gs_placement_object" ] || plan_require=$gs_placement_object
+        if [ -n "$gs_placement_offsets" ]; then
+            plain_offsets_list="$plain_offsets_list, and the placement offset $(printf '%s' "$gs_placement_offsets" | sed 's/ /, /g')"
+            plan_eight='the eight expected offsets and the placement offset'
+        fi
+    fi
     # The installed module as the real run finds it below, or a placeholder when modinfo does not know it.
     module=$(modinfo -k "$kernel" -n nvidia 2>/dev/null || true)
     [ -n "$module" ] || module="<installed nvidia.ko for $kernel>"
@@ -1127,7 +1303,7 @@ if [ "$dry" -eq 1 ] && [ "$restore" -eq 0 ]; then
 + test -f '$module'
 + modinfo -k '$kernel' -F license nvidia # refuse NVIDIA's open flavour
 + test -x '${0%/*}/geforce-sriov-patch' || command -v geforce-sriov-patch
-+ sha256sum '<plugin directory>/$plugin_name' # require the stock digest, that of plugin-mixed's output or that of the patched plugin copy, or admit every plugin byte patch by anchor
++ sha256sum '<plugin directory>/$plugin_name' # require the stock digest or that of the patched plugin copy, or admit every plugin byte patch by anchor
 + check $root/etc/modprobe.d/*.conf for NVreg_EnableGpuFirmware # another file that sets 0 is kept; any other value refuses
 EOF
     # The classification term is a plan statement from digests this dry run can read, never a
@@ -1158,19 +1334,23 @@ EOF
         if [ "$display" -eq 1 ]; then
             printf '%s\n' "+ gs_stage_tree '$src' '<companion kernel>' '<temporary directory>/tree' 1 '$host_cuda' '<H>' '<P>' '$nvkms_source'"
             printf '%s\n' "+ apply driver-patches/gpu-allow.patch and driver-patches/allocation-threshold.patch to the staged tree"
+            printf '%s\n' "+ when the second package is not of the host's version: apply driver-patches/client-accept.patch, so that nvidia.ko accepts that version"
         else
             printf '%s\n' "+ gs_stage_tree '$src' '<companion kernel>' '<temporary directory>/tree' 0 1 '<H>' '<P>' none"
         fi
         printf '%s\n' "+ geforce-sriov-patch apply '<temporary directory>/object' '<temporary directory>/scheduler'"
         printf '%s\n' "+ geforce-sriov-patch ada apply '<temporary directory>/scheduler' '<temporary directory>/gate'"
         printf '%s\n' "+ geforce-sriov-patch ada apply '<temporary directory>/gate' '<temporary directory>/patched'"
-        [ "$display" -eq 0 ] || printf '%s\n' "+ geforce-sriov-patch display apply '<temporary directory>/patched' '<temporary directory>/patched39'"
-        printf '%s\n' "+ cp '<temporary directory>/patched' '<temporary directory>/tree/nvidia/nv-kernel.o_binary'"
+        [ "$ada_selected" -eq 0 ] || printf '%s\n' \
+            "+ geforce-sriov-patch ada apply '<temporary directory>/patched' '<temporary directory>/placed' # ada-placement, with an Ada card selected"
+        [ "$display" -eq 0 ] || printf '%s\n' "+ geforce-sriov-patch display apply '<temporary directory>/$plan_final' '<temporary directory>/patched39'"
+        printf '%s\n' "+ cp '<temporary directory>/$plan_final' '<temporary directory>/tree/nvidia/nv-kernel.o_binary'"
         printf '%s\n' "+ make -C '<temporary directory>/tree' NV_EXCLUDE_BUILD_MODULES= KERNEL_UNAME='$kernel' SYSSRC='$headers' 'NV_KERNEL_MODULES=<staged list>' modules"
         if [ "$display" -eq 1 ]; then
-            printf '+ object chain digest %.8s…, then the idx 39 bytes and relocations at the recorded function offset\n' "$gs_display_object"
+            printf '+ object chain digest %.8s…, then the idx 39 bytes and relocations at the recorded function offset\n' \
+                "$([ "$ada_selected" -eq 1 ] && printf '%s' "$gs_placement_display_object" || printf '%s' "$gs_display_object")"
         else
-            printf '%s\n' "+ cmp -l '$module' .text with the built .text at exactly the eight expected offsets"
+            printf '%s\n' "+ cmp -l '$module' .text with the built .text at exactly $plan_eight"
         fi
         printf '%s\n' '+ ABI gate on every built module: the vermagic of the target kernel, all recorded CRCs against the built core and the kernel, nvidia dependency'
         printf '%s\n' '+ stage every module, then back up and replace each: nvidia and the requested companion modules'
@@ -1183,13 +1363,18 @@ EOF
 + cp -a '$src' '<temporary directory>/tree'
 + geforce-sriov-patch apply '<temporary directory>/tree/nvidia/nv-kernel.o_binary' '<temporary directory>/scheduler'
 + geforce-sriov-patch ada apply '<temporary directory>/scheduler' '<temporary directory>/gate'
-+ geforce-sriov-patch ada apply '<temporary directory>/gate' '<temporary directory>/patched'
-+ sha256sum '<temporary directory>/patched' # require $gs_patched_object
-+ cp '<temporary directory>/patched' '<temporary directory>/tree/nvidia/nv-kernel.o_binary'
+EOF
+    printf '%s\n' "+ geforce-sriov-patch ada apply '<temporary directory>/gate' '<temporary directory>/patched'"
+    if [ "$ada_selected" -eq 1 ]; then
+        printf '%s\n' "+ geforce-sriov-patch ada apply '<temporary directory>/patched' '<temporary directory>/placed' # ada-placement, with an Ada card selected"
+    fi
+    cat <<EOF
++ sha256sum '<temporary directory>/$plan_final' # require $plan_require
++ cp '<temporary directory>/$plan_final' '<temporary directory>/tree/nvidia/nv-kernel.o_binary'
 + make -C '<temporary directory>/tree' NV_EXCLUDE_BUILD_MODULES= KERNEL_UNAME='$kernel' SYSSRC='$headers' modules
 + objcopy -O binary -j .text '$module' '<temporary directory>/stock.text' # refuse if unreadable
 + objcopy -O binary -j .text '<temporary directory>/tree/nvidia.ko' '<temporary directory>/built.text' # refuse if unreadable
-+ cmp -l '<temporary directory>/stock.text' '<temporary directory>/built.text' # identical: with config and the patched plugin copy in place (a copy with plugin-mixed only is replaced) and the backup '$backup' differing at exactly the eight offsets, write '$published' for this module and exit 0, else refuse; otherwise require exactly the eight .text offsets $plain_offsets_list
++ cmp -l '<temporary directory>/stock.text' '<temporary directory>/built.text' # identical: with config and the patched plugin copy in place and the backup '$backup' differing at exactly the eight offsets, write '$published' for this module and exit 0, else refuse; otherwise require exactly the eight .text offsets $plain_offsets_list
 + geforce-sriov-patch abi-check --core '<temporary directory>/tree/nvidia.ko' --module '<temporary directory>/tree/nvidia.ko' # the vermagic of the target kernel, and its CRCs when the kernel uses module versioning
 + geforce-sriov-patch ada apply '<stock plugin>' '<temporary directory>/patched-plugin.mixed' # plugin-mixed, unless the plugin already carries it
 + sha256sum '<temporary directory>/patched-plugin.mixed' # require $gs_mixed_plugin
@@ -1269,7 +1454,7 @@ if [ ! -f "$patcher" ] || [ ! -x "$patcher" ]; then
     patcher=$(command -v geforce-sriov-patch 2>/dev/null) ||
         refuse "geforce-sriov-patch is not installed next to $0 or on PATH"
 fi
-for tool in sha256sum cut make cmp awk readelf objcopy cp mv mkdir mktemp ln rm chmod stat depmod sed wc sort tr tail find modinfo sync comm; do
+for tool in sha256sum cut make cmp awk readelf objcopy cp mv mkdir mktemp ln rm chmod stat depmod sed wc sort tr tail find modinfo sync; do
     command -v "$tool" >/dev/null 2>&1 || refuse "required command missing: $tool"
 done
 # The staging library that builds the display and host CUDA modules is written in python3.
@@ -1280,6 +1465,26 @@ fi
 actual=$(sha "$src/nvidia/nv-kernel.o_binary") || fail 'could not hash vendor object'
 known_object=0
 [ "$actual" = "$gs_stock_object" ] && known_object=1
+# With an Ada card selected the build carries one more byte patch, ada-placement. For a driver the table has no
+# recorded object for it is located by its code window, as the other rows are, and applied as best effort.
+# When its site cannot be found the step stops: there is no fallback to fixed slots, and the
+# message names the driver version to use instead.
+# The version to recommend: the highest confirmed one whose block records the placement patch.
+recommended_driver() {
+    for rec_candidate in $gs_confirmed_hosts; do
+        ( gs_version_row "$rec_candidate" && [ -n "$gs_placement_object" ] && [ -n "$gs_placement_offsets" ] &&
+            printf '%s\n' "$rec_candidate" ) || :
+    done | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1
+}
+placement_refuse() {
+    rec_driver=$(recommended_driver)
+    if [ -n "$rec_driver" ]; then
+        rec_use="Install NVIDIA's vGPU host driver $rec_driver, the recommended confirmed version, and run this again"
+    else
+        rec_use='No confirmed driver version records these patches'
+    fi
+    refuse "the VMs of an Ada card cannot be placed from free video memory with driver $host_version: $1. $rec_use; nothing was installed"
+}
 [ -f "$headers/Makefile" ] || refuse "the headers of kernel $kernel are not installed: $headers/Makefile is missing. Install them (for example proxmox-headers-$kernel or linux-headers-$kernel). If NVIDIA's own module for that kernel is not built either, build it with \`dkms install nvidia/$host_version -k $kernel\`. Then run \`sudo geforce-sriov rebuild --kernel $kernel\`"
 # The installed module's path depends on the distribution and on DKMS, so ask the kernel's own tool.
 module=$(modinfo -k "$kernel" -n nvidia 2>/dev/null || true)
@@ -1309,16 +1514,18 @@ find_plugin() {
     plugin_hash=$(sha "$plugin") || fail 'could not hash plugin'
     known_plugin=0
     case $plugin_hash in
-        "$gs_stock_plugin"|"$gs_mixed_plugin"|"$gs_patched_plugin") known_plugin=1 ;;
+        "$gs_stock_plugin"|"$gs_patched_plugin") known_plugin=1 ;;
     esac
     copy=$plugin.geforce-sriov
     link=${plugin%/*}/libnvidia-vgpu.so
 }
 # Writes the patched plugin copy to $1 from $plugin: the patcher's rows plugin-mixed and then plugin-div4,
-# each one the plugin does not carry yet. A known input also checks each recorded digest.
+# each one the plugin does not carry yet. A plugin that is neither the recorded patched copy nor the recorded
+# plugin-mixed output (the stock plugin, or the plugin of a version with no recorded digests) takes both rows,
+# as the preflight applied them. A known input also checks each recorded digest.
 make_copy() {
     from=$plugin
-    if [ "$plugin_hash" = "$gs_stock_plugin" ]; then
+    if [ "$plugin_hash" != "$gs_patched_plugin" ] && [ "$plugin_hash" != "$gs_mixed_plugin" ]; then
         run "$patcher" ada apply "$plugin" "$1.mixed"
         if [ "$known_plugin" -eq 1 ]; then
             actual=$(sha "$1.mixed") || fail 'could not hash the plugin after plugin-mixed'
@@ -1336,8 +1543,8 @@ make_copy() {
         [ "$actual" = "$gs_patched_plugin" ] || refuse "patched plugin copy SHA-256 is $actual; expected $gs_patched_plugin"
     fi
 }
-# Puts the patched plugin copy $1 in place of an installed copy that is not it (an earlier install's copy
-# with plugin-mixed only), through a new name in the same directory, and points the link at it.
+# Puts the patched plugin copy $1 in place of an installed copy that is not it, through a new name in
+# the same directory, and points the link at it.
 replace_copy() {
     [ ! -d "$copy" ] && [ ! -d "$copy.new" ] && [ ! -d "$link" ] || refuse 'an installation target is a directory'
     run rm -f "$copy.new"
@@ -1367,60 +1574,16 @@ module_dest() {
     fi
 }
 
-# The record of an installed build is classified again under the current version policy, so a
-# build that had no recorded test when it was made, and has one now, is no longer reported as
-# unconfirmed. Nothing is built. The inputs are the record's own: its package digests and versions,
-# and how each revision was admitted. A revision admitted by its digest took the recorded input and
-# gave the recorded output, so a build whose revisions were all admitted that way has the recorded
-# chain. Sets reclassified=1 when the version fields were rewritten, which is one rename. A record
-# without these fields, or one that cannot be rewritten, stays as it is.
-record_value() {
-    record_v=$(gs_record_get "$record" "$1")
-    printf '%s' "${record_v:-none}"
-}
-reclassify_record() {
-    was_conf=$(gs_record_get "$record" confirmation)
-    was_profile=$(gs_record_get "$record" evidence_profile)
-    [ -n "$was_conf" ] || return 0
-    rec_stages='scheduler module_gate vf_count plugin_mixed plugin_div4'
-    [ "$display" -eq 0 ] || rec_stages="$rec_stages display_idx39"
-    rec_object=none
-    rec_plugin=none
-    rec_preflight=confirmed
-    for rec_stage in $rec_stages; do
-        [ "$(record_value "patch_${rec_stage}_admission")" = digest ] || rec_preflight=unconfirmed
-    done
-    # The chains of the version the record names. The caller selects this run's block again.
-    if [ "$rec_preflight" = confirmed ] && gs_version_row "$(gs_record_get "$record" driver_version)"; then
-        rec_plugin=${gs_plugin_chain:-none}
-        rec_object=${gs_object_chain:-none}
-        [ "$display" -eq 0 ] || rec_object=${gs_object_chain_display:-none}
-    fi
-    now=$(gs_classify "$(record_value host_sha256)" "$(record_value second_sha256)" "$(record_value public_sha256)" \
-        "$(record_value driver_public_version)" "$rec_object" "$rec_plugin" "$display" "$host_cuda" "$rec_preflight" 2>/dev/null) ||
-        return 0
-    now_conf=$(printf '%s\n' "$now" | sed -n 's/^confirmation=//p')
-    now_profile=$(printf '%s\n' "$now" | sed -n 's/^evidence_profile=//p')
-    [ -n "$now_conf" ] && [ -n "$now_profile" ] || return 0
-    if [ "$now_conf" = "$was_conf" ] && [ "$now_profile" = "$was_profile" ]; then
-        return 0
-    fi
-    now_flag=0
-    [ "$now_conf" != confirmed-inputs ] || now_flag=1
-    if awk -v c="$now_conf" -v p="$now_profile" -v f="$now_flag" -v policy="$GS_VERSION_POLICY" '
-            /^confirmation=/ { print "confirmation=" c; next }
-            /^evidence_profile=/ { print "evidence_profile=" p; next }
-            /^driver_version_confirmed=/ { print "driver_version_confirmed=" f; next }
-            /^driver_version_policy=/ { print "driver_version_policy=" policy; next }
-            { print }' "$record" >"$record.gs-tmp" &&
-        gs_record_emit <"$record.gs-tmp" >/dev/null 2>&1 && mv -f "$record.gs-tmp" "$record"; then
-        reclassified=1
-        printf 'geforce-sriov-driver: the build record now reads confirmation=%s, evidence_profile=%s; it read confirmation=%s, evidence_profile=%s. The current version policy was applied to the installed build, and nothing was rebuilt\n' \
-            "$now_conf" "$now_profile" "$was_conf" "${was_profile:-none}"
-    else
-        rm -f "$record.gs-tmp"
-        printf 'geforce-sriov-driver: warning: the version fields of %s could not be updated; the record is unchanged\n' "$record" >&2
-    fi
+# The version of the second package's programs that nvidia.ko has to accept besides its own: the second
+# package's, in a display build whose second package (the record names it) is not of the host's version.
+wants_accept() {
+    [ "$display" -eq 1 ] || return 0
+    w_second=$(gs_record_get "$record" driver_second_version)
+    case $w_second in
+        ''|none|"$host_version") ;;
+        "$(gs_record_get "$record" client_accept_unmatched)") ;;
+        *) printf '%s' "$w_second" ;;
+    esac
 }
 
 # A rerun on a host that is already prepared for this kernel and this module set is a no-op, not a
@@ -1448,32 +1611,17 @@ if [ -f "$record" ] && [ ! -L "$record" ]; then
             break
         fi
     done
-    # A build that carries test code (the hook proof of an earlier branch wrote test_only=) is never
-    # an installation that needs nothing: it is replaced. Nor is a build that was made for another
-    # answer to "with the framebuffer owner?", or before there was one.
-    rec_test_only=$(gs_record_get "$record" test_only)
-    rec_owner_wanted=$(gs_record_get "$record" fb_owner_wanted)
-    # The framebuffer owner that this package would build in, against the one the record names: a
-    # newer geforce-sriov whose owner changed must reach nvidia.ko. Compared only when the owner is
-    # wanted, its files are at hand, and the record names the files of its build; a build that was
-    # installed without the owner names them too, so that it is tried again once they change.
-    owner_changed=0
-    if [ "$fb_owner_want" -eq 1 ] && [ "$rec_owner_wanted" = 1 ] && find_owner_dir; then
-        rec_owner_files=$(gs_record_get "$record" fb_owner_c_sha256)/$(gs_record_get "$record" fb_owner_h_sha256)/$(gs_record_get "$record" fb_owner_patch_sha256)
-        now_owner_files=$(sha "$owner_dir/gs-fb-owner.c")/$(sha "$owner_dir/gs-fb-owner.h")/$(sha "$owner_dir/fb-owner.patch") || now_owner_files=
-        rec_owner_abi=$(gs_record_get "$record" fb_owner_abi)
-        case $rec_owner_files in
-            //|none/none/none) ;;
-            *) [ -z "$now_owner_files" ] || [ "$rec_owner_files" = "$now_owner_files" ] || owner_changed=1 ;;
-        esac
-        [ -z "$rec_owner_abi" ] || [ "$rec_owner_abi" = "$fb_owner_abi" ] || owner_changed=1
-    fi
-    if [ -n "$rec_test_only" ]; then
-        printf 'geforce-sriov-driver: the installed build carries test code (%s); the modules are built again\n' "$rec_test_only"
-    elif [ "$rec_owner_wanted" != "$fb_owner_want" ]; then
-        :
-    elif [ "$owner_changed" -eq 1 ]; then
-        printf '%s\n' 'geforce-sriov-driver: the owner of the Ada framebuffer slots in this package is not the one the installed nvidia.ko was built with; the modules are built again'
+    # The installed build was made for another ada_placement than the one asked for: it is built again.
+    rec_placement=$(gs_record_get "$record" ada_placement)
+    # An nvidia.ko of an earlier build of this version carries the guest framebuffer cap, which this package no longer builds.
+    # The record of that build names it (guest_fb=1); the module is built again so that the cap and its /proc file are gone.
+    if [ "$(gs_record_get "$record" guest_fb)" = 1 ]; then
+        printf '%s\n' 'geforce-sriov-driver: the installed nvidia.ko was built with a guest framebuffer cap, which this package does not build; the modules are built again'
+    elif [ "$rec_placement" != "$ada_selected" ]; then
+        printf 'geforce-sriov-driver: the installed nvidia.ko was built with ada_placement=%s and ada_placement=%s is asked for; the modules are built again\n' "${rec_placement:-absent}" "$ada_selected"
+    elif [ "$(gs_record_get "$record" client_accept)" != "$(wants_accept)" ]; then
+        printf 'geforce-sriov-driver: the installed nvidia.ko does not accept the programs of the second package (client_accept=%s is recorded, %s is wanted); the modules are built again\n' \
+            "$(gs_record_get "$record" client_accept)" "$(wants_accept)"
     elif [ "$rec_intact" -eq 1 ] && [ "$rec_kernel" = "$kernel" ] && [ "$rec_hash" = "$(sha "$module")" ] &&
         [ "${rec_display:-0}" = "$display" ] && [ "${rec_cuda:-0}" = "$host_cuda" ] &&
         [ "$rec_set" = "$want_set" ]; then
@@ -1484,27 +1632,18 @@ if [ -f "$record" ] && [ ! -L "$record" ]; then
                 patched=1
             fi
         done
-        # The build is installed either way, so its record is brought up to the current policy.
-        reclassified=0
-        reclassify_record
         gs_version_row "$host_version" || :
         if [ "$patched" -eq 1 ]; then
-            if [ "$reclassified" -eq 1 ]; then
-                printf 'geforce-sriov-driver: already prepared for %s (module %s); only the build record was updated\n' "$kernel" "$rec_hash"
-            else
-                printf 'geforce-sriov-driver: already prepared for %s (module %s); nothing to do\n' "$kernel" "$rec_hash"
-            fi
+            printf 'geforce-sriov-driver: already prepared for %s (module %s); nothing to do\n' "$kernel" "$rec_hash"
             for dir in "$root/usr/lib/x86_64-linux-gnu" "$root/usr/lib64" "$root/usr/lib"; do
                 copy_mode "$dir/$plugin_name.geforce-sriov"
             done
-            stage_cuda_prepared
+            stage_libs_prepared
             keep_inputs 0 || printf 'geforce-sriov-driver: warning: the build inputs could not be kept under %s\n' "$inputs" >&2
             # The one line the CLI reads to learn what this run changed (driver_line() in install.c).
             # It is not a message: the wording of every other line is free. No such line means changed.
             if [ "$mode_fixed" -eq 1 ] || [ "$recovered" -eq 1 ]; then
                 printf 'install_result=changed\n'
-            elif [ "$reclassified" -eq 1 ]; then
-                printf 'install_result=record-only\n'
             else
                 printf 'install_result=unchanged\n'
             fi
@@ -1518,7 +1657,7 @@ if [ -f "$record" ] && [ ! -L "$record" ]; then
         make_copy "$work/patched-plugin"
         copy_digest=$(sha "$work/patched-plugin") || fail 'could not hash the patched plugin copy'
         replace_copy "$work/patched-plugin"
-        stage_cuda_prepared
+        stage_libs_prepared
         keep_inputs 0 || printf 'geforce-sriov-driver: warning: the build inputs could not be kept under %s\n' "$inputs" >&2
         exit 0
     fi
@@ -1774,13 +1913,28 @@ if [ "$known_object" -eq 1 ] && [ "$known_plugin" -eq 1 ] && [ "$plugin_hash" = 
     object_chain=$gs_object_chain
     plugin_chain=$gs_plugin_chain
 fi
-if [ "$known_object" -eq 0 ] || [ "$known_plugin" -eq 0 ] || [ "$plugin_hash" != "$gs_stock_plugin" ] || [ "$display" -eq 1 ]; then
+if [ "$known_object" -eq 0 ] || [ "$known_plugin" -eq 0 ] || [ "$plugin_hash" != "$gs_stock_plugin" ] || [ "$display" -eq 1 ] ||
+    { [ "$ada_selected" -eq 1 ] && [ -z "$gs_placement_offsets" ]; }; then
     for tool in modprobe modinfo od tr grep; do
         command -v "$tool" >/dev/null 2>&1 || refuse "required command missing: $tool"
     done
     preflight=$work/preflight
-    gs_preflight "$patcher" "$src/nvidia/nv-kernel.o_binary" "$plugin" "$display" "$work_dir" "$host_version" >"$preflight" ||
+    preflight_ok=1
+    gs_preflight "$patcher" "$src/nvidia/nv-kernel.o_binary" "$plugin" "$display" "$work_dir" "$host_version" "$ada_selected" >"$preflight" 2>"$work/preflight.err" ||
+        preflight_ok=0
+    cat "$work/preflight.err" >&2
+    if [ "$preflight_ok" -eq 0 ]; then
+        # An Ada build whose placement patch does not find its window is not built another way.
+        if [ "$ada_selected" -eq 1 ] &&
+            awk '/^preflight ada-placement: / && !/skipped after/ { f = 1 } /^anchor ada-placement/ { f = 1 } END { exit !f }' "$work/preflight.err"; then
+            if grep -E '^preflight ada-placement: ' "$work/preflight.err" | grep -q 'unique:'; then
+                placement_refuse 'the code window of the placement change was found more than once in the driver'
+            else
+                placement_refuse 'the code window of the placement change was not found in the driver'
+            fi
+        fi
         refuse 'a required patch anchor did not match; nothing was installed'
+    fi
     preflight_state=$(sed -n 's/^preflight_state=//p' "$preflight" | tail -n 1)
     case $preflight_state in
         confirmed|unconfirmed) ;;
@@ -1801,7 +1955,7 @@ if [ "$known_object" -eq 0 ] || [ "$known_plugin" -eq 0 ] || [ "$plugin_hash" !=
 fi
 host_sha=$driver_package_sha
 classification=$(gs_classify "$host_sha" "$second_sha" "$public_sha" "$public_version" "$object_chain" \
-    "$plugin_chain" "$display" "$host_cuda" "$preflight_state") || refuse 'the version classification failed'
+    "$plugin_chain" "$display" "$host_cuda" "$preflight_state" "$ada_selected") || refuse 'the version classification failed'
 confirmation=$(printf '%s\n' "$classification" | sed -n 's/^confirmation=//p')
 profile=$(printf '%s\n' "$classification" | sed -n 's/^evidence_profile=//p')
 # A build can be unconfirmed for two different reasons, and the notice names the one that applies.
@@ -1848,7 +2002,7 @@ reported_offsets() {
     . "$libdir/gs-driver-elf.sh"
     : >"$work/expected.raw"
     before=$work/object
-    for pair in scheduler:scheduler module-gate:gate vf-count:patched; do
+    for pair in scheduler:scheduler module-gate:gate vf-count:patched $placement_pairs; do
         stage=${pair%%:*}
         after=$work/${pair##*:}
         fn=$(stage_value "$stage" function)
@@ -1875,19 +2029,31 @@ reported_offsets() {
 }
 
 # ---- staged build ------------------------------------------------------------
+# An Ada card adds the ada-placement row after the plain chain; without one the row is left out.
+# The object the build goes on with is the plain chain's last (patched), or the one after the row (placed).
+placement_pairs=
+[ "$ada_selected" -eq 0 ] || placement_pairs='ada-placement:placed'
 run cp -a "$src" "$work/tree"
 run cp "$src/nvidia/nv-kernel.o_binary" "$work/object"
 run "$patcher" apply "$work/object" "$work/scheduler"
 run "$patcher" ada apply "$work/scheduler" "$work/gate"
 run "$patcher" ada apply "$work/gate" "$work/patched"
-actual=$(sha "$work/patched") || fail 'could not hash patched object'
-if [ "$known_object" -eq 1 ] && [ "$display" -eq 0 ]; then
-    [ "$actual" = "$gs_patched_object" ] || refuse "patched object SHA-256 is $actual; expected $gs_patched_object"
+obj_final=$work/patched
+want_object=$gs_patched_object
+if [ "$ada_selected" -eq 1 ]; then
+    run "$patcher" ada apply "$work/patched" "$work/placed" || placement_refuse 'the placement change did not apply to the driver'
+    obj_final=$work/placed
+    # The block records it for a confirmed version; any other driver has no digest to compare with.
+    want_object=$gs_placement_object
+fi
+actual=$(sha "$obj_final") || fail 'could not hash patched object'
+if [ "$known_object" -eq 1 ] && [ "$display" -eq 0 ] && [ -n "$want_object" ]; then
+    [ "$actual" = "$want_object" ] || refuse "patched object SHA-256 is $actual; expected $want_object"
 fi
 idx39_function=
 idx39_offset=
 if [ "$display" -eq 1 ]; then
-    run "$patcher" display apply "$work/patched" "$work/patched39"
+    run "$patcher" display apply "$obj_final" "$work/patched39"
     display_out=$(run "$patcher" display inspect "$work/patched39" 2>/dev/null || true)
     idx39_function=$(printf '%s\n' "$display_out" | sed -n 's/^function=//p' | tail -n 1)
     idx39_offset=$(printf '%s\n' "$display_out" | sed -n 's/^function_offset=//p' | tail -n 1)
@@ -1898,7 +2064,7 @@ if [ "$display" -eq 1 ]; then
         *[!0-9]*) refuse "the idx 39 patch reported an invalid function offset: $idx39_offset" ;;
     esac
     actual=$(sha "$work/patched39") || fail 'could not hash the idx 39 object'
-    cp -p "$work/patched39" "$work/patched" || fail 'could not keep the idx 39 object'
+    cp -p "$work/patched39" "$obj_final" || fail 'could not keep the idx 39 object'
 fi
 if [ "$display" -eq 1 ] || [ "$host_cuda" -eq 1 ]; then
     # shellcheck disable=SC1091 # the library is installed beside the script
@@ -1914,17 +2080,37 @@ if [ "$display" -eq 1 ] || [ "$host_cuda" -eq 1 ]; then
     gs_stage_tree "$src" "$companion" "$work/tree" "$display" "$host_cuda" \
         "$host_version" "$stage_public" "$stage_nvkms" ||
         refuse 'the source staging step refused; nothing was installed'
-    run cp "$work/patched" "$work/tree/nvidia/nv-kernel.o_binary"
+    run cp "$obj_final" "$work/tree/nvidia/nv-kernel.o_binary"
     if [ "$display" -eq 1 ]; then
         gs_apply_source_patch "$work/tree" "$patch_dir/gpu-allow.patch" ||
             refuse 'the DRM GPU-selection patch did not match uniquely; nothing was installed'
         gs_apply_source_patch "$work/tree" "$patch_dir/allocation-threshold.patch" ||
             refuse 'the allocation-threshold patch did not match uniquely; nothing was installed'
+        # The programs of the second package are of another version than this driver: nvidia.ko accepts that one version (NV_ESC_CHECK_VERSION_STR).
+        case $second_version in
+            none|"$host_version") ;;
+            ''|*[!0-9.]*) refuse "the second package's version is not usable: $second_version" ;;
+            *)
+                [ -f "$patch_dir/client-accept.patch" ] ||
+                    refuse "the source patches are not installed next to $0 (driver-patches/client-accept.patch)"
+                sed "s/@GS_CLIENT_ACCEPT@/$second_version/g" "$patch_dir/client-accept.patch" >"$work/client-accept.patch" ||
+                    refuse 'the client-accept patch could not be prepared; nothing was installed'
+                # A source this patch does not fit is built without it: the display build of 0.3.0 does not need it, and
+                # host_desktop=off must not lose the build. The graphics libraries are then not installed (their
+                # version is not the one nvidia.ko accepts).
+                if gs_apply_source_patch "$work/tree" "$work/client-accept.patch"; then
+                    client_accept=$second_version
+                    printf 'geforce-sriov-driver: nvidia.ko accepts programs of version %s besides its own\n' "$client_accept"
+                else
+                    client_accept_unmatched=$second_version
+                    printf "geforce-sriov-driver: warning: the client-accept patch does not match this driver's source, so nvidia.ko is built without it and does not accept programs of version %s; NVIDIA's graphics libraries are not installed\n" "$second_version" >&2
+                fi ;;
+        esac
     fi
     run make -C "$work/tree" NV_EXCLUDE_BUILD_MODULES= "KERNEL_UNAME=$kernel" "SYSSRC=$headers" \
         "NV_KERNEL_MODULES=$wanted" modules
 else
-    run cp "$work/patched" "$work/tree/nvidia/nv-kernel.o_binary"
+    run cp "$obj_final" "$work/tree/nvidia/nv-kernel.o_binary"
     run make -C "$work/tree" NV_EXCLUDE_BUILD_MODULES= "KERNEL_UNAME=$kernel" "SYSSRC=$headers" modules
 fi
 built=$work/tree/nvidia.ko
@@ -1935,9 +2121,11 @@ if [ "$display" -eq 1 ]; then
     # chain; an anchor-admitted build of another version is accepted as best effort, recorded
     # as unconfirmed, and its own digest is kept. A whole-module comparison cannot be used for
     # this tier: a reviewed source patch (the allocation threshold) changes .text on purpose.
-    patched_sha=$(sha256sum "$work/patched" | cut -d' ' -f1)
+    patched_sha=$(sha256sum "$obj_final" | cut -d' ' -f1)
     if [ "$confirmation" = confirmed-inputs ]; then
-        [ "$patched_sha" = "$gs_display_object" ] ||
+        want_display=$gs_display_object
+        [ "$ada_selected" -eq 0 ] || want_display=$gs_placement_display_object
+        [ "$patched_sha" = "$want_display" ] ||
             refuse "the display object is $patched_sha, not the recorded chain endpoint; nothing was installed"
     elif [ "$(patch_field display-idx39 admission anchor)" = 'patch_display_idx39_admission=anchor' ]; then
         printf 'geforce-sriov-driver: display object %s admitted by anchors, not confirmed\n' "$patched_sha"
@@ -1987,10 +2175,15 @@ else
     # it may be tried: when its revisions were admitted by their anchors, the comparison uses the
     # offsets the patch tool reported for that build, and it is just as exact.
     expected_what='the eight expected offsets'
-    for at in $gs_plain_offsets; do
-        printf '%s\n' "$at"
-    done >"$work/expected"
-    if [ "$known_object" -eq 0 ] && reported_offsets >"$work/expected.reported"; then
+    expected_list=$gs_plain_offsets
+    if [ "$ada_selected" -eq 1 ] && [ -n "$gs_placement_offsets" ]; then
+        expected_list="$gs_plain_offsets $gs_placement_offsets"
+        expected_what='the eight expected offsets and the one that the Ada placement change adds'
+    fi
+    for at in $expected_list; do
+        printf '%s\n' "$((at))"
+    done | sort -n | awk '{ printf "0x%x\n", $1 }' >"$work/expected"
+    if { [ "$known_object" -eq 0 ] || { [ "$ada_selected" -eq 1 ] && [ -z "$gs_placement_offsets" ]; }; } && reported_offsets >"$work/expected.reported"; then
         cp "$work/expected.reported" "$work/expected"
         expected_what='the offsets the patch tool reported for this build'
         printf 'geforce-sriov-driver: the built module is compared with the installed one at %s: %s\n' \
@@ -2002,9 +2195,8 @@ else
     # and module only when the check above matched, so here it is missing or names another kernel or
     # module (one record serves every kernel): with the rest of the installation in place, record this
     # module for this kernel, taking stock_sha256 from this kernel's backup once its .text differs from
-    # this build at exactly the eight offsets. The installed plugin copy must be the patched one, or an
-    # earlier install's copy with plugin-mixed only, which is replaced. Otherwise refuse, because
-    # continuing would back up this patched module over the stock backup.
+    # this build at exactly the eight offsets. The installed plugin copy must be the patched one.
+    # Otherwise refuse, because continuing would back up this patched module over the stock backup.
     if [ "$already" -eq 1 ] && [ -f "$record" ] && [ ! -L "$record" ] &&
         [ "$(gs_record_get "$record" kernel)" = "$kernel" ] &&
         [ "$(gs_record_get "$record" module_sha256)" = "$stock_hash" ]; then
@@ -2023,7 +2215,7 @@ else
         if [ -f "$copy" ] && [ ! -L "$copy" ]; then
             copy_hash=$(sha "$copy") || fail "could not hash $copy"
         fi
-        case $copy_hash in "$gs_patched_plugin"|"$gs_mixed_plugin") ;; *) refuse "$incomplete" ;; esac
+        case $copy_hash in "$gs_patched_plugin") ;; *) refuse "$incomplete" ;; esac
         { [ -f "$config" ] || [ -n "$kept" ]; } &&
             [ -f "$backup" ] && [ ! -L "$backup" ] && [ ! -L "$published" ] && [ ! -d "$published" ] || refuse "$incomplete"
         objcopy -O binary -j .text "$backup" "$work/backup.text" 2>/dev/null || refuse "$incomplete"
@@ -2034,7 +2226,10 @@ else
         [ -n "$installed_id" ] || refuse "installed module has no GNU build-id: $module"
         [ "$copy_hash" = "$gs_patched_plugin" ] || make_copy "$work/patched-plugin"
         archive_published "$kernel"
-        if ! printf '%s\n' "kernel=$kernel" "module_sha256=$stock_hash" "module_build_id=$installed_id" "stock_sha256=$backup_hash" "display=0" "host_cuda=0" >"$published.tmp" ||
+        if ! {
+                printf '%s\n' "kernel=$kernel" "module_sha256=$stock_hash" "module_build_id=$installed_id" "stock_sha256=$backup_hash" "display=0" "host_cuda=0" \
+                    "ada_placement=$ada_selected"
+            } >"$published.tmp" ||
             ! mv -f "$published.tmp" "$published"; then
             rm -f "$published.tmp"
             fail "could not write $published"
@@ -2061,132 +2256,7 @@ else
     fi
 fi
 
-# ---- stage B: the owner of the Ada VFs' framebuffer slots, on the verified tree ----------------
-#
-# What was built and verified above is the build without the owner ("stage A"): its closed code is
-# NVIDIA's with the recorded revisions and nothing else. The owner is open-layer code: two C files
-# and a few lines that call them. It is added to the same tree, the modules are built again, and
-# the result is accepted only when nothing but the owner changed:
-#   - the three files are the ones recorded for this driver version (a confirmed build takes no
-#     others; any other build takes them as they are and says so);
-#   - every hunk matched exactly once;
-#   - no object file changed but the two patched ones, the new one, and what is linked from them;
-#   - NVIDIA's closed object is the same file after the build as before it, and every function of
-#     it that can be followed by name has the same bytes in the new module as in the verified one.
-#     The second half is a check of the link, not a proof on its own: both modules are relocatable
-#     files, so the bytes compared have their relocation fields empty, and where a relocation points
-#     is not compared, nor is the closed object's data. That nothing else was linked in differently
-#     rests on the object file being unchanged and on the rule about object files above;
-#   - the module has the owner's entry points, and imports no symbol from the kernel that the
-#     verified module did not import, other than those on the recorded list.
-# If any of this fails the verified stage A module is installed, and the record says why: a host is
-# never left without a driver because of the owner.
-fb_owner=0
-fb_owner_reason=
-fb_owner_admission=none
-fb_owner_c=none fb_owner_h=none fb_owner_patch=none
-objcopy -O binary -j .text "$built" "$work/base.text" 2>/dev/null || : >"$work/base.text"
-base_text_sha=$(sha "$work/base.text") || fail 'could not hash the verified module text'
-object_digests() {
-    (cd "$work/tree" && find . -name '*.o' -type f -exec sha256sum {} + 2>/dev/null | LC_ALL=C sort -k 2)
-}
-stage_b_undo() {
-    # Every module of the verified build and its symbol table: a build that stopped half way may have
-    # written any of them, and the ABI check below reads them.
-    for kept_file in "$work/stage-a/top"/*; do
-        [ -f "$kept_file" ] || continue
-        cp -p "$kept_file" "$work/tree/${kept_file##*/}" || fail 'could not put the verified modules back'
-    done
-    [ -f "$work/stage-a/top/Module.symvers" ] || rm -f "$work/tree/Module.symvers"
-    cp -p "$work/stage-a/nvidia.ko" "$built" || fail 'could not put the verified module back'
-    for kept_source in nvidia/nv.c nvidia/nv-pci.c nvidia/nvidia-sources.Kbuild; do
-        [ ! -f "$work/stage-a/${kept_source##*/}" ] || cp -p "$work/stage-a/${kept_source##*/}" "$work/tree/$kept_source" ||
-            fail 'could not put the verified sources back'
-    done
-    rm -f "$work/tree/nvidia/gs-fb-owner.c" "$work/tree/nvidia/gs-fb-owner.o" "$work/tree/common/inc/gs-fb-owner.h"
-}
-stage_b() {
-    python3 -c 'pass' >/dev/null 2>&1 || { fb_owner_reason='python3 is not installed, and adding it to the tree and checking the result need it'; return 1; }
-    find_owner_dir || { fb_owner_reason='its source files are not installed beside the driver step'; return 1; }
-    fb_owner_c=$(sha "$owner_dir/gs-fb-owner.c") && fb_owner_h=$(sha "$owner_dir/gs-fb-owner.h") &&
-        fb_owner_patch=$(sha "$owner_dir/fb-owner.patch") || { fb_owner_reason='its source files cannot be read'; return 1; }
-    gs_version_row "$host_version" || :
-    if [ -n "$gs_owner_c" ] && [ "$fb_owner_c" = "$gs_owner_c" ] && [ "$fb_owner_h" = "$gs_owner_h" ] &&
-        [ "$fb_owner_patch" = "$gs_owner_patch" ]; then
-        fb_owner_admission=digest
-    elif [ "$confirmation" = confirmed-inputs ]; then
-        fb_owner_reason="its source files are not the ones recorded for driver $host_version"
-        return 1
-    else
-        fb_owner_admission=anchor
-        printf 'geforce-sriov-driver: the framebuffer owner is not recorded for driver %s; it is built as it is and is not guaranteed to work with this driver build\n' "$host_version"
-    fi
-    mkdir "$work/stage-a" && cp -p "$built" "$work/stage-a/nvidia.ko" &&
-        cp -p "$work/tree/nvidia/nv.c" "$work/tree/nvidia/nv-pci.c" "$work/tree/nvidia/nvidia-sources.Kbuild" "$work/stage-a/" ||
-        { fb_owner_reason='the verified build could not be set aside'; return 1; }
-    mkdir "$work/stage-a/top" || { fb_owner_reason='the verified build could not be set aside'; return 1; }
-    for kept_file in "$work/tree"/*.ko "$work/tree/Module.symvers"; do
-        [ -f "$kept_file" ] || continue
-        cp -p "$kept_file" "$work/stage-a/top/" || { fb_owner_reason='the verified build could not be set aside'; return 1; }
-    done
-    object_digests >"$work/stage-a/objects"
-    closed_before=$(sha "$work/tree/nvidia/nv-kernel.o_binary") || fail 'could not hash the closed object'
-    cp "$owner_dir/gs-fb-owner.c" "$work/tree/nvidia/gs-fb-owner.c" && cp "$owner_dir/gs-fb-owner.h" "$work/tree/common/inc/gs-fb-owner.h" ||
-        { stage_b_undo; fb_owner_reason='its source files could not be copied into the tree'; return 1; }
-    if ! gs_apply_source_patch "$work/tree" "$owner_dir/fb-owner.patch"; then
-        stage_b_undo
-        fb_owner_reason="its hunks do not match the open layer of driver $host_version exactly once"
-        return 1
-    fi
-    if [ "$display" -eq 1 ] || [ "$host_cuda" -eq 1 ]; then
-        show make -C "$work/tree" NV_EXCLUDE_BUILD_MODULES= "KERNEL_UNAME=$kernel" "SYSSRC=$headers" "NV_KERNEL_MODULES=$wanted" modules
-        make -C "$work/tree" NV_EXCLUDE_BUILD_MODULES= "KERNEL_UNAME=$kernel" "SYSSRC=$headers" "NV_KERNEL_MODULES=$wanted" modules ||
-            { stage_b_undo; fb_owner_reason='it did not compile (the lines above say why)'; return 1; }
-    else
-        show make -C "$work/tree" NV_EXCLUDE_BUILD_MODULES= "KERNEL_UNAME=$kernel" "SYSSRC=$headers" modules
-        make -C "$work/tree" NV_EXCLUDE_BUILD_MODULES= "KERNEL_UNAME=$kernel" "SYSSRC=$headers" modules ||
-            { stage_b_undo; fb_owner_reason='it did not compile (the lines above say why)'; return 1; }
-    fi
-    [ -f "$built" ] || { stage_b_undo; fb_owner_reason='the build with it left no module'; return 1; }
-    [ "$(sha "$work/tree/nvidia/nv-kernel.o_binary")" = "$closed_before" ] ||
-        { stage_b_undo; fb_owner_reason="the build with it changed NVIDIA's closed object"; return 1; }
-    object_digests >"$work/stage-b-objects"
-    other=$(awk 'NR == FNR { was[$2] = $1; next }
-        { seen[$2] = 1 }
-        was[$2] != $1 && $2 !~ /^\.\/(nvidia\/(nv|nv-pci|gs-fb-owner|nv-interface)|nvidia|nvidia\.mod)\.o$/ { print $2; exit }
-        END { for (name in was) if (!(name in seen)) { print name " (gone)"; exit } }' \
-        "$work/stage-a/objects" "$work/stage-b-objects")
-    [ -z "$other" ] || { stage_b_undo; fb_owner_reason="the build with it changed an object it has no business with: $other"; return 1; }
-    # shellcheck disable=SC1091 # the library is installed beside the script
-    . "$libdir/gs-driver-elf.sh"
-    closed_why=$(gs_elf_closed_same "$work/tree/nvidia/nv-kernel.o_binary" "$work/stage-a/nvidia.ko" "$built" 2>&1) ||
-        { stage_b_undo; fb_owner_reason="NVIDIA's closed code is not the same in the module with it: $closed_why"; return 1; }
-    printf 'geforce-sriov-driver: %s\n' "$closed_why"
-    for entry in gs_fb_ioctl_pre gs_fb_ioctl_post gs_fb_file_closed gs_fb_gpu_remove gs_fb_init gs_fb_exit; do
-        gs_elf_symbol "$built" "$entry" >/dev/null 2>&1 ||
-            { stage_b_undo; fb_owner_reason="the module built with it does not define $entry"; return 1; }
-    done
-    LC_ALL=C grep -aqF "geforce-sriov-fb-abi=$fb_owner_abi;" "$built" ||
-        { stage_b_undo; fb_owner_reason='the module built with it does not carry its mark'; return 1; }
-    readelf -sW -- "$work/stage-a/nvidia.ko" 2>/dev/null | awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u >"$work/stage-a/undefined"
-    readelf -sW -- "$built" 2>/dev/null | awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u >"$work/stage-b-undefined"
-    if [ -n "$gs_owner_symbols" ]; then
-        other=$(LC_ALL=C comm -13 "$work/stage-a/undefined" "$work/stage-b-undefined" | awk -v allowed=" $gs_owner_symbols " '
-            index(allowed, " " $0 " ") == 0 { print; exit }')
-        [ -z "$other" ] ||
-            { stage_b_undo; fb_owner_reason="the module built with it imports $other, which is not on the list recorded for it"; return 1; }
-    fi
-    return 0
-}
-if [ "$fb_owner_want" -eq 0 ]; then
-    fb_owner_reason='it was not asked for (fb_slots=off)'
-    printf '%s\n' 'geforce-sriov-driver: nvidia.ko is built without the owner of the Ada framebuffer slots, as fb_slots=off asks'
-elif stage_b; then
-    fb_owner=1
-    printf 'geforce-sriov-driver: nvidia.ko carries the owner of the Ada framebuffer slots (%s)\n' "$fb_owner_admission"
-else
-    printf 'geforce-sriov-driver: warning: nvidia.ko is installed without the owner of the Ada framebuffer slots: %s. An Ada VM may fail to start while a host program uses its GPU, as before 0.3.0\n' "$fb_owner_reason"
-fi
+printf 'geforce-sriov-driver: the build record names ada_placement=%s\n' "$ada_selected"
 
 # Every built module must match the kernel it was built for and the core it will load against,
 # whatever the feature set. The patch tool's abi-check compares the vermagic, the stored CRCs, the
@@ -2237,18 +2307,8 @@ else
     set -- "$@" --vermagic "$kernel_magic" --vermagic-only
 fi
 show "$patcher" abi-check "$@"
-if ! "$patcher" abi-check "$@"; then
-    [ "$fb_owner" -eq 1 ] || refuse 'the ABI check refused a built module; nothing was installed'
-    # The build with the owner is the one that was refused. The verified build is put back and
-    # checked in its place: the owner never costs a host its driver.
-    stage_b_undo
-    fb_owner=0
-    fb_owner_reason='the ABI check refused the modules built with it (the lines above say why)'
-    printf 'geforce-sriov-driver: warning: nvidia.ko is installed without the owner of the Ada framebuffer slots: %s. An Ada VM may fail to start while a host program uses its GPU, as before 0.3.0\n' "$fb_owner_reason"
-    compose_symvers
-    show "$patcher" abi-check "$@"
-    "$patcher" abi-check "$@" || refuse 'the ABI check refused a built module; nothing was installed'
-fi
+"$patcher" abi-check "$@" || refuse 'the ABI check refused a built module; nothing was installed'
+
 if [ "$display" -eq 1 ] || [ "$host_cuda" -eq 1 ]; then
     manifest=$work/manifest
     gs_stage_manifest "$display" "$host_cuda" "$host_version" "$public_version" >"$manifest" ||
@@ -2341,9 +2401,25 @@ for name in $install_modules; do
     if [ "$record_for_kernel" -eq 1 ]; then
         recorded_previous=$(gs_record_get "$record" "module_${flat}_previous")
         recorded_backup=$(gs_record_get "$record" "module_${flat}_backup_sha256")
+        recorded_built=$(gs_record_get "$record" "module_${flat}_sha256")
+        [ -n "$recorded_built" ] || [ "$name" != nvidia ] || recorded_built=$(gs_record_get "$record" module_sha256)
+        # The backup stays only while the installed module is still this script's build: the recorded
+        # digest, or for the core the recorded build-id with other bytes (a copy signed for Secure Boot).
+        # Any other module there (NVIDIA's package was installed again) is NVIDIA's own, and is what an
+        # uninstall must put back, so it is copied over the old backup.
+        ours=0
+        if [ -n "$recorded_built" ] && [ -f "$dest" ] && [ ! -L "$dest" ]; then
+            if [ "$(sha "$dest")" = "$recorded_built" ]; then
+                ours=1
+            elif [ "$name" = nvidia ]; then
+                recorded_id=$(gs_record_get "$record" module_build_id)
+                dest_id=$(readelf -n "$dest" 2>/dev/null | awk '$1 == "Build" && $2 == "ID:" {print $3; exit}' || true)
+                [ -z "$recorded_id" ] || [ "$dest_id" != "$recorded_id" ] || ours=1
+            fi
+        fi
         if [ "$recorded_previous" = present ] && [ -n "$recorded_backup" ] &&
             [ -f "$state_dir/$name.ko" ] &&
-            [ "$(sha "$state_dir/$name.ko")" = "$recorded_backup" ]; then
+            [ "$(sha "$state_dir/$name.ko")" = "$recorded_backup" ] && [ "$ours" -eq 1 ]; then
             plan=keep
         fi
     fi
@@ -2470,27 +2546,24 @@ record_tmp=$work/record
     printf 'module_sha256=%s\n' "$module_hash"
     printf 'module_build_id=%s\n' "$build_id"
     printf 'stock_sha256=%s\n' "$stock_recorded"
-    # The owner of the Ada VFs' framebuffer slots: whether this module carries it, and what was verified.
-    printf 'fb_owner=%s\nfb_owner_wanted=%s\nfb_owner_admission=%s\n' "$fb_owner" "$fb_owner_want" "$fb_owner_admission"
-    [ "$fb_owner" -eq 1 ] || printf 'fb_owner_reason=%s\n' "$fb_owner_reason"
-    [ "$fb_owner" -eq 0 ] || printf 'fb_owner_abi=%s\n' "$fb_owner_abi"
-    # The files the build was made, or tried, with: a rerun builds again when the package has others.
-    [ "$fb_owner_c" = none ] || printf 'fb_owner_c_sha256=%s\nfb_owner_h_sha256=%s\nfb_owner_patch_sha256=%s\n' \
-        "$fb_owner_c" "$fb_owner_h" "$fb_owner_patch"
-    printf 'base_text_sha256=%s\n' "$base_text_sha"
+    printf 'ada_placement=%s\n' "$ada_selected"
+    [ -z "$client_accept" ] || printf 'client_accept=%s\n' "$client_accept"
+    [ -z "$client_accept_unmatched" ] || printf 'client_accept_unmatched=%s\n' "$client_accept_unmatched"
     printf '%s\n' "$record_inputs"
     printf 'input_source_sha256=%s\ninput_second_sha256=%s\ninput_public_sha256=%s\n' \
         "$input_source_sha" "$input_second_sha" "$input_public_sha"
     printf 'plugin_sha256_input=%s\n' "$plugin_hash"
     printf 'plugin_sha256=%s\n' "$copy_digest"
     if [ -f "$work/preflight" ]; then
-        for stage in scheduler module-gate vf-count plugin-mixed plugin-div4 display-idx39; do
+        for stage in scheduler module-gate vf-count ada-placement plugin-mixed plugin-div4 display-idx39; do
             [ "$stage" != display-idx39 ] || [ "$display" -eq 1 ] || continue
+            case $stage in ada-placement) [ "$ada_selected" -eq 1 ] || continue ;; esac
             patch_field "$stage" admission anchor
             patch_field "$stage" state 'unconfirmed:unknown'
         done
     else
-        for stage in scheduler module-gate vf-count plugin-mixed plugin-div4; do
+        for stage in scheduler module-gate vf-count ada-placement plugin-mixed plugin-div4; do
+            case $stage in ada-placement) [ "$ada_selected" -eq 1 ] || continue ;; esac
             patch_field "$stage" admission digest
             # The states the patch tool reports for this chain. plugin-mixed alone is
             # unconfirmed: it describes the intermediate plugin, which was never tested by
@@ -2554,6 +2627,7 @@ commit_files
 committing=0
 record=$published
 stage_cuda_built "$companion_source"
+stage_desktop_built "$companion_source"
 # The extraction of the second package is not needed any more; its room may be needed for what is kept.
 rm -rf "$work/companion"
 keep_inputs 1 || printf 'geforce-sriov-driver: warning: the build inputs could not be kept under %s\n' "$inputs" >&2

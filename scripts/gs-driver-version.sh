@@ -32,7 +32,7 @@
 #   is unpacked by running its own installer with --extract-only inside WORK;
 #   only pass a package you trust and have pinned.
 #
-# gs_classify HOST_SHA SECOND_SHA PUBLIC_SHA PUBLIC_VERSION OBJECT_CHAIN PLUGIN_CHAIN DISPLAY CUDA [PREFLIGHT_STATE]
+# gs_classify HOST_SHA SECOND_SHA PUBLIC_SHA PUBLIC_VERSION OBJECT_CHAIN PLUGIN_CHAIN DISPLAY CUDA [PREFLIGHT_STATE [ADA]]
 #   Chains are comma-separated whole-file SHA-256 values in revision order,
 #   including both endpoints; use none for an absent input or chain. DISPLAY
 #   and CUDA are 0 or 1. Prints confirmation=confirmed-inputs|unconfirmed and
@@ -40,7 +40,9 @@
 #   and the complete revision chain to match one recorded tested combination.
 #   The optional last argument, the preflight state, must also be confirmed;
 #   any other value forces unconfirmed. Record confirmation= from the output
-#   of this function, never from a version string.
+#   of this function, never from a version string. ADA is 1 when an Ada card is selected and the
+#   build carries the ada-placement row, 0 otherwise (0 when not given); the display profile of an
+#   Ada build is the one that ends in placement_display_object.
 #
 #   Every block of the table is tried in order. The object and plugin chains are the
 #   identity: the host package digest is recorded when a .run is supplied and absent for
@@ -53,7 +55,7 @@
 #   and refuses a PUBLIC_SHA value; a digest is not invented here. A combination whose
 #   profile the block does not name stays unconfirmed, as host CUDA without display does.
 #
-# gs_preflight PATCHER OBJECT PLUGIN DISPLAY WORK VERSION
+# gs_preflight PATCHER OBJECT PLUGIN DISPLAY WORK VERSION [ADA]
 #   Runs every required revision through PATCHER in a scratch directory under
 #   WORK and discards the outputs. Prints one block per revision (stage= then
 #   the patcher's key=value lines) and finally preflight_state=confirmed or
@@ -68,7 +70,10 @@
 #   measured on its own: plugin-mixed (stock plugin to placement-only), which
 #   every chain passes through, and the module-gate row that takes the stock
 #   object without the scheduler revision, which the install chain never uses
-#   (its module-gate step takes the scheduler output and reports confirmed).
+#   (its module-gate step takes the scheduler output and reports confirmed). The
+#   ada-placement row, run only when ADA is 1 (0 when it is not given), was
+#   measured on hardware and reports confirmed when admitted by digest; the build record
+#   names it (ada_placement=1).
 #   That state is not an error and must not make a confirmed input
 #   combination unconfirmed. Any admission=anchor makes the
 #   build unconfirmed, whatever the states say.
@@ -122,13 +127,12 @@ _gs_refuse() {
 _gs_row_clear() {
     gs_host_version='' gs_host_package=''
     gs_stock_object='' gs_scheduler_object='' gs_gate_object='' gs_patched_object='' gs_display_object=''
+    gs_placement_object='' gs_placement_display_object='' gs_placement_offsets=''
     gs_stock_plugin='' gs_mixed_plugin='' gs_patched_plugin=''
     gs_plain_offsets=''
     gs_second_version='' gs_second_grid='' gs_second_consumer='' gs_public_version=''
     gs_profile_plain='' gs_profile_display='' gs_profile_display_cuda=''
-    gs_object_chain='' gs_object_chain_display='' gs_plugin_chain=''
-    # shellcheck disable=SC2034 # read by the driver step
-    gs_owner_c='' gs_owner_h='' gs_owner_patch='' gs_owner_symbols=''
+    gs_object_chain='' gs_object_chain_display='' gs_object_chain_placement_display='' gs_plugin_chain=''
 }
 
 gs_version_row() {
@@ -143,7 +147,7 @@ gs_version_row() {
         on && !/^#/ && !/^[ \t]*$/ { print }' "$_gs_versions_file") ||
         { _gs_refuse "cannot read the table of confirmed versions: $_gs_versions_file"; return 3; }
     [ -n "$_gs_row" ] || return 1
-    # shellcheck disable=SC2034 # the owner_* fields are read by the driver step
+    # shellcheck disable=SC2034 # the fields are read by the driver step
     while IFS= read -r _gs_line; do
         _gs_value=${_gs_line#*=}
         case ${_gs_line%%=*} in
@@ -154,6 +158,9 @@ gs_version_row() {
             gate_object) gs_gate_object=$_gs_value ;;
             patched_object) gs_patched_object=$_gs_value ;;
             display_object) gs_display_object=$_gs_value ;;
+            placement_object) gs_placement_object=$_gs_value ;;
+            placement_display_object) gs_placement_display_object=$_gs_value ;;
+            placement_offsets) gs_placement_offsets=$_gs_value ;;
             stock_plugin) gs_stock_plugin=$_gs_value ;;
             mixed_plugin) gs_mixed_plugin=$_gs_value ;;
             patched_plugin) gs_patched_plugin=$_gs_value ;;
@@ -165,10 +172,6 @@ gs_version_row() {
             profile_plain) gs_profile_plain=$_gs_value ;;
             profile_display) gs_profile_display=$_gs_value ;;
             profile_display_cuda) gs_profile_display_cuda=$_gs_value ;;
-            owner_c) gs_owner_c=$_gs_value ;;
-            owner_h) gs_owner_h=$_gs_value ;;
-            owner_patch) gs_owner_patch=$_gs_value ;;
-            owner_symbols) gs_owner_symbols=$_gs_value ;;
             # Read by the build for the CLI's rows; the driver step has no use for them.
             guest_ampere|guest_ada) ;;
             *) _gs_row_clear
@@ -179,26 +182,35 @@ gs_version_row() {
 $_gs_row
 EOF
     # The plain build's module is compared at these offsets as text, so they have one spelling.
-    _gs_count=0 _gs_last=-1
-    for _gs_at in $gs_plain_offsets; do
-        case $_gs_at in
-            0x*[!0-9a-f]*|0x) _gs_last=bad ;;
-            0x*) [ "$(printf '0x%x' "$((_gs_at))")" = "$_gs_at" ] && [ "$((_gs_at))" -gt "$_gs_last" ] || _gs_last=bad ;;
-            *) _gs_last=bad ;;
-        esac
-        [ "$_gs_last" != bad ] || break
-        _gs_last=$((_gs_at)) _gs_count=$((_gs_count + 1))
+    for _gs_field in plain_offsets:eight:8 placement_offsets:one:1; do
+        _gs_name=${_gs_field%%:*} _gs_want=${_gs_field##*:} _gs_word=${_gs_field#*:} _gs_word=${_gs_word%:*}
+        eval "_gs_list=\$gs_$_gs_name"
+        _gs_count=0 _gs_last=-1
+        for _gs_at in $_gs_list; do
+            case $_gs_at in
+                0x*[!0-9a-f]*|0x) _gs_last=bad ;;
+                0x*) [ "$(printf '0x%x' "$((_gs_at))")" = "$_gs_at" ] && [ "$((_gs_at))" -gt "$_gs_last" ] || _gs_last=bad ;;
+                *) _gs_last=bad ;;
+            esac
+            [ "$_gs_last" != bad ] || break
+            _gs_last=$((_gs_at)) _gs_count=$((_gs_count + 1))
+        done
+        if [ -n "$_gs_list" ] && { [ "$_gs_last" = bad ] || [ "$_gs_count" -ne "$_gs_want" ]; }; then
+            _gs_row_clear
+            if [ "$_gs_want" -eq 1 ]; then
+                _gs_refuse "the table of confirmed versions: $_gs_name of $1 must be one offset, written as 0x and lowercase hexadecimal digits"
+            else
+                _gs_refuse "the table of confirmed versions: $_gs_name of $1 must be $_gs_word ascending offsets, each written as 0x and lowercase hexadecimal digits"
+            fi
+            return 3
+        fi
     done
-    if [ -n "$gs_plain_offsets" ] && { [ "$_gs_last" = bad ] || [ "$_gs_count" -ne 8 ]; }; then
-        _gs_row_clear
-        _gs_refuse "the table of confirmed versions: plain_offsets of $1 must be eight ascending offsets, each written as 0x and lowercase hexadecimal digits"
-        return 3
-    fi
     # The chains in revision order, both endpoints included. A block that lacks one digest of a
     # chain has no such chain, and nothing is confirmed against it.
     if [ -n "$gs_stock_object" ] && [ -n "$gs_scheduler_object" ] && [ -n "$gs_gate_object" ] && [ -n "$gs_patched_object" ]; then
         gs_object_chain=$gs_stock_object,$gs_scheduler_object,$gs_gate_object,$gs_patched_object
         [ -z "$gs_display_object" ] || gs_object_chain_display=$gs_object_chain,$gs_display_object
+        [ -z "$gs_placement_display_object" ] || gs_object_chain_placement_display=$gs_object_chain,$gs_placement_display_object
     fi
     if [ -n "$gs_stock_plugin" ] && [ -n "$gs_mixed_plugin" ] && [ -n "$gs_patched_plugin" ]; then
         gs_plugin_chain=$gs_stock_plugin,$gs_mixed_plugin,$gs_patched_plugin
@@ -405,11 +417,16 @@ gs_detect_identity() (
 
 gs_classify() (
     case $# in
-        8|9) ;;
-        *) _gs_refuse 'classification requires eight or nine arguments'; exit 3 ;;
+        8|9|10) ;;
+        *) _gs_refuse 'classification requires eight to ten arguments'; exit 3 ;;
     esac
     host=$1 second=$2 public_sha=$3 public_version=$4 object_chain=$5 plugin_chain=$6 display=$7 cuda=$8
-    if [ "$#" -eq 9 ]; then preflight=$9; else preflight=none; fi
+    if [ "$#" -ge 9 ]; then preflight=$9; else preflight=none; fi
+    if [ "$#" -eq 10 ]; then ada=${10}; else ada=0; fi
+    case $ada in
+        0|1) ;;
+        *) _gs_refuse "invalid ada flag: $ada"; exit 3 ;;
+    esac
     case $preflight in
         confirmed|unconfirmed|none) ;;
         *) _gs_refuse "invalid preflight state: $preflight"; exit 3 ;;
@@ -437,7 +454,16 @@ gs_classify() (
             [ "$second" = none ] && [ "$public_sha" = none ] && [ "$public_version" = none ] &&
             [ "$display:$cuda" = 0:0 ]; then
             candidate=$gs_profile_plain
-        elif [ -n "$gs_object_chain_display" ] && [ "$object_chain" = "$gs_object_chain_display" ] &&
+        elif [ "$ada" = 1 ] && [ "$display" = 1 ] && [ -n "$gs_object_chain_placement_display" ] &&
+            [ "$object_chain" = "$gs_object_chain_placement_display" ] &&
+            [ "$second_known" -eq 1 ] &&
+            [ "$public_sha" = none ] &&
+            [ -n "$gs_public_version" ] && [ "$public_version" = "$gs_public_version" ]; then
+            case $cuda in
+                1) candidate=$gs_profile_display_cuda ;;
+                *) candidate=$gs_profile_display ;;
+            esac
+        elif [ "$ada" = 0 ] && [ -n "$gs_object_chain_display" ] && [ "$object_chain" = "$gs_object_chain_display" ] &&
             [ "$second_known" -eq 1 ] &&
             [ "$public_sha" = none ] &&
             [ -n "$gs_public_version" ] && [ "$public_version" = "$gs_public_version" ] &&
@@ -555,8 +581,12 @@ gs_record_read() (
 )
 
 gs_preflight() (
-    [ "$#" -eq 6 ] || { _gs_refuse 'preflight requires patcher, object, plugin, display, work and version'; exit 3; }
-    patcher=$1 object=$2 plugin=$3 display=$4 work=$5 version=$6
+    [ "$#" -eq 6 ] || [ "$#" -eq 7 ] || { _gs_refuse 'preflight requires patcher, object, plugin, display, work and version, and may name the Ada flag'; exit 3; }
+    patcher=$1 object=$2 plugin=$3 display=$4 work=$5 version=$6 ada=${7:-0}
+    case $ada in
+        0|1) ;;
+        *) _gs_refuse "invalid ada flag: $ada"; exit 3 ;;
+    esac
     case $display in
         0|1) ;;
         *) _gs_refuse "invalid display flag: $display"; exit 3 ;;
@@ -573,10 +603,11 @@ gs_preflight() (
     plug=$plugin
     obj_failed=
     plug_failed=
-    for stage in scheduler module-gate vf-count plugin-mixed plugin-div4 display-idx39; do
+    for stage in scheduler module-gate vf-count ada-placement plugin-mixed plugin-div4 display-idx39; do
         if [ "$stage" = display-idx39 ] && [ "$display" != 1 ]; then
             continue
         fi
+        case $stage in ada-placement) [ "$ada" = 1 ] || continue ;; esac
         case $stage in
             plugin-*) source=$plug prior=$plug_failed ;;
             *) source=$obj prior=$obj_failed ;;
@@ -626,10 +657,10 @@ gs_preflight() (
             case $stage in plugin-*) plug_failed=$stage ;; *) obj_failed=$stage ;; esac
             continue
         fi
-        # module-gate and plugin-mixed are intermediate rows: the patcher
-        # reports state=unconfirmed:unknown for them because they were never
-        # measured alone. Only the final rows decide the state, and any anchor
-        # admission decides against confirmation. Do not "fix" this.
+        # module-gate and plugin-mixed are intermediate rows: the patcher reports
+        # state=unconfirmed:unknown for them because they were never measured alone.
+        # Only the final rows decide the state, and any anchor admission decides against
+        # confirmation. Do not "fix" the intermediate rows.
         verdict=$(awk -F= -v rev="$stage" '
             $1 == "admission" { admission = $2 }
             $1 == "state" { state = $2 }

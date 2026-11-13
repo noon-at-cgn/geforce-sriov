@@ -14,7 +14,7 @@ static void usage(FILE *f)
 {
 	fprintf(f,
 		"Usage: geforce-sriov COMMAND [OPTIONS]\n"
-		"  devices | doctor | status\n"
+		"  devices | status\n"
 		"  check [--device BDF]... [--type N] [--daemon-ready]\n"
 		"  activate [--type N] [--dry-run] [--boot] [--clear-lock]\n"
 		"           [--stop-display-manager]\n"
@@ -25,12 +25,15 @@ static void usage(FILE *f)
 		"        [--allow-unsupported-driver] [feature and package options]\n"
 		"  install [--device BDF]... [--vfs N] [--prefix PATH] [--destdir PATH]\n"
 		"          [--source DIR] [--ari=on|off] [--msix=on|off] [feature and package options]\n"
+		"  install --dry-run [--device BDF]... [feature and package options]\n"
+		"      Check this host for that install and change nothing (setup runs the same checks first).\n"
 		"  rebuild [--kernel RELEASE]\n"
-		"      After a kernel update: build NVIDIA's modules again, from the inputs install kept.\n"
+		"      Build NVIDIA's modules again for a kernel, from the inputs install kept. A kernel update runs it by itself.\n"
 		"  uninstall [--unload]\n"
 		"Feature and package options for install and setup:\n"
 		"  --display | --no-display      select display build\n"
 		"  --host-cuda | --no-host-cuda  select host CUDA\n"
+		"  --host-desktop | --no-host-desktop  select NVIDIA's graphics libraries for the host desktop\n"
 		"  --companion-file PATH | --companion-source DIR\n"
 		"  --nvkms-source PATH           public NVKMS source directory or tarball\n"
 		"  --driver-file PATH | --nvidia-source DIR | --driver=skip\n"
@@ -69,11 +72,7 @@ static int is_vf_count_opt(const char *a)
 /* a is not an option of this command; say where the VF count is set when that was the intent. */
 static int unknown_opt(const char *a, int install)
 {
-	if (!strncmp(a, "--release-console", 17) || !strncmp(a, "--boot-display-release", 22) ||
-	    !strcmp(a, "--hold-nvidia") || !strcmp(a, "--hold-note-shown"))
-		return bad("%s is no longer supported; use activate and display=auto|on|off", a);
-	/* --experimental-vfs is not a VF count. */
-	if (strncmp(a, "--experimental", 14) == 0 || !is_vf_count_opt(a))
+	if (!is_vf_count_opt(a))
 		return bad("unknown option '%s'", a);
 	if (install)
 		return bad("%s: the VF count option is --vfs N (1 up to the card's hardware default, default %u)", a,
@@ -111,7 +110,7 @@ static int parse_device(const char *opt, const char *v, struct gs_addr *list, un
 		if (strcmp(list[i].str, a.str) == 0)
 			return bad("%s %s given twice", opt, v);
 	if (*n == GS_CFG_MAX_BDFS)
-		return bad("at most 8 %s options (%s)", opt, v);
+		return bad("at most %u %s options (%s)", GS_CFG_MAX_BDFS, opt, v);
 	list[(*n)++] = a;
 	return 0;
 }
@@ -163,6 +162,11 @@ static int parse_package_opt(int argc, char **argv, int *i, struct gs_install_op
 			return bad("--host-cuda and --no-host-cuda may be given only once");
 		o->host_cuda_set = 1;
 		o->host_cuda = !strcmp(a, "--host-cuda");
+	} else if (!strcmp(a, "--host-desktop") || !strcmp(a, "--no-host-desktop")) {
+		if (o->host_desktop_set)
+			return bad("--host-desktop and --no-host-desktop may be given only once");
+		o->host_desktop_set = 1;
+		o->host_desktop = !strcmp(a, "--host-desktop");
 	} else if (!strcmp(a, "--allow-unsupported-driver")) {
 		o->allow_unsupported_driver = 1;
 	} else if (!strcmp(a, "--accept-nvidia-license")) {
@@ -237,9 +241,6 @@ static int parse_vgpu_opts(int argc, char **argv, struct gs_activate_opts *o, in
 			o->boot = 1;
 		} else if (activate && strcmp(argv[i], "--clear-lock") == 0) {
 			o->clear_guard = 1;
-		} else if (strcmp(argv[i], "--clear-guard") == 0) {
-			/* The name the option had up to 0.2.x. An old name is refused with the new one, never taken silently. */
-			return bad("--clear-guard was renamed to --clear-lock in 0.3.0; run `geforce-sriov activate --clear-lock`");
 		} else if (activate && strcmp(argv[i], "--stop-display-manager") == 0) {
 			o->stop_display_manager = 1;
 		} else if (!activate && strcmp(argv[i], "--daemon-ready") == 0) {
@@ -284,7 +285,7 @@ static int parse_livepatch_opts(int argc, char **argv, struct gs_livepatch_opts 
 	return 0;
 }
 
-static int diag_main(int argc, char **argv, int status)
+static int status_main(int argc, char **argv)
 {
 	struct gs_diag_opts o;
 	struct stat st;
@@ -305,42 +306,11 @@ static int diag_main(int argc, char **argv, int status)
 			if (v[0] == '\0')
 				return bad("%s needs a file", "--config");
 			o.config_path = v;
-		} else if (!status && (v = opt_value(argc, argv, &i, "--nvidia-source"))) {
-			if (gs_validate_abs_path(v))
-				return bad("--nvidia-source '%s' must be a normalized absolute path", v);
-			o.nvidia_source = v;
-		} else if (!status && (v = opt_value(argc, argv, &i, "--driver-file"))) {
-			if ((r = parse_driver_file(v, &o.driver_file)))
-				return r;
-		} else if (!status && strcmp(argv[i], "--disable-d3cold") == 0) {
-			o.disable_d3cold = 1;
-		} else if (!status && (strcmp(argv[i], "--display") == 0 || strcmp(argv[i], "--no-display") == 0)) {
-			o.display_set = 1;
-			o.display = strcmp(argv[i], "--display") == 0 ? GS_DISPLAY_ON : GS_DISPLAY_OFF;
-		} else if (!status && (strcmp(argv[i], "--host-cuda") == 0 || strcmp(argv[i], "--no-host-cuda") == 0)) {
-			o.host_cuda_set = 1;
-			o.host_cuda = strcmp(argv[i], "--host-cuda") == 0;
-		} else if (!status && (v = opt_value(argc, argv, &i, "--driver"))) {
-			if (strcmp(v, "skip") != 0)
-				return bad("--driver takes only the value skip");
-			o.skip_driver = 1;
-		} else if (!status && (v = opt_value(argc, argv, &i, "--companion-file"))) {
-			if (gs_validate_abs_path(v))
-				return bad("--companion-file '%s' must be a normalized absolute path", v);
-			o.companion_file = v;
-		} else if (!status && (v = opt_value(argc, argv, &i, "--companion-source"))) {
-			if (gs_validate_abs_path(v))
-				return bad("--companion-source '%s' must be a normalized absolute path", v);
-			o.companion_source = v;
-		} else if (!status && (v = opt_value(argc, argv, &i, "--nvkms-source"))) {
-			if (gs_validate_abs_path(v))
-				return bad("--nvkms-source '%s' must be a normalized absolute path", v);
-			o.nvkms_source = v;
 		} else {
 			return unknown_opt(argv[i], 0);
 		}
 	}
-	return status ? gs_cmd_status(&o) : gs_cmd_doctor(&o);
+	return gs_cmd_status(&o);
 }
 
 /* Mutating commands never take a diagnostic root or config: name what they act on instead. */
@@ -358,9 +328,9 @@ static int reject_diag_opts(int argc, char **argv)
 		if (strncmp(argv[i], "--sysfs-root", 12) != 0 && strncmp(argv[i], "--config", 8) != 0)
 			continue;
 		if (stage)
-			return bad("%s is for doctor and status only. Staging writes the config from --device and the switches\n"
-				   "and checks no device; run `geforce-sriov doctor` on the target host", argv[i]);
-		return bad("%s is for doctor and status only; this command acts on the live system and its config",
+			return bad("%s is for status only. Staging writes the config from --device and the switches\n"
+				   "and checks no device; run `geforce-sriov install --dry-run` on the target host", argv[i]);
+		return bad("%s is for status only; this command acts on the live system and its config",
 			   argv[i]);
 	}
 	return 0;
@@ -401,10 +371,8 @@ int main(int argc, char **argv)
 			return unknown_opt(argv[2], 0);
 		return gs_cmd_devices();
 	}
-	if (strcmp(cmd, "doctor") == 0)
-		return diag_main(argc, argv, 0);
 	if (strcmp(cmd, "status") == 0)
-		return diag_main(argc, argv, 1);
+		return status_main(argc, argv);
 	if (strcmp(cmd, "check") == 0) {
 		struct gs_activate_opts o;
 
@@ -446,6 +414,8 @@ int main(int argc, char **argv)
 					return r;
 				if (o.devices[o.ndevices - 1].func != 0)
 					return bad("--device %s: select the physical function .0", v);
+			} else if (strcmp(argv[i], "--dry-run") == 0) {
+				o.dry_run = 1;
 			} else if (strcmp(argv[i], "--from-setup") == 0) {
 				/* setup's own mark on the install it runs; not a user option, so not in the usage text. */
 				o.from_setup = 1;
@@ -479,14 +449,16 @@ int main(int argc, char **argv)
 		}
 		if ((r = check_install_opts(&o)))
 			return r;
+		if (o.dry_run && (o.destdir || o.prefix || o.source || o.vfs || o.from_setup || o.ov.ari != GS_SW_UNSET ||
+				  o.ov.msix != GS_SW_UNSET))
+			return bad("--dry-run checks this host for the selection, feature and package options of install; it takes no\n"
+				   "--prefix, --destdir (or DESTDIR), --source, --vfs, --ari or --msix");
 		if (o.allow_unsupported_driver) {
 			fprintf(stderr, "geforce-sriov: --allow-unsupported-driver is ignored by install\n");
 			o.allow_unsupported_driver = 0;
 		}
 		return gs_cmd_install(&o);
 	}
-	if (strcmp(cmd, "prepare") == 0)
-		return bad("prepare is no longer supported; use activate");
 	if (strcmp(cmd, "activate") == 0) {
 		struct gs_activate_opts o;
 

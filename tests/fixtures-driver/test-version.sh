@@ -139,6 +139,15 @@ classify "$host_sha" none none none "$object_chain" "$plugin_chain" 0 0 unconfir
 check has_line 'confirmation=unconfirmed' "$tmp/out"
 expect_rc3 gs_classify "$host_sha" none none none "$object_chain" "$plugin_chain" 0 0 anchor
 expect_rc3 gs_classify "$host_sha" none none none "$object_chain" "$plugin_chain" 0 0 ''
+# The last argument says whether an Ada card is selected (the build carries the ada-placement row): 0 or
+# 1, and 0 when it is not given. The plain chain is the identity of a plain build either way.
+classify "$host_sha" none none none "$object_chain" "$plugin_chain" 0 0 confirmed 0
+check has_line 'confirmation=confirmed-inputs' "$tmp/out"
+classify "$host_sha" none none none "$object_chain" "$plugin_chain" 0 0 confirmed 1
+check has_line 'confirmation=confirmed-inputs' "$tmp/out"
+check has_line 'evidence_profile=host-580.159.01-plain' "$tmp/out"
+expect_rc3 gs_classify "$host_sha" none none none "$object_chain" "$plugin_chain" 0 0 confirmed middle
+expect_rc3 gs_classify "$host_sha" none none none "$object_chain" "$plugin_chain" 0 0 confirmed top
 classify "$host_sha" none none none "$object_chain" "$plugin_chain" 1 0
 check has_line 'confirmation=unconfirmed' "$tmp/out"
 check has_line 'evidence_profile=none' "$tmp/out"
@@ -184,6 +193,23 @@ check has_line 'confirmation=unconfirmed' "$tmp/out"
 classify "$host_sha" "$second_grid" none none "$object_chain" "$plugin_chain" 0 1 confirmed
 check has_line 'confirmation=unconfirmed' "$tmp/out"
 classify "$host_sha" "$second_grid" none "$public_version" "$display_chain" "$plugin_chain" 0 0 confirmed
+check has_line 'confirmation=unconfirmed' "$tmp/out"
+# An Ada + display build ends the chain at the object after idx39 on the ada-placement object. It is confirmed
+# on that chain, not on the default display chain, and the default display chain is not confirmed for an
+# Ada build.
+expect_placement_display_object=48fd6ddd2df13a1131a98facd4a80be1d6d17877eb900f3c945dfa483347627b
+ada_display_chain=$object_chain,$expect_placement_display_object
+classify "$host_sha" "$second_grid" none "$public_version" "$ada_display_chain" "$plugin_chain" 1 0 confirmed 1
+check has_line 'confirmation=confirmed-inputs' "$tmp/out"
+check has_line 'evidence_profile=display-580.159.01-idx39' "$tmp/out"
+classify "$host_sha" "$second_grid" none "$public_version" "$ada_display_chain" "$plugin_chain" 1 1 confirmed 1
+check has_line 'confirmation=confirmed-inputs' "$tmp/out"
+check has_line 'evidence_profile=display-cuda-580.159.01-idx39' "$tmp/out"
+classify "$host_sha" "$second_grid" none "$public_version" "$ada_display_chain" "$plugin_chain" 1 0 confirmed 0
+check has_line 'confirmation=unconfirmed' "$tmp/out"
+classify "$host_sha" "$second_grid" none "$public_version" "$display_chain" "$plugin_chain" 1 0 confirmed 1
+check has_line 'confirmation=unconfirmed' "$tmp/out"
+classify "$host_sha" "$second_grid" none "$public_version" "$ada_display_chain" "$plugin_chain" 1 0 unconfirmed 1
 check has_line 'confirmation=unconfirmed' "$tmp/out"
 
 # 2c. The recorded second-package digests identify an input, not a build.
@@ -293,6 +319,56 @@ check has_line 'stage=display-idx39' "$tmp/out"
 check test "$(grep -c '^stage=' "$tmp/out")" -eq 6
 check test "$(tail -n 1 "$tmp/out")" = 'preflight_state=confirmed'
 check test -z "$(ls -A "$tmp/work")"
+
+# 3b2. An Ada card selected runs the ada-placement row after vf-count and before the plugin rows. It
+# reports state=confirmed (it was measured on hardware) and an anchor admission of it makes the build
+# unconfirmed. Without an Ada card, and with no flag given, the row is not run.
+cat >"$FAKE_QUEUE" <<'EOF'
+scheduler digest confirmed
+module-gate digest unconfirmed:unknown
+vf-count digest confirmed
+ada-placement digest confirmed
+plugin-mixed digest unconfirmed:unknown
+plugin-div4 digest confirmed
+EOF
+gs_preflight "$patcher" "$object" "$plugin" 0 "$tmp/work" 580.159.01 1 >"$tmp/out" 2>"$tmp/err"
+check has_line 'preflight_state=confirmed' "$tmp/out"
+check test "$(grep -c '^stage=' "$tmp/out")" -eq 6
+check test "$(grep '^stage=' "$tmp/out" | sed -n '3p;4p;5p' | tr '\n' ' ')" = \
+    'stage=vf-count stage=ada-placement stage=plugin-mixed '
+check test ! -s "$tmp/err"
+check test -z "$(ls -A "$tmp/work")"
+cat >"$FAKE_QUEUE" <<'EOF'
+scheduler digest confirmed
+module-gate digest unconfirmed:unknown
+vf-count digest confirmed
+ada-placement anchor confirmed
+plugin-mixed digest unconfirmed:unknown
+plugin-div4 digest confirmed
+EOF
+gs_preflight "$patcher" "$object" "$plugin" 0 "$tmp/work" 580.159.01 1 >"$tmp/out" 2>"$tmp/err"
+check has_line 'preflight_state=unconfirmed' "$tmp/out"
+cat >"$FAKE_QUEUE" <<'EOF'
+scheduler digest confirmed
+module-gate digest unconfirmed:unknown
+vf-count digest confirmed
+plugin-mixed digest unconfirmed:unknown
+plugin-div4 digest confirmed
+EOF
+gs_preflight "$patcher" "$object" "$plugin" 0 "$tmp/work" 580.159.01 0 >"$tmp/out" 2>"$tmp/err"
+check has_line 'preflight_state=confirmed' "$tmp/out"
+check test "$(grep -c '^stage=' "$tmp/out")" -eq 5
+check lacks_line 'stage=ada-placement' "$tmp/out"
+cat >"$FAKE_QUEUE" <<'EOF'
+scheduler digest confirmed
+module-gate digest unconfirmed:unknown
+vf-count digest confirmed
+plugin-mixed digest unconfirmed:unknown
+plugin-div4 digest confirmed
+EOF
+gs_preflight "$patcher" "$object" "$plugin" 0 "$tmp/work" 580.159.01 >"$tmp/out" 2>"$tmp/err"
+check lacks_line 'stage=ada-placement' "$tmp/out"
+expect_rc3 gs_preflight "$patcher" "$object" "$plugin" 0 "$tmp/work" 580.159.01 middle
 
 # 3c. One failed anchor refuses everything and names the anchor.
 cat >"$FAKE_QUEUE" <<'EOF'
@@ -499,6 +575,9 @@ check test "$gs_object_chain_display" = "$expect_object_chain,$expect_display_ob
 check test "$gs_plugin_chain" = "$expect_plugin_chain"
 check test "$gs_second_version/$gs_second_grid/$gs_second_consumer" = "580.159.03/$second_grid/$second_consumer"
 check test "$gs_plain_offsets" = '0x14a7c4 0x14a7c5 0x14a7c6 0x14a7c7 0xa16708 0xa16709 0xd8966f 0xd89670'
+check test "$gs_placement_object" = 20eaebcac4f5220d21f64bcd5145143abe8f806a25cb9e249088a1b98df7d157
+check test "$gs_placement_display_object" = "$expect_placement_display_object"
+check test "$gs_placement_offsets" = '0xf7c06'
 rc=0
 gs_version_row 580.159.04 || rc=$?
 check test "$rc" -eq 1
@@ -574,6 +653,11 @@ bad_table 'host=999.1.2' 'plain_offsets=0x10 0x11 0x12 0x13 0x20 0x21 0x30'
 check has_text 'eight ascending offsets' "$tmp/err"
 bad_table 'host=999.1.2' 'plain_offsets=0x10 0x11 0x12 0x13 0x20 0x21 0x31 0x30'
 bad_table 'host=999.1.2' 'plain_offsets=0x10 0x11 0x12 0x13 0x20 0x21 0x30 0X31'
+bad_table 'host=999.1.2' 'placement_offsets=0x10 0x11'
+check has_text 'must be one offset, written as 0x' "$tmp/err"
+bad_table 'host=999.1.2' 'placement_offsets=0X10'
+bad_table 'host=999.1.2' 'placement_measured=1'
+check has_text 'not a field of a block' "$tmp/err"
 bad_table 'host=999.1.2' 'no_such_field=1'
 check has_text 'not a field of a block' "$tmp/err"
 bad_table 'host=580.159.01'

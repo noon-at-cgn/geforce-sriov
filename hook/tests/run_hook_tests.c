@@ -982,7 +982,7 @@ int main(int argc, char **argv)
 {
 	static char big[GS_HOOK_CONFIG_MAX_BYTES + 64];
 	const char *tmpdir = getenv("TMPDIR");
-	char nine[200] = "identity=on\nbdfs=";
+	char too_many[600] = "identity=on\nbdfs=";
 
 #define V580 "NVRM version: NVIDIA UNIX x86_64 Kernel Module  580.159.01  Fri Apr 24 06:16:47 UTC 2026\nGCC version:  gcc version 14.2.0\n"
 #define V578 "NVRM version: NVIDIA UNIX x86_64 Kernel Module  580.178.05  Thu Jun  4 00:00:00 UTC 2026\n"
@@ -1007,8 +1007,8 @@ int main(int argc, char **argv)
 	       card_a->device, gs_target_of(card_a)->device, card_b->device, gs_target_of(card_b)->device,
 	       unknown_id);
 
-	for (int i = 1; i <= 9; i++)
-		snprintf(nine + strlen(nine), sizeof(nine) - strlen(nine), "%s0000:%02x:00.0",
+	for (int i = 1; i <= (int)GS_MAX_PFS + 1; i++)
+		snprintf(too_many + strlen(too_many), sizeof(too_many) - strlen(too_many), "%s0000:%02x:00.0",
 			 i > 1 ? "," : "", i);
 	memset(big, '#', sizeof(big) - 1);
 	memcpy(big, ON, strlen(ON));
@@ -1224,7 +1224,7 @@ int main(int argc, char **argv)
 		  .log_has = "invalid" },
 		{ .name = "invalid_bdf_trailing_comma", .config = "identity=on\nbdfs=0000:01:00.0,\n",
 		  .version = V580, .log_has = "invalid" },
-		{ .name = "invalid_nine_bdfs", .config = nine, .version = V580, .log_has = "invalid" },
+		{ .name = "invalid_too_many_bdfs", .config = too_many, .version = V580, .log_has = "invalid" },
 		{ .name = "invalid_too_large", .config = big, .version = V580,
 		  .log_has = "larger than 65536 bytes" },
 		{ .name = "invalid_group_writable", .config = ON, .config_mode = 0664,

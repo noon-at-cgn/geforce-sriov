@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# geforce-sriov @VERSION@: kernel-install plugin. A new kernel gets NVIDIA's module built the way geforce-sriov makes it.
+#
+# kernel-install(8) runs every plugin of /etc/kernel/install.d and /usr/lib/kernel/install.d in name order with
+# COMMAND KERNEL_VERSION ENTRY_DIR KERNEL_IMAGE. DKMS's own plugin (40-dkms.install) calls `dkms kernel_postinst` for `add`
+# and `dkms kernel_prerm` for `remove`; this one runs after it (90) and after depmod (50), so DKMS has built its modules for
+# the kernel. `add` runs the kernel hook for KERNEL_VERSION (the same `geforce-sriov rebuild --kernel` as the postinst.d
+# hook); every other command does nothing. It never fails kernel-install: the hook records a failure for `status`.
+
+[ "${1:-}" = add ] || exit 0
+hook=@BINDIR@/geforce-sriov-kernel-hook
+[ -x "$hook" ] || exit 0
+"$hook" "${2:-}" || :
+exit 0

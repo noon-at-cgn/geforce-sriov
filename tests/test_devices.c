@@ -148,8 +148,8 @@ static void test_constants(void)
 {
 	CHECK(GS_DEFAULT_VFS == 4);
 	CHECK(GS_VFS_MAX == 16);
-	CHECK(strcmp(GS_VERSION, "0.3.0") == 0);
-	CHECK(GS_MAX_PFS == 8);
+	CHECK(strcmp(GS_VERSION, "0.4.0") == 0);
+	CHECK(GS_MAX_PFS == 32);
 	CHECK(GS_VENDOR_NVIDIA == 0x10de);
 	CHECK(GS_MSIX_HIDE_BIT == 29);
 	CHECK(GS_SLOT_FNS == 8);
@@ -496,26 +496,28 @@ static void test_bdf(void)
 				   GS_MAX_PFS) == -1);
 	CHECK(gs_parse_pf_bdf_list("0000:03:00.0,0000:03:00.4", list,
 				   GS_MAX_PFS) == -1);
-	CHECK(gs_parse_pf_bdf_list(
-		      "0000:01:00.0,0000:02:00.0,0000:03:00.0,0000:04:00.0,"
-		      "0000:05:00.0,0000:06:00.0,0000:07:00.0,0000:08:00.0",
-		      list, GS_MAX_PFS) == 8);
-	CHECK(gs_parse_pf_bdf_list(
-		      "0000:01:00.0,0000:02:00.0,0000:03:00.0,0000:04:00.0,"
-		      "0000:05:00.0,0000:06:00.0,0000:07:00.0,0000:08:00.0,"
-		      "0000:09:00.0",
-		      list, GS_MAX_PFS) == -1);
+	/* GS_MAX_PFS short addresses are accepted, one more is not. */
+	big[0] = '\0';
+	for (i = 0; i < GS_MAX_PFS + 1; i++) {
+		snprintf(text, sizeof(text), "0000:%02x:00.0", i + 1);
+		if (i)
+			strcat(big, ",");
+		strcat(big, text);
+		if (i + 1 == GS_MAX_PFS)
+			CHECK(gs_parse_pf_bdf_list(big, list, GS_MAX_PFS) == (int)GS_MAX_PFS);
+	}
+	CHECK(gs_parse_pf_bdf_list(big, list, GS_MAX_PFS) == -1);
 	/* GS_MAX_PFS longest addresses fit in GS_BDF_LIST_STR_SIZE. */
 	big[0] = '\0';
 	for (i = 0; i < GS_MAX_PFS; i++) {
-		snprintf(text, sizeof(text), "7fffff%02x:ff:1f.0", 0xf0 + i);
+		snprintf(text, sizeof(text), "7ffff0%02x:ff:1f.0", i);
 		if (i)
 			strcat(big, ",");
 		strcat(big, text);
 	}
 	CHECK(strlen(big) + 1 == GS_BDF_LIST_STR_SIZE);
 	CHECK(gs_parse_pf_bdf_list(big, list, GS_MAX_PFS) == (int)GS_MAX_PFS);
-	CHECK(list[7].domain == 0x7ffffff7u && list[7].devfn == 0xf8);
+	CHECK(list[GS_MAX_PFS - 1].domain == 0x7ffff000u + GS_MAX_PFS - 1 && list[GS_MAX_PFS - 1].devfn == 0xf8);
 }
 
 /*

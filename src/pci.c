@@ -268,8 +268,8 @@ int gs_card_inspect(const char *sysroot, const struct gs_addr *pf, struct gs_car
  * display GPU only: display=auto picks a selected boot display GPU, display=off none, and
  * display=on is limited to the boot display GPU as well. Measured: KMS on a card that is not the
  * boot display breaks that card's first VF (NVOS status 0x51, "Failed to alloc guest FB memory")
- * while its other VFs keep working. An unknown boot_vga is not the boot display. Activation,
- * doctor and status all report from this one rule.
+ * while its other VFs keep working. An unknown boot_vga is not the boot display. Activation and
+ * status all report from this one rule.
  */
 int gs_display_kms(const struct gs_config *cfg, const struct gs_card *c)
 {
@@ -279,9 +279,8 @@ int gs_display_kms(const struct gs_config *cfg, const struct gs_card *c)
 }
 
 /* Checks for `install --device` and setup's listing: the PF may legitimately be bound to nvidia. */
-int gs_check_selectable(const struct gs_card *c, int release_granted, char *reason, size_t len)
+int gs_check_selectable(const struct gs_card *c, char *reason, size_t len)
 {
-	(void)release_granted; /* console releases were removed in 0.3.0 */
 	if (!c->present)
 		return snprintf(reason, len, "%s: no such PCI function", c->pf.str), -1;
 	if (c->pf.func != 0 || c->is_vf)
@@ -891,6 +890,8 @@ int gs_daemon_ready(const struct gs_host *h, const struct gs_config *cfg, const 
 			p);
 		return GS_EXIT_REFUSED;
 	}
+	if (gs_selection_verify(h, cfg, NULL))
+		return GS_EXIT_REFUSED;
 	for (unsigned int i = 0; i < cfg->nbdfs; i++) {
 		struct gs_addr vf[GS_VFS_MAX];
 		struct gs_card c;
