@@ -1,8 +1,8 @@
 # Identity hook (`libgeforce_sriov.so`)
 
-The identity hook is an `LD_PRELOAD` library for NVIDIA's `nvidia-vgpud`. The stock `vgpuConfig.xml`
+The identity hook is a small library that NVIDIA's `nvidia-vgpud` loads before its other libraries (through `LD_PRELOAD`). The stock `vgpuConfig.xml`
 lists no GeForce device ID, so the daemon refuses a GeForce card ("GPU not supported by vGPU"). The
-hook presents each selected card to the daemon under the vGPU target of its generation from the shared
+hook presents each selected card to the daemon under the device ID of the professional card of its generation (the vGPU target), taken from the shared
 device table (`include/gs_devices.h`): an Ampere card as the RTX A6000 (`10de:2230`), an Ada card as
 the RTX 6000 Ada (`10de:26b1`). The daemon then offers that target's vGPU types (also called profiles,
 each with a fixed memory size). NVIDIA does not support this configuration.
@@ -187,11 +187,3 @@ The design is adapted from earlier unpublished code by the same copyright holder
 trimmed from a fork of [vgpu_unlock-rs](https://github.com/mbilker/vgpu_unlock-rs) 2.5.0 (MIT,
 © 2021 Jonathan Johansson, © 2021 Matt Bilker), which builds on DualCoder's
 [vgpu_unlock](https://github.com/DualCoder/vgpu_unlock). Their notices are kept in `LICENSE`.
-
-Differences from the earlier hook:
-
-- One build serves all listed drivers, and the version is read from `/proc/driver/nvidia/version`.
-- The rewrite is scoped by the CLI's `bdfs` allowlist, and each reply is attributed to a GPU by bus
-  address through the driver, instead of matching the device ID alone.
-- The device table comes from `gs_devices.h` instead of explicit config pairs.
-- No result file is written, and `SET_INFO` is not recorded.

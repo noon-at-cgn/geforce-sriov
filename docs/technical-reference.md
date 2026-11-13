@@ -499,9 +499,7 @@ See [Ada bring-up differences](ada.md#bring-up-differences), [The VF power gate]
 `activate` refuses (exit 3, nothing changed) unless:
 
 - NVIDIA's driver is loaded with `EnableGpuFirmware: 0`, and
-  `libnvidia-vgpu.so` resolves to the patched plugin copy (SHA-256 `aa4fdeb5…`; the earlier Ada-only
-  copy is refused, and so is an earlier copy with only the placement change, `7ddfad45…`, with a
-  message to run `install` again);
+  `libnvidia-vgpu.so` resolves to the patched plugin copy (SHA-256 `aa4fdeb5…`; any other plugin is refused, and for a copy that has only the first of the two plugin changes the message tells you to run `install` again);
 - every VF of the selected cards is on `nvidia`, and no selected PF has a `driver_override` other than
   empty or `nvidia`;
 - the installed `nvidia.ko` is the build `install` recorded in `/var/lib/geforce-sriov/driver-build`
@@ -714,7 +712,7 @@ The step applies the revision for Ada only or Ada with Ampere (the module is sha
 - Digest first: for the recorded driver, the input digest must give the output digest, and the build is `confirmation=confirmed-inputs`.
 - Another digest: the step is admitted only when the 24-byte code window (19 bytes before the changed byte, the byte, and 4 bytes after it) occurs exactly once in `.text`, counting the original and the rewritten form together.
   The build is then `confirmation=unconfirmed`.
-- A window that is not found, or found more than once, stops the step: exit 3, nothing installed, no fallback to fixed slots, and no option that skips the check.
+- A window that is not found, or found more than once, stops the step: exit 3, nothing installed, no option that skips the check, and no build of a module without the change.
   The text is: `refused: the VMs of an Ada card cannot be placed from free video memory with driver <version>: <reason>. Install NVIDIA's vGPU host driver 580.159.01, the recommended confirmed version, and run this again; nothing was installed`.
   The reason is `the code window of the placement change was not found in the driver` or `the code window of the placement change was found more than once in the driver` for an unrecorded driver, and `the placement change did not apply to the driver` for a recorded one.
 - The change is made for 580.159.01: the window holds a structure size, a field offset and a jump distance of that version.
@@ -737,10 +735,7 @@ Ampere cards print no line.
 - A VM needs one contiguous free piece of its size.
   With 2112 MiB free in one piece a 2 GiB VM starts; split into two pieces of 1056 MiB it does not.
   A full or fragmented card refuses the VM, not the host program: `nvidia-vgpu-mgr` logs `Failed to alloc guest FB memory`, `NVOS status 0x51` and `vmiope_process_configuration failed with 0x1a`, and the VM starts again once memory is freed.
-- A slot can no longer be chosen by hand.
 - Every Ada VF shows placement `Not Applicable`.
-- There is no switch to go back.
-  To get fixed slots, uninstall, power cycle and install the previous release (0.3.0).
 
 ## The host desktop
 
@@ -771,7 +766,7 @@ NVIDIA's host driver 580.159.01 refuses libraries of another version, and the Li
 `driver-patches/client-accept.patch` is a source patch of `nvidia/nv.c`.
 It hands a strict version request, whose string is exactly the version of the Linux driver package, to NVIDIA's own check as a relaxed one.
 That check still runs and still requires the same major version.
-Every other client is checked as before, and `nvidia-smi`, NVML and the vGPU manager send 580.159.01.
+Every other client must still send the driver's own version; `nvidia-smi`, NVML and the vGPU manager send 580.159.01.
 The build records `client_accept=<version>`, and `modinfo` shows `gs_client_accept`.
 The patch is applied in a display build whose Linux driver package is of another version than the host's.
 

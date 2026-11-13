@@ -34,9 +34,9 @@ It then runs these steps in order:
 
 1. Copies NVIDIA's source tree and leaves the stock tree untouched.
 2. Makes the host-object revisions on the copy's `nvidia/nv-kernel.o_binary`: scheduler, probe gate, VF count ([Which revisions to make](#which-revisions-to-make)).
-   When an Ada card is selected (`--ada-selected`) it makes the Ada placement change as well, row `ada-placement` ([Revisions](#revisions)).
+   When an Ada card is selected (`--ada-selected`) it makes the Ada placement change as well, the change named `ada-placement` (`geforce-sriov-patch ada list` prints every change by name; see [Revisions](#revisions)).
    An object whose SHA-256 is the one recorded for 580.159.01 is a confirmed input, and the result must match the recorded digest.
-   An object of another digest is admitted when every code window of its revisions is found exactly once (best effort, recorded as `confirmation=unconfirmed`).
+   An object of another digest is admitted when the bytes around each change (its code window) are found exactly once; such a build is best effort and recorded as `confirmation=unconfirmed`.
    A file whose windows are not found is refused with the reason ([Supported inputs](#supported-inputs)).
 3. Rebuilds `nvidia.ko` for the running kernel.
    The build also prints `objtool` warnings about functions in NVIDIA's closed object (for example `_nv000847rm+0x9: call without frame pointer save/setup`).
@@ -79,7 +79,7 @@ The `install` step admits each input in one of three tiers.
    The host object `nvidia/nv-kernel.o_binary` and the vGPU plugin `libnvidia-vgpu.so.580.159.01` are pinned by whole-file SHA-256 digests, recorded in [Revisions](#revisions).
    An input that matches, with every result matching its recorded digest, is a confirmed input.
    The build record says `confirmation=confirmed-inputs`.
-2. **Anchors, best effort.**
+2. **Search by code window, best effort.**
    An object or plugin of another digest, for example from another host driver version, is admitted when the code window of each revision is found exactly once.
    The search does not depend on the names of the build's functions.
    NVIDIA's driver is then **not guaranteed to work**: the build is made and the record says `confirmation=unconfirmed`.
@@ -88,11 +88,11 @@ The `install` step admits each input in one of three tiers.
 3. **Refusal.**
    A file whose windows are not found, such as a guest driver's object, is refused before the first write, and the reason names the missing window.
    When an Ada card is selected the step also stops when the code window of the Ada placement change is not found, or is found more than once.
-   That stop does **not** fall back to fixed slots, and no option skips the check.
+   No option skips the check, and `install` does not build a module without the change.
    It prints `refused: the VMs of an Ada card cannot be placed from free video memory with driver <version>: <reason>. Install NVIDIA's vGPU host driver 580.159.01, the recommended confirmed version, and run this again; nothing was installed` (exit 3).
    The reason is `the code window of the placement change was not found in the driver` or `the code window of the placement change was found more than once in the driver` for an unrecorded driver, and `the placement change did not apply to the driver` for a recorded one.
    The change is made for 580.159.01: the window holds a structure size, a field offset and a jump distance of that version.
-   With only Ampere cards selected the row is not run and the step does not stop.
+   With only Ampere cards selected the change is not made and the step does not stop.
 
 ### What happens to each file
 

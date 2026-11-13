@@ -17,7 +17,7 @@ The full reference follows below.
   `--display` needs the Linux driver package and NVIDIA's public kernel module source ([What to download](installation.md#what-to-download)).
 - Host CUDA on or off: run `sudo ./geforce-sriov install --host-cuda` or `--no-host-cuda` from the source folder.
   `--host-cuda` needs the Linux driver package ([What to download](installation.md#what-to-download)).
-- Applying a change: the switches and the VF count are read once, when the livepatch module loads at boot, so changing them takes a cold power cycle, **not** a reboot.
+- Applying a change: `ari`, `msix` and the VF count are read once, when the `geforce_sriov` kernel module loads at boot, so changing them takes a cold power cycle, **not** a reboot.
   A vGPU type change takes only `activate`. See [Turn features off](recovery.md#turn-features-off) for the switch for each symptom.
 
 ## Configuration file
@@ -58,8 +58,6 @@ NVIDIA's patched driver uses at most 4 VFs per card.
 An unknown key is refused as a whole: `line N: unknown key 'KEY'`.
 A key that contains `vf` adds `; the VF count key is vfs (vfs=1..16, default 4)`.
 
-A leftover `fb_slots=` line is read and ignored.
-`install` prints `note: fb_slots was removed in 0.4.0 and is ignored; delete the line from /etc/geforce-sriov/config.`
 
 `install` and `install --dry-run` refuse a `vfs` above the ceiling and warn about a value above 4.
 
@@ -204,7 +202,7 @@ See [`status` and `install --dry-run`](technical-reference.md#status-and-install
 - `selection:`: a selected address now holds another card than the one `install` recorded.
   `status` exits 1 and ends with `next: run the command above, then power the machine off and on`.
   When no identity is recorded yet, it prints `selection: the card identities are not recorded yet, ...` once, with the command that records them.
-- `VM video memory:` is printed inside the block of each selected Ada card when VFs are enabled: whether a VM takes its video memory from free memory or from a fixed slot, as `placement_id` of the VFs tells ([VM video memory](ada.md#vm-video-memory)).
+- `VM video memory:` is printed inside the block of each selected Ada card when VFs are enabled: whether a VM takes its video memory from free memory or from a fixed slot, as the file `nvidia/placement_id` of each VF shows (NVIDIA's driver writes the VF's fixed range there, or `Not Applicable`) ([VM video memory](ada.md#vm-video-memory)).
 - `host desktop:` lines: the requested and effective state, and whether the driver build accepts the installed libraries ([Host desktop](installation.md#host-desktop)).
   `host CUDA libraries:` reports the same for host CUDA ([Host CUDA](installation.md#host-cuda)).
 - `kernel hook: the automatic build for kernel ... failed (...); run ...`: the build that runs when a kernel is installed failed.
@@ -349,7 +347,7 @@ On Ada, it prints the advisory slot line described there when a VF's slot would 
 #### Driver and selection checks
 
 - It needs the patched plugin copy (SHA-256 `aa4fdeb5…`).
-  On 580.159.01 it refuses the stock copy and an earlier copy with only the plugin placement change.
+  On 580.159.01 it refuses any plugin other than the patched copy: NVIDIA's stock plugin, and a copy that has only the first of the two plugin changes (`install` replaces that copy).
   On another host driver version, which is **not guaranteed to work**, it prints `geforce-sriov: NVIDIA's driver X is not guaranteed to work; confirmed versions: 580.159.01.; continuing` and carries on.
 - It refuses when the record does not name the installed `nvidia.ko` for the running kernel, including a record made on another kernel.
   `install` on the running kernel rewrites the record.
@@ -408,7 +406,7 @@ The default is the running kernel.
 - It builds the livepatch module for that kernel first, then NVIDIA's module and plugin.
 - The kernel hook runs it when a kernel is installed.
   Run it yourself after a failed automatic build, as `status` tells you.
-- It must run as root from the installed copy, and it takes the same lock as `install`.
+- It must run as root from the installed copy, and it takes geforce-sriov's run lock (`/run/geforce-sriov/lock`), as `install` does.
 - It exits 0 on success, 3 when it refuses with nothing changed, and 1 on a failure.
   When it built something new, the next step is to power the machine off and on.
 

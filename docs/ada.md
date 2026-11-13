@@ -46,7 +46,7 @@ See [Ampere](ampere.md#with-the-other-generation) for the Ampere side.
 
 - One module and one plugin serve both generations, alone or together, with the same bring-up procedure.
   Both use the patched plugin copy.
-  On 580.159.01, `activate` refuses any other plugin: the stock one, the earlier Ada-only copy and an earlier copy with only the plugin placement change.
+  On 580.159.01, `activate` refuses any plugin other than the patched copy, NVIDIA's stock plugin included.
   On another host driver version, which is **not guaranteed to work**, it prints that and continues.
 - The module forces four VFs on every card bound to it, so an Ampere card beside an Ada card presents four VFs too.
 - Each generation has its own type: `type_ada` and `type_ampere` in the config, by default 942 on Ada and 525 on Ampere.
@@ -108,7 +108,7 @@ What you see on a module that carries the change:
 
 - `nvidia-smi -q` shows `Homogeneous Placements: Not Supported` for the Ada card.
 - `placement_id` of each Ada VF (`/sys/bus/pci/devices/<vf>/nvidia/placement_id`) reads `Not Applicable`.
-  With fixed slots it read 0, 2, 4 and 6.
+  On a module without the change it reads 0, 2, 4 and 6.
 - The `nvidia-vgpu-mgr` log shows `placement Id: 0xffff`.
 - `status` and `check` read `placement_id` of each Ada VF with VFs enabled and print one line, without running `nvidia-smi`:
   - `VM video memory: taken from free memory when a VM starts (placement_id: Not Applicable)`
@@ -127,7 +127,6 @@ With 2112 MiB free in one piece a 2 GiB VM starts; split into two pieces of 1056
 The VM is refused, not the host program.
 `nvidia-vgpu-mgr` logged the same lines as with a full card: `Failed to alloc guest FB memory`, `NVOS status 0x51` and `vmiope_process_configuration failed with 0x1a`.
 The VM started again once the held memory was released.
-A slot can no longer be chosen by hand.
 
 ```mermaid
 flowchart TD
@@ -152,8 +151,7 @@ The host desktop and host CUDA put video memory on the card they use.
 With `ProbeAllGpus` set to false, which the installed X output-class file does, the X log probes only the boot display GPU, and Xorg and the window manager still hold the Ada device node open (X11 only).
 The desktop and the CUDA library are installed by [Host desktop](installation.md#host-desktop) and [Host CUDA](installation.md#host-cuda).
 
-geforce-sriov has no switch to go back to fixed slots.
-To get them back, uninstall, power the machine off and on, and install the previous release (0.3.0).
+geforce-sriov has no setting that gives each VF a fixed range of video memory.
 With another driver version and an Ada card, `install` stops when it cannot make the VM video memory change.
 See [Ada VM placement](technical-reference.md#ada-vm-placement) for the mechanism, the admission rule and the refusal text.
 
@@ -199,10 +197,10 @@ Each change addresses a different host-side restriction:
 
 ```mermaid
 flowchart LR
-    probe["Probe gate revision"] --> architecture["Bypass architecture rejection"]
-    scheduler["Scheduler revision"] --> runlist["Avoid scheduler shutdown"]
-    count["VF count revision"] --> vfs["Force four VFs"]
-    plugin["Plugin revisions"] --> configuration["Avoid configuration abort"]
+    probe["Probe gate: NVIDIA's module accepts the Ada card"] --> architecture["Ada card accepted"]
+    scheduler["Scheduler: guest GPU work does not stall"] --> runlist["No scheduler shutdown"]
+    count["VF count: NVIDIA's driver accepts 4 VFs"] --> vfs["Four VFs"]
+    plugin["Plugin: an Ada vGPU starts"] --> configuration["No configuration abort"]
 ```
 
 ## Bring-up differences

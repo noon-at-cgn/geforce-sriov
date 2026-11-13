@@ -15,7 +15,7 @@ geforce-sriov automates the steps that make it usable:
 - it makes the card look like its professional counterpart to NVIDIA's vGPU software, and
 - it creates and configures the virtual functions at each boot.
 
-`setup` handles the driver and the VF configuration, and asks you for what it needs, such as where NVIDIA's package is and which GPUs to use.
+The command `geforce-sriov setup` does the driver work and the VF configuration. It asks you for what it needs, such as the path of NVIDIA's vGPU host driver package (a `.run` file) and which GPUs to use.
 Setting up the guests is still your job.
 
 ```mermaid
@@ -116,12 +116,12 @@ that results from using it.
 
 ## What you need
 
-- You provide NVIDIA's software from NVIDIA with your own entitlement: the vGPU host driver always, and for some features NVIDIA's Linux driver package and NVIDIA's public kernel module source (table below).
-  The confirmed version is vGPU Software 19.5 with host driver 580.159.01. geforce-sriov does not
+- You provide NVIDIA's software, from NVIDIA with your own entitlement (the right to download NVIDIA's vGPU software): the vGPU host driver always, and for some features NVIDIA's Linux driver package and NVIDIA's public kernel module source (table below).
+  The confirmed version is vGPU Software 19.5 with host driver 580.159.01: for this version geforce-sriov checks NVIDIA's files, and each file it produces from them, against recorded SHA-256 digests (see [Supported inputs](docs/driver-patch.md#supported-inputs)). geforce-sriov does not
   include, download or provide any NVIDIA software. The Linux driver package has its own
   NVIDIA licence ([NVIDIA's Linux driver package and its licence](docs/installation.md#nvidias-linux-driver-package-and-its-licence)).
 - A card from the [device table](docs/devices.md#generations) and a vGPU licence setup of your own.
-- A Linux host (x86_64, kernel 6.8 or later with livepatch support) with KVM and libvirt or QEMU,
+- A Linux host (x86_64, kernel 6.8 or later built with livepatch support, `CONFIG_LIVEPATCH`: the kernel feature that replaces functions of the running kernel, which the `geforce_sriov` kernel module uses; see the [glossary](docs/glossary.md#livepatch)) with KVM and libvirt or QEMU,
   kernel headers, DKMS, a C compiler, `make` and `pciutils`, with the IOMMU on. Run `install --dry-run` to check
   all of this ([What install --dry-run and status check](docs/installation.md#what-install---dry-run-and-status-check)).
 
@@ -142,14 +142,14 @@ The versions geforce-sriov targets:
 | Host driver | 580.159.01 (vGPU software 19.5) | Same |
 | Linux guest | 580.159.03 | 535.230.02 (vGPU 16.9) |
 | Windows guest | 582.53 | 539.19 (vGPU 16.9) |
-| Guest setting | `RMSetVgpuGspPluginOffloadMode=0` | Same |
+| Guest driver setting (required) | `RMSetVgpuGspPluginOffloadMode=0`, a setting of NVIDIA's guest driver: a modprobe option in a Linux guest, a registry value in a Windows guest. Without it the guest driver fails (`RmInitAdapter failed` on Linux, Code 43 on Windows) | Same |
 | Default vGPU type | 525, RTXA6000-2Q, 2048 MiB | 942, RTX6000-Ada-2Q, 2048 MiB |
 
 Use the host and guest driver versions in this table.
 Host driver 580.159.01 is the confirmed version.
 Another host driver version is **not guaranteed to work**.
-`install` builds it on a best-effort basis when it finds the code it patches, and says so first; `setup` asks you before it continues, and the default answer is no (`--allow-unsupported-driver` answers yes).
-With an Ada card selected, `install` stops when it does not find the code it changes for VM video memory ([VM video memory](docs/ada.md#vm-video-memory)).
+With another host driver version, `install` still builds when it finds each byte sequence it changes exactly once in NVIDIA's files. Such a build is recorded as unconfirmed and is **not guaranteed to work**; `install` says so first, and `setup` asks you before it continues (the default answer is no; `--allow-unsupported-driver` answers yes).
+With an Ada card selected, `install` stops when it cannot make the change that lets an Ada VM take any free video memory when it starts ([VM video memory](docs/ada.md#vm-video-memory)).
 Other guest driver versions are **not guaranteed to work** either.
 See [Supported software stack](docs/installation.md#supported-software-stack) for the full table and [Guests](docs/installation.md#guests) for guest setup.
 
@@ -170,7 +170,7 @@ To remove geforce-sriov without installing a new version, do steps 1 to 3. Detai
 
 ### Install
 
-You need NVIDIA's vGPU host driver `.run` file (`NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`) from your NVIDIA entitlement, and a supported card.
+You need NVIDIA's vGPU host driver `.run` file (`NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`) from your NVIDIA entitlement (the right to download NVIDIA's vGPU software), and a supported card.
 For the boot display GPU or host CUDA, also get the files in the table under [What you need](#what-you-need).
 
 ```sh
@@ -187,7 +187,7 @@ sudo ./geforce-sriov setup    # second run, after it
 - The GPUs to use, when more than one qualifies.
 - The path of the Linux driver package (580.159.03) and of NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03), if you select the boot display GPU.
 - Whether to build NVIDIA's CUDA module for the host too, so CUDA programs can run on the host. If you say yes, it needs the Linux driver package as well ([Host CUDA](docs/installation.md#host-cuda)).
-- Consent to keep a laptop GPU powered when idle (D3cold off), if you select one ([Laptop support](docs/laptops.md#consent)).
+- Consent to keep a laptop GPU powered when it is idle, if you select one. This turns off D3cold, the state in which a laptop cuts power to an idle GPU ([Laptop support](docs/laptops.md#consent)).
 
 If a prerequisite is missing, `setup` stops and names the required action.
 For example, if `nouveau` is loaded, it tells you to blacklist it and power the machine off and on first.
@@ -208,7 +208,7 @@ Selection and recovery:
 - You can pick several GPUs at the prompt, or pass one `--device BDF` per card, up to 32. Ampere and
   Ada cards can share a host ([Combining generations](docs/devices.md#combining-generations)).
 - The boot display GPU can be selected too ([Boot display GPU](docs/installation.md#boot-display-gpu)).
-- If the host stops responding, read [the one rule](docs/recovery.md#the-one-rule) first.
+- If the host stops responding or a card disappears from `lspci`, power the machine fully off and on, and do **not** rescan the PCI bus. See [The one rule](docs/recovery.md#the-one-rule) for the reason.
 
 > [!IMPORTANT]
 > Choose vGPU types (also called profiles) that fit your card's physical VRAM.
@@ -223,7 +223,7 @@ Selection and recovery:
 ```mermaid
 flowchart TD
     GPU["One GeForce card<br/>(physical function, PF)"]
-    MOD["geforce-sriov kernel module<br/>reveals SR-IOV, up to 4 VFs"]
+    MOD["geforce-sriov kernel module<br/>reveals SR-IOV, 4 VFs by default"]
     DRV["patched NVIDIA vGPU host driver"]
     HOOK["Identity hook<br/>inside nvidia-vgpud"]
     TYPES["vGPU type on each VF"]
@@ -237,11 +237,11 @@ flowchart TD
 
 | Part | What it does |
 |---|---|
-| Kernel module `geforce_sriov` (DKMS) | Makes the kernel see the hidden SR-IOV feature of the cards you choose, and limits each card to four virtual functions |
-| Boot units `geforce-sriov-livepatch.service`, `geforce-sriov-activate.service` | The first loads the livepatch and NVIDIA's driver before udev, so nothing else binds your chosen cards first. The second runs `activate`: it creates the VFs and sets the vGPU types before your VMs autostart. Guest autostart starts after activation has finished and does not wait for it to succeed, so a guest that uses a vGPU can fail to start until the VFs are up |
+| Kernel module `geforce_sriov` (DKMS) | Makes the kernel see the hidden SR-IOV feature of the cards you choose, and presents four virtual functions per card by default (`vfs` in the config sets the count; more than 4 per card is not available) |
+| Boot units `geforce-sriov-livepatch.service`, `geforce-sriov-activate.service` | The first loads the `geforce_sriov` kernel module (a livepatch: it replaces three PCI functions of the running kernel) and then NVIDIA's `nvidia` module, before udev (the service that loads drivers for detected hardware) starts, so nothing else binds your chosen cards first. The second runs `activate`: it creates the VFs and sets the vGPU types before your VMs autostart. Guest autostart starts after activation has finished and does not wait for it to succeed, so a guest that uses a vGPU can fail to start until the VFs are up |
 | CLI `geforce-sriov` | Checks the host, installs everything including the driver patch, and brings up the VFs and vGPU types |
-| Identity hook `libgeforce_sriov.so` | Lets `nvidia-vgpud` accept your GeForce card as its professional counterpart so it offers vGPU types |
-| Driver patcher `geforce-sriov-patch` | Used by `install` to patch your own copies of NVIDIA's driver object and plugin ([Revisions](docs/driver-patch.md#revisions)) |
+| Identity hook `libgeforce_sriov.so` | Lets `nvidia-vgpud` (NVIDIA's daemon that registers the vGPU types of each GPU) accept your GeForce card as its professional counterpart so it offers vGPU types |
+| Driver patcher `geforce-sriov-patch` | Used by `install` to patch your own copies of `nv-kernel.o_binary` (the precompiled part of NVIDIA's kernel module) and `libnvidia-vgpu.so` (NVIDIA's vGPU plugin). See [Revisions](docs/driver-patch.md#revisions) for each change |
 
 ## Boot display GPU
 
@@ -257,7 +257,7 @@ Replace `0000:01:00.0` with your GPU's PCI address from `lspci | grep -i nvidia`
 A value of `1` means the GPU is marked as the boot display.
 
 You select it like any other card.
-`activate` hands the console to NVIDIA's display modules, so the console stays on, and `activate` refuses the card unless the installed build has those modules.
+`activate` hands the console to NVIDIA's display modules (`nvidia-modeset` and `nvidia-drm`), so the console stays on. It refuses the card unless the installed build of NVIDIA's kernel module includes them.
 `install` builds them when a selected GPU is the boot display.
 That needs the Linux driver package (580.159.03) and NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03) ([Boot display GPU](docs/installation.md#boot-display-gpu)).
 On a laptop, see [Display](docs/laptops.md#display) for which display setups make the NVIDIA GPU the boot display.
@@ -269,16 +269,16 @@ See [Supported cards](docs/devices.md#generations) for the full list and [Ampere
 
 ## Documentation
 
-| Page | What's in it |
+| Page | What it covers |
 |---|---|
 | [Installation](docs/installation.md) | Everything from before you start to uninstall: the checks before installing, install, the cold boot, creating a VM, and what the checks cover |
 | [Supported cards](docs/devices.md) | The supported device table |
 | [Ampere](docs/ampere.md), [Ada](docs/ada.md) | Generation-specific behaviour, host stacks, guest drivers and limits |
-| [Laptop support](docs/laptops.md) | Laptop GPUs: the listed IDs, display wiring, D3cold power, MSI-X, ARI and VF counts |
+| [Laptop support](docs/laptops.md) | Laptop GPUs: the listed IDs, display wiring, keeping the GPU powered (D3cold), interrupts (MSI-X), PCIe function addressing (ARI) and VF counts |
 | [What install does to NVIDIA's files](docs/driver-patch.md) | The patches `install` makes to your copies of NVIDIA's files, with their digests, the manual path with `--driver=skip`, and what to do after an update |
 | [Configuration and commands](docs/configuration.md) | Config file keys, commands and exit codes, systemd units, module parameters |
 | [Boot display GPU](docs/installation.md#boot-display-gpu) | Sharing the card that shows the boot screen |
-| [Symptoms](docs/recovery.md#symptoms), [Recovery](docs/recovery.md) | Fixes for common problems, the one rule, the activation lock, and what not to do |
+| [Symptoms](docs/recovery.md#symptoms), [Recovery](docs/recovery.md) | Fixes for common problems, when a cold power cycle is needed (the one rule), the file that blocks activation after an unfinished run (the activation lock), and what not to do |
 | [Glossary](docs/glossary.md), [Technical reference](docs/technical-reference.md), [Identity hook](hook/README.md) | Terms, how each part works, how the hook works, and what the CLI does under the hood |
 | [Compatibility reports](docs/compatibility.md), [Community reports](docs/community-reports.md) | How to report whether your hardware works, and the setups people have reported so far |
 | [Changelog](CHANGELOG.md) | The release notes |
