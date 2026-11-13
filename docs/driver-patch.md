@@ -25,7 +25,7 @@ See [Supported inputs](#supported-inputs) for how `install` admits each file.
 
 `install` works on one of these NVIDIA kernel source trees:
 
-- the tree installed with DKMS, for example `/usr/src/nvidia-580.159.01`;
+- the tree installed with DKMS, the framework that rebuilds kernel modules for each new kernel, for example `/usr/src/nvidia-580.159.01`;
 - the `kernel/` directory extracted from the `--driver-file` package;
 - the tree named by `--nvidia-source`.
 

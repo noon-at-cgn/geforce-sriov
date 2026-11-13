@@ -8,7 +8,7 @@
 | Laptop GPUs | Supported through the same path as the desktop cards ([Laptop support](laptops.md)). No laptop GPU has been tested |
 | Presented as | RTX A6000, `10de:2230` |
 | VFs per card | 4 |
-| Host driver | NVIDIA vGPU software 19.5, host driver 580.159.01, proprietary vGPU-KVM build. It runs on the CPU with `NVreg_EnableGpuFirmware=0`, so GSP is not used |
+| Host driver | NVIDIA vGPU software 19.5 with host driver 580.159.01, proprietary vGPU-KVM build. `NVreg_EnableGpuFirmware=0` runs it on the CPU, so GSP is not used |
 | vGPU plugin | The patched plugin copy geforce-sriov makes from the 580.159.01 stock plugin (SHA-256 `aa4fdeb5…`) |
 | Host module | `nvidia.ko` built from the 580.159.01 object with the three revisions |
 | Linux guest | 580.159.03 |

@@ -125,7 +125,7 @@ What to download, and when you need it:
 | Feature | What to download | Exact version | Needed when |
 |---|---|---|---|
 | vGPU host driver | NVIDIA vGPU host driver for Linux KVM: `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run` from the NVIDIA vGPU software 19.5 download on the NVIDIA Licensing Portal | 580.159.01 | Always |
-| Host CUDA | NVIDIA's Linux driver package: the 580.159.03 driver as a `.run` file. Use the vGPU guest driver from the same vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`) or NVIDIA's GeForce Linux driver [`NVIDIA-Linux-x86_64-580.159.03.run`](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/NVIDIA-Linux-x86_64-580.159.03.run) from NVIDIA's public Unix driver archive | 580.159.03 | You turn host CUDA on (`--host-cuda`) |
+| Host CUDA | NVIDIA's Linux driver package: the 580.159.03 driver as a `.run` file. Use one of two files. The first is the vGPU guest driver from the same vGPU software 19.5 download, `NVIDIA-Linux-x86_64-580.159.03-grid.run`. The second is NVIDIA's GeForce Linux driver [`NVIDIA-Linux-x86_64-580.159.03.run`](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/NVIDIA-Linux-x86_64-580.159.03.run) from NVIDIA's public Unix driver archive | 580.159.03 | You turn host CUDA on (`--host-cuda`) |
 | Host display and desktop on the boot display GPU | The Linux driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | A GPU you select is the boot display GPU. The desktop libraries come from the Linux driver package. The public kernel module source is used only for the display modules |
 
 Pass the Linux driver package as a `.run` file (`--companion-file PATH`) or an extracted directory (`--companion-source DIR`). Pass the public kernel module source as a tarball or a directory (`--nvkms-source PATH`).
@@ -267,7 +267,7 @@ See [Supported cards](docs/devices.md#generations) for the full list and [Ampere
 | [What install does to NVIDIA's files](docs/driver-patch.md) | The patches `install` makes to your copies of NVIDIA's files, with their digests, the manual path with `--driver=skip`, and what to do after an update |
 | [Configuration and commands](docs/configuration.md) | Config file keys, commands and exit codes, systemd units, module parameters |
 | [Boot display GPU](docs/installation.md#boot-display-gpu) | Sharing the card that shows the boot screen |
-| [Symptoms](docs/recovery.md#symptoms), [Recovery](docs/recovery.md) | Fixes for common problems, when a cold power cycle is needed (the one rule), the activation lock that blocks activation after an unfinished run, and what not to do |
+| [Symptoms](docs/recovery.md#symptoms), [Recovery](docs/recovery.md) | Fixes for common problems, the one rule for when a cold power cycle is needed, the activation lock that blocks activation after an unfinished run, and what not to do |
 | [Glossary](docs/glossary.md), [Technical reference](docs/technical-reference.md), [Identity hook](hook/README.md) | Terms, how each part works, how the hook works, and what the CLI does under the hood |
 | [Compatibility reports](docs/compatibility.md), [Community reports](docs/community-reports.md) | How to report whether your hardware works, and the setups people have reported so far |
 | [Changelog](CHANGELOG.md) | The release notes |

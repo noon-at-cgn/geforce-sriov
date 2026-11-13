@@ -71,8 +71,8 @@ msix=on
 # target (on|off). The target is the RTX A6000 for Ampere and the RTX 6000 Ada
 # for Ada. Off here; install --device turns it on.
 # The hook ties each reply to one GPU by its PCI address, using read-only driver
-# queries. It is written for host driver 580.159.01. Other host driver versions
-# are not guaranteed to work.
+# queries. Host driver 580.159.01 is the confirmed version. Other host driver
+# versions are not guaranteed to work.
 # If the queries fail, the PCI-info reply falls back to the device ID. This
 # happens only when a fresh scan finds every NVIDIA GPU with that ID selected.
 # Otherwise the reply stays unchanged. `geforce-sriov status` and

@@ -30,7 +30,7 @@ All three reports use NVIDIA's vGPU host driver 580.159.01 with the card attache
 ### #2: RTX 3080 on Proxmox VE
 
 - Setup: one NVIDIA GPU, not the boot display card.
-- First result: `install` stopped at the driver step on both 7.0 kernels the reporter tried, 7.0.14-28-pve and 7.0.2-6-pve. NVIDIA's installer had built the **open** flavour of its kernel module. Reinstalling with the proprietary flavour on top of it still failed the check.
+- First result: `install` stopped at the driver step on both 7.0 kernels the reporter tried, 7.0.14-28-pve and 7.0.2-6-pve. NVIDIA's installer had built the **open** flavour of its kernel module. Reinstalling with the proprietary flavour forced on top of it still failed the check.
 - Fix: the reporter removed everything with `nvidia-uninstall` and `geforce-sriov uninstall`, rebooted, and reinstalled NVIDIA's package with `--kernel-module-type=proprietary`. After a cold power cycle, `setup` completed and 4 VFs came up on 7.0.14-28-pve.
 - Since 0.2.2, `install` runs NVIDIA's installer with `--kernel-module-type=proprietary` itself ([#3](https://github.com/noon-at-cgn/geforce-sriov/pull/3)).
 

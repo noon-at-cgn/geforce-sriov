@@ -88,18 +88,18 @@ flowchart TD
 
 | Files | Where | `uninstall` |
 |---|---|---|
-| `geforce-sriov`, `geforce-sriov-patch`, `geforce-sriov-driver`, the `gs-driver-*.sh` helpers, the `driver-patches/` directory | `<prefix>/bin/` | Removes them |
+| `geforce-sriov`, `geforce-sriov-patch` and `geforce-sriov-driver`. Also the `gs-driver-*.sh` helpers and the `driver-patches/` directory | `<prefix>/bin/` | Removes them |
 | The identity hook `libgeforce_sriov.so` and `config.example` | `<prefix>/lib/geforce-sriov/`, `<prefix>/share/geforce-sriov/` | Removes them |
 | The `geforce_sriov` source and the DKMS registration | `/usr/src/geforce-sriov-<version>/` | Runs `dkms remove` and removes the files |
-| The patched `nvidia.ko`, with the display and `nvidia-uvm` modules when built | Where NVIDIA's own module lives, usually `/lib/modules/<release>/updates/dkms/` | Puts NVIDIA's module back from the backup, and removes added modules, while they still match the build record |
+| The patched `nvidia.ko`, with the display and `nvidia-uvm` modules when built | Where NVIDIA's own module lives, usually `/lib/modules/<release>/updates/dkms/` | While they still match the build record, puts NVIDIA's module back from the backup and removes added modules |
 | The patched plugin copy `libnvidia-vgpu.so.<version>.geforce-sriov` and the `libnvidia-vgpu.so` link | NVIDIA's library directory | Points the link back at NVIDIA's own plugin and removes the copy while it is the one `install` made |
 | The backup of NVIDIA's module, the build records and the kept build inputs | `/var/lib/geforce-sriov/stock/<release>/`, `driver-build`, `driver-builds/<kernel>`, `inputs/` | Removes them after a successful restore |
 | `/etc/geforce-sriov/config` | `/etc/geforce-sriov/` | Removes it while unchanged |
-| `geforce-sriov-nvidia.conf`, `geforce-sriov-autoload.conf`, and with host CUDA `geforce-sriov-uvm.conf` | `/etc/modprobe.d/` | Removes the ones `install` wrote while unchanged |
+| `geforce-sriov-nvidia.conf` and `geforce-sriov-autoload.conf`. With host CUDA, also `geforce-sriov-uvm.conf` | `/etc/modprobe.d/` | Removes the ones `install` wrote while unchanged |
 | The two boot units, the `nvidia-vgpud` drop-in and the guest-autostart drop-ins | `/etc/systemd/system/` | Disables the units and removes the files while unchanged |
-| The kernel hooks and the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`, or the `kernel-install` plugin or the pacman hook with the `geforce-sriov-kernel-hook` script | `/etc/kernel/postinst.d/`, `/etc/kernel/header_postinst.d/`, `/etc/apt/apt.conf.d/`, `/etc/kernel/install.d/`, `/etc/pacman.d/hooks/`, `<prefix>/bin/` | Removes the ones `install` wrote while unchanged |
+| The kernel hooks and the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`. On other hosts, the `kernel-install` plugin or the pacman hook, with the `geforce-sriov-kernel-hook` script | `/etc/kernel/postinst.d/`, `/etc/kernel/header_postinst.d/`, `/etc/apt/apt.conf.d/`, `/etc/kernel/install.d/`, `/etc/pacman.d/hooks/`, `<prefix>/bin/` | Removes the ones `install` wrote while unchanged |
 | NVIDIA's CUDA libraries for host CUDA, their links and `geforce-sriov-cuda.conf` | `<prefix>/lib/geforce-sriov/cuda/`, `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` | Removes each file and link while it is unchanged, then runs `ldconfig` |
-| NVIDIA's graphics libraries and X modules for the host desktop, their loader file, the EGL, Vulkan and X output-class files and the `nvidia-drm_gbm.so` link | `<prefix>/lib/geforce-sriov/gl/`, `<prefix>/lib/geforce-sriov/xorg/`, `/etc/ld.so.conf.d/geforce-sriov-gl.conf` and the paths in [What install adds](installation.md#what-install-adds) | Removes each file and link while it is unchanged, then runs `ldconfig` |
+| NVIDIA's graphics libraries and X modules for the host desktop, and their loader file. Also the EGL, Vulkan and X output-class files and the `nvidia-drm_gbm.so` link | `<prefix>/lib/geforce-sriov/gl/`, `<prefix>/lib/geforce-sriov/xorg/`, `/etc/ld.so.conf.d/geforce-sriov-gl.conf` and the paths in [What install adds](installation.md#what-install-adds) | Removes each file and link while it is unchanged, then runs `ldconfig` |
 | The install manifest and the driver log | `/var/lib/geforce-sriov/` | Removes them, and the directory when nothing else is in it |
 
 `install` records each file it writes with its SHA-256 in `/var/lib/geforce-sriov/installed-files`.
@@ -160,7 +160,7 @@ Phase 4 removes a card only when all of these hold:
 
 - It is function `.0`, an NVIDIA display controller listed in `geforce-sriov devices`.
 - It is bound to `nvidia` or to no driver.
-  Its slot may hold one other bound function: its own HDMI audio on `snd_hda_intel`. Activation unbinds it first.
+  Its slot holds no other bound function, except its own HDMI audio on `snd_hda_intel`. Activation unbinds the audio function first.
 - No VFs exist on its bus and no other device shares the bus.
 - Its parent is a PCI bridge with a `pci_bus/<bus>/rescan` file and a readable `power/control`.
 - BAR0 is assigned.
@@ -373,7 +373,7 @@ With `host_cuda=on`, `install` therefore installs these files from the Linux dri
 | `libnvidia-gpucomp.so.<version>` | Loaded by `libcuda` under exactly this name |
 | `libcudadebugger.so.<version>` | Loaded by `libcuda` when a CUDA debugger attaches |
 
-- They go into `<prefix>/lib/geforce-sriov/cuda/`. Each has the link the loader follows, such as `libcuda.so.1`, and `libcuda.so`, as NVIDIA's installer makes them.
+- They go into `<prefix>/lib/geforce-sriov/cuda/`. As NVIDIA's installer makes them, each has the link the loader follows, such as `libcuda.so.1`. `libcuda` also has the plain `libcuda.so` link.
 - `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` names that directory, and `install` runs `ldconfig`. No environment variable is needed.
 - The directory is the package's own, so a `libcuda` that another package or the user installed is never replaced. The loader searches the directories of `ld.so.conf.d` in file-name order, so this directory comes before the distribution's. `install` and `status` ask `ldconfig -p` which `libcuda.so.1` programs get, and warn when it is another one.
 - `libnvidia-ml`, which `nvidia-smi` uses, is **not** taken from the Linux driver package. The host package has its own, and that library checks the driver's version.

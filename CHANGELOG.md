@@ -16,7 +16,7 @@ To go back, uninstall 0.4.0, power the machine off and on, and install 0.3.0.
 
 - Every upgrade takes the same steps. Run the installed version's `sudo geforce-sriov uninstall`, power the machine off and on, then install the new version.
   `install`, `setup` and `uninstall` stop before they write anything when a geforce-sriov of another version is installed.
-  They look for the installed program, the build record of a module that is still installed, the DKMS registration and an enabled boot unit.
+  They find one by the installed program, the build record of a module that is still installed, the DKMS registration or an enabled boot unit. Any one of these is enough.
   Installing the same version again, `rebuild`, `install --device` from the installed copy and the kernel hook work as before.
   `install` writes the version in `/var/lib/geforce-sriov/format`, and `uninstall` removes it as its last step.
 - The Ada framebuffer slot reservation of 0.3.0 is gone. This removes the config key `fb_slots`, the owner built into `nvidia.ko`, `/proc/driver/nvidia/geforce-sriov-fb`, the `--fb-owner` and `--no-fb-owner` options of the driver step, and the `framebuffer slots` line of `status` and `check`.
@@ -99,7 +99,7 @@ To go back, uninstall 0.4.0, power the machine off and on, and install 0.3.0.
   `nvidia-vgpu-mgr` then logs `Failed to alloc guest FB memory`, `NVOS status 0x51` and `vmiope_process_configuration failed with 0x1a`. The VM starts again once memory is freed.
 - With an Ada card selected, use host driver 580.159.01. On another version `install` stops and installs nothing unless it finds the code it changes for VM video memory.
   To get fixed slots back, uninstall, power the machine off and on, and install 0.3.0. There is no setting for it.
-- With the host desktop on, Xorg and the window manager still open the device node of every NVIDIA GPU, including the Ada card reserved for VMs. The X log still shows that only the display GPU is probed (`ProbeAllGpus` is `false`).
+- With the host desktop on, Xorg and the window manager still open the device node of every NVIDIA GPU, including the Ada card reserved for VMs. However, the X log shows that only the display GPU is probed (`ProbeAllGpus` is `false`).
   The Ada card shows 1 MiB used with the desktop up; with `host_desktop=off` it shows 0 MiB.
 - On the vGPU host driver, `nvidia-smi` on the host lists the vGPU processes of a GPU but not the host CUDA processes. Their memory is still counted in `memory.used`.
 - Host driver versions other than 580.159.01 are not guaranteed to work.

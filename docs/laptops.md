@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Device IDs | Every laptop row in [devices.md](devices.md#rows), listed in the two tables under [Supported laptop GPUs](#supported-laptop-gpus) |
-| Path | The same as the desktop cards of the generation ([Ampere](ampere.md), [Ada](ada.md)) |
+| Path | The same as the desktop cards of the generation. See [Ampere](ampere.md) and [Ada](ada.md) |
 | Presented as | Ampere: RTX A6000, `10de:2230`. Ada: RTX 6000 Ada, `10de:26b1` |
 | VFs per card | 4 |
 | Host and guest drivers | The [supported software stack](installation.md#supported-software-stack) |
@@ -125,7 +125,8 @@ flowchart TD
 
 Laptops can cut power to an idle GPU to save battery.
 This state is called D3cold.
-When power returns, the GPU restarts from scratch: its SR-IOV setup is erased, every running vGPU stops and the GPU firmware resets.
+When power returns, the GPU restarts from scratch.
+Its SR-IOV setup is erased, every running vGPU stops and the GPU firmware resets.
 
 Both a hybrid laptop and NVIDIA's laptop driver can power down an idle NVIDIA GPU.
 The device table flags every row in the tables above for the power guards described below.
@@ -139,10 +140,10 @@ The refusal includes the `install` command needed to record consent.
 - `setup` shows a D3cold notice and asks whether to disable it for the selected laptop GPUs. The default is no.
   On a first install, this is the last question.
   On an installed host whose config lacks consent, `setup` asks before its `install --dry-run` step and ends the run after a yes.
-- `setup` exits 3 without changes if you decline. It also exits 3 without changes if it cannot prompt (`--no-prompt` or no terminal) and `--disable-d3cold` was not given.
+- `setup` exits 3 without changes if you decline, or if `--disable-d3cold` was not given and `setup` cannot prompt. It cannot prompt with `--no-prompt` or without a terminal.
 - `setup --disable-d3cold` and `install --disable-d3cold` record consent without asking the D3cold question.
   On a live run, the option requires at least one selected laptop GPU. Otherwise the command exits 2.
-  A staged install (`--destdir`) skips this check and records consent.
+  A staged install, which uses `--destdir`, skips this check and records consent.
 - On an installed host, accepting or passing `--disable-d3cold` runs `install --driver=skip --disable-d3cold` to record consent without changing NVIDIA's files, then ends the `setup` run.
 - `install --device` without `--disable-d3cold` removes consent from the config and reports the removal. Without `--device`, `install` preserves it.
 - `uninstall` removes consent with the config only if the config is unchanged since install.
@@ -161,9 +162,18 @@ The refusal includes the `install` command needed to record consent.
   Reading a laptop GPU's or VF's config space resumes it if suspended.
 - Before install, `install --dry-run` writes nothing, but its config-space reads resume a suspended GPU.
   A GPU that does not answer fails the check, as does a laptop GPU without D3cold consent.
-  If consent is recorded in the config or planned with `install --dry-run --disable-d3cold`, it reports that consent as information.
-  It also reports, as information, the GPU's `runtime_status`, `power/control` and `d3cold_allowed`, and the bridge's `power/control`.
-  It warns if NVIDIA's runtime power management is not off, system sleep is not blocked, or MSI-X is hidden with the module loaded.
+
+  It reports this information:
+
+  - the GPU's `runtime_status`, `power/control` and `d3cold_allowed`
+  - the bridge's `power/control`
+  - D3cold consent, if it is recorded in the config or planned with `install --dry-run --disable-d3cold`
+
+  It warns in these cases:
+
+  - NVIDIA's runtime power management is not off
+  - system sleep is not blocked
+  - MSI-X is hidden with the module loaded
 - After install, `status` runs the same host checks and also warns if the GPU has lost its SR-IOV state.
 
 These settings last only for the current boot.
@@ -204,7 +214,7 @@ It does not read `/run/modprobe.d/` or `/lib/modprobe.d/`.
 
 ## MSI-X
 
-As on desktop cards, `msix=on` (the default) exposes the GPU's hidden MSI-X capability ([Module parameters](configuration.md#module-parameters)).
+As on desktop cards, `msix=on` exposes the GPU's hidden MSI-X capability. This is the default. See [Module parameters](configuration.md#module-parameters).
 `install --dry-run` and `status` report whether MSI-X is hidden on a laptop GPU, as a warning once the module is loaded. `check` warns if a laptop GPU powered off since its VFs were configured.
 After such a warning, power the machine off and on, then run `setup` again.
 
@@ -233,9 +243,9 @@ See [Capability positions per generation](devices.md#capability-positions-per-ge
 
 ## Guests
 
-Use the desktop guest setup for the card's generation ([Guests](installation.md#guests)).
+Use the desktop guest setup for the card's generation. See [Guests](installation.md#guests).
 On Windows, `RMSetVgpuGspPluginOffloadMode=0` is a per-device setting.
-After changing the GPU identity, set it again (see [Guests](installation.md#guests)).
+After changing the GPU identity, set it again. See [Guests](installation.md#guests).
 
 ## Recovery
 

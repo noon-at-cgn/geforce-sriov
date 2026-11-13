@@ -196,8 +196,9 @@ The table lists their positions and the register bit that hides MSI-X.
 | Generation | SR-IOV | ARI | MSI-X | MSI-X hide bit |
 |---|---|---|---|---|
 | Ampere | hidden at `0xBCC` (TotalVFs 16, first VF offset 4, stride 1) | hidden at `0xC14` | `0xC8` | `0x41C` bit 29 |
-| Ada | hidden at `0xBCC` (TotalVFs 1 on most Ada cards and 16 on the RTX 2000 / 2000E Ada Generation, `28b0`; first VF offset 4, stride 1) | hidden at `0xC14` | `0xC8` | `0x41C` bit 29 |
+| Ada | hidden at `0xBCC` (first VF offset 4, stride 1) | hidden at `0xC14` | `0xC8` | `0x41C` bit 29 |
 
+TotalVFs is 1 on most Ada cards and 16 on the RTX 2000 / 2000E Ada Generation (`28b0`).
 On Ada, the host module's VF-count revision makes NVIDIA's driver report 4.
 
 The VF count is a standard SR-IOV setting.

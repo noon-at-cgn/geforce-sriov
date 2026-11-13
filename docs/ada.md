@@ -8,7 +8,7 @@
 | Laptop GPUs | Supported through the same path as the desktop cards ([Laptop support](laptops.md)). No laptop GPU has been tested |
 | Presented as | RTX 6000 Ada, `10de:26b1` |
 | VFs per card | 4 |
-| Host driver | NVIDIA vGPU software 19.5, host driver 580.159.01, proprietary vGPU-KVM build. It runs on the CPU with `NVreg_EnableGpuFirmware=0`, so GSP is not used |
+| Host driver | NVIDIA vGPU software 19.5 with host driver 580.159.01, proprietary vGPU-KVM build. `NVreg_EnableGpuFirmware=0` runs it on the CPU, so GSP is not used |
 | vGPU plugin | The patched plugin copy geforce-sriov makes from the 580.159.01 stock plugin (SHA-256 `aa4fdeb5…`) |
 | Host module | `nvidia.ko` built from the 580.159.01 object with four revisions: the scheduler, the probe gate, the VF count and the VM video memory change. See [VM video memory](#vm-video-memory) |
 | Linux guest | 535.230.02 (vGPU 16.9) |
