@@ -341,9 +341,10 @@ A display build differs from the plain build in these ways:
 - It makes a fourth object byte patch, `display-idx39`, on the output of the VF-count patch (or of the Ada placement change when an Ada card is selected).
   `geforce-sriov-patch display list|inspect INPUT|apply INPUT NEWOUTPUT|revert PATCHED NEWOUTPUT` runs it; `display list` prints the recorded digests.
 - It stages the source files of the second driver package and of the public source into a copy of the tree, and applies the source patches that ship in `driver-patches/`: `gpu-allow` (a GPU-ID allowlist for the DRM driver, DRM being the Linux graphics subsystem) and `allocation-threshold` (an allocation threshold).
-  With the host desktop, the third patch, `client-accept`, lets the driver accept the programs of exactly the second package's version; `modinfo` shows `gs_client_accept` for a build that has it ([What install adds](installation.md#what-install-adds)).
+  When the second package's version differs from the host driver's, the build also applies the third patch, `client-accept`, which lets the driver accept the programs of exactly the second package's version; `modinfo` shows `gs_client_accept` for a build that has it ([What install adds](installation.md#what-install-adds)).
+  If that patch does not fit the source, the build goes ahead without it and NVIDIA's graphics libraries are not installed.
 - It does **not** use the eight-offset comparison, because the source patches change `.text` on purpose.
-  For 580.159.01 it requires the patched object to have the recorded SHA-256 and the finished `nvidia.ko` to carry the display change.
+  A build of confirmed inputs must end at the recorded object chain digest, and the finished `nvidia.ko` must carry the display change; a display change admitted by its anchors is accepted and recorded as unconfirmed.
 - Its ABI check is the full one, with the sibling modules' own `Module.symvers` as a second symbol provider, and it requires `nvidia-modeset` to carry the NVKMS version of the public source.
 
 `install` records the result in `/var/lib/geforce-sriov/driver-build`, with the versions of the host package, the second driver package and the NVKMS source, and a confirmation value: `confirmed-inputs` when the host package, the second package, the source and every byte patch match the recorded digests and versions, and `unconfirmed` otherwise.

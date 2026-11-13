@@ -2,6 +2,7 @@
 
 This page collects the [compatibility reports](compatibility.md) that people have filed for their own cards and hosts.
 Each row links to the full report, which has the complete output that the reporter attached.
+The reports of 0.2.x contain the output of `doctor`, a command that no longer exists; its checks now run in `status` and `install --dry-run`.
 
 Reports describe the version of geforce-sriov that the reporter ran, so a report against an older version may not match what the current version does.
 For the cards and driver versions that geforce-sriov lists, see [Supported cards](devices.md#status-of-every-row).
@@ -24,7 +25,7 @@ All three reports use NVIDIA's vGPU host driver 580.159.01 with the card attache
 - Guests: Windows 11 with the `RTX6000-Ada-6Q` vGPU type (type ID 945) and guest driver 582.53.
 - Result: everything in the checklist worked, including a CUDA or graphics program in a guest and restarting one VM while the others kept running.
 - Notes: Unraid has no DKMS, compiler or kernel headers on the running host, so the reporter built the kernel module in a container and replaced the boot unit with Unraid's own boot script.
-  The 8 warnings in its check output come from that custom setup, not from a fault in the stack.
+  The 8 warnings in its `doctor` output come from that custom setup, not from a fault in the stack.
 
 ### #2: RTX 3080 on Proxmox VE
 
@@ -37,7 +38,7 @@ All three reports use NVIDIA's vGPU host driver 580.159.01 with the card attache
 
 - Setup: one NVIDIA GPU, not the boot display card; 1 VF (`vfs=1`) with vGPU type 529.
 - Guests: Windows 11 with the `RTXA6000-8Q` vGPU type and guest driver 582.53.
-- Result: the checks reported no failures and no warnings; the VM started and ran a CUDA or graphics program.
+- Result: `doctor` reported no failures and no warnings; the VM started and ran a CUDA or graphics program.
 - Notes: NVIDIA's installer first chose the open flavour, which failed the digest check. Forcing the proprietary flavour fixed it, and the reporter contributed that fix ([#3](https://github.com/noon-at-cgn/geforce-sriov/pull/3)).
 
 ## What the reports show
