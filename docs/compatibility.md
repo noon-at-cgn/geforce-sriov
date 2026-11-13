@@ -19,7 +19,7 @@ In a source checkout without an install, use `./geforce-sriov` instead of `gefor
 
 Two IDs identify your card:
 
-- A PCI ID such as `10de:2684` is `vendor:device`: `10de` is NVIDIA, and the device ID identifies the card model.
+- A PCI ID such as `10de:2684` has the form `vendor:device`. Here `10de` is NVIDIA, and the device ID identifies the card model.
 - The subsystem ID identifies the board maker's variant of that card.
 
 | What | Command | What to copy |
@@ -34,7 +34,7 @@ Two IDs identify your card:
 | `status` output | `sudo geforce-sriov status` | The whole output |
 | Kernel log lines | `journalctl -k -b --no-hostname \| grep -E 'geforce_sriov\|NVRM\|AER'` | Only these lines, not the whole log |
 
-For a problem from the previous boot, use `-b -1` instead of `-b`; this requires a persistent journal.
+For a problem from the previous boot, use `-b -1` instead of `-b`. This requires a persistent journal.
 Without systemd's journal, `sudo dmesg | grep -E 'geforce_sriov|NVRM|AER'` shows the same lines for the current boot.
 See [Logs](recovery.md#logs) for other log sources.
 In those lines:
@@ -45,7 +45,7 @@ In those lines:
 For each guest, note:
 
 - the guest OS
-- its vGPU type, the profile set on its VF (for example `RTXA6000-4Q`)
+- its vGPU type, the profile set on its VF, such as `RTXA6000-4Q`
 - the version of the NVIDIA vGPU guest driver installed in it
 
 ## What to remove before posting
@@ -59,7 +59,7 @@ Issues are public. Before you paste output, remove or replace:
   licence files
 - passwords, keys and any other secrets
 
-PCI addresses such as `0000:01:00.0`, PCI IDs and version numbers are not private; keep them.
+PCI addresses such as `0000:01:00.0`, PCI IDs and version numbers are not private. Keep them.
 
 ## Opening a report
 
@@ -72,7 +72,7 @@ Use a **Bug report** for problems in geforce-sriov's tools or documentation that
 ## What happens to a report
 
 - Reports remain public issues with the `compatibility` label so readers with the same card can find them.
-- `geforce-sriov devices` lists every card in the device table, and every listed card is supported ([Devices](devices.md#generations)).
+- `geforce-sriov devices` lists every card in the device table, and every listed card is supported. See [Devices](devices.md#generations).
   Maintainers decide whether a report warrants changes to the device table or documentation.
 - Reports of failed setups are retained.
   Maintainers decide whether to document them.

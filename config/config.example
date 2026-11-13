@@ -1,18 +1,22 @@
 # geforce-sriov configuration: /etc/geforce-sriov/config ($GEFORCE_SRIOV_CONFIG overrides the path).
 #
-# Format (shared by the CLI and the identity hook): at most 65536 bytes; one
-# key=value per line; a line whose first byte is '#' is a comment; empty lines
-# are ignored; no spaces, tabs or '\r' anywhere in a line; values are never
-# empty; a duplicate key makes the whole file invalid. The CLI also refuses an
-# unknown key; the hook ignores keys it does not use.
+# Format (shared by the CLI and the identity hook):
+# - at most 65536 bytes
+# - one key=value per line
+# - a line whose first byte is '#' is a comment
+# - empty lines are ignored
+# - no spaces, tabs or '\r' anywhere in a line
+# - values are never empty
+# - a duplicate key makes the whole file invalid
+# The CLI also refuses an unknown key. The hook ignores keys it does not use.
 #
 # `geforce-sriov install --device BDF` writes this file with bdfs= set,
-# identity=on and identity_force_host=on. This example lists every key; it
+# identity=on and identity_force_host=on. This example lists every key. It
 # selects no GPU, so nothing would be activated with it as is.
 #
 # d3cold: consent to keep the selected laptop GPUs powered (off). Only
-# `geforce-sriov install --disable-d3cold` writes it, and only for laptop GPUs;
-# without it, activate refuses the run when a laptop GPU is selected. Absent:
+# `geforce-sriov install --disable-d3cold` writes it, and only for laptop GPUs.
+# Without it, activate refuses the run when a laptop GPU is selected. Absent:
 # no consent.
 #d3cold=off
 #
@@ -21,17 +25,17 @@
 # Absent: no GPU is selected and the boot unit does nothing.
 #bdfs=0000:01:00.0
 #
-# ari: enable ARI in software: present the hidden ARI capability and turn on ARI
-# forwarding in the bridge above (on|off). ARI decoding in the GPU hardware does
-# not work, which is why vfs defaults to 4 either way. Set off
-# if VF enable or VM start does not complete; pci=noari on the kernel command
-# line also forces it off.
+# ari: enable ARI in software (on|off). This presents the hidden ARI capability
+# and turns on ARI forwarding in the bridge above. ARI decoding in the GPU
+# hardware does not work, so vfs defaults to 4 either way. Set off if VF enable
+# or VM start does not complete. pci=noari on the kernel command line also
+# forces it off.
 ari=on
 #
 # display: NVIDIA's display modules, which take over the console of the boot
-# display GPU (auto|on|off). They are built only when a selected GPU is the
-# boot display GPU, with auto and with on alike; off never builds them. auto
-# is what an absent key means.
+# display GPU (auto|on|off). With auto and with on, they are built only when a
+# selected GPU is the boot display GPU. off never builds them. auto is what an
+# absent key means.
 display=auto
 #
 # host_cuda: build nvidia-uvm and install NVIDIA's CUDA library, so that CUDA
@@ -40,52 +44,56 @@ display=auto
 host_cuda=off
 #
 # host_desktop: NVIDIA's graphics libraries for the host desktop (auto|on|off).
-# They come from NVIDIA's second driver package and go into geforce-sriov's own
+# They come from NVIDIA's second driver package. They go into geforce-sriov's own
 # folders (<prefix>/lib/geforce-sriov/gl and .../xorg), with a few small files
-# that say where they are; no file of your distribution is replaced. auto, which
-# is what an absent key means, is on when the display build is in effect and
-# the second package is given: the desktop on the boot display GPU is then drawn
-# by that GPU. They are not installed when another NVIDIA graphics driver owns
-# those files. off removes them again. Changing it needs `geforce-sriov install`
-# run from the source folder (`./geforce-sriov install`), no rebuild and no
-# reboot; restart the display server afterwards.
+# that say where they are. No file of your distribution is replaced.
+# auto is what an absent key means. It is on when the display build is in effect
+# and the second package is given. The boot display GPU then draws the desktop.
+# The libraries are not installed when another NVIDIA graphics driver owns
+# those files. off removes them again.
+# To change it, run `geforce-sriov install` from the source folder
+# (`./geforce-sriov install`). It needs no rebuild and no reboot. Restart the
+# display server afterwards.
 host_desktop=auto
 #
 # msix: unhide MSI-X (on|off).
 msix=on
 #
-# vfs: VFs presented per selected GPU, 1 up to the card's hardware default
-# (`geforce-sriov status` shows it), or 4 on an Ada card that reports 1 (set by
-# the VF-count revision of the host module). Default 4: ARI decoding in the GPU
-# does not work, so with more than 4 VFs the module refuses to load if the
-# card's VF layout check fails.
-# `install --vfs N` writes it. Takes effect at the next boot.
+# vfs: VFs presented per selected GPU. The range is 1 up to the card's hardware
+# default (`geforce-sriov status` shows it). On an Ada card that reports 1, the
+# upper limit is 4 (set by the VF-count revision of the host module). Default 4.
+# ARI decoding in the GPU does not work, so with more than 4 VFs the module
+# refuses to load if the card's VF layout check fails.
+# `install --vfs N` writes it. It takes effect at the next boot.
 #vfs=4
 #
 # identity: let the hook in nvidia-vgpud present each selected GPU as its vGPU
-# target, the RTX A6000 for Ampere and the RTX 6000 Ada for Ada (on|off). Off
-# here; install --device turns it on. Each reply is tied to one GPU by its PCI
-# address through read-only driver queries (host driver 580.159.01; other
-# host driver versions are not guaranteed to work). If they fail, the PCI-info
-# reply falls back to the device ID only when a fresh scan finds every NVIDIA
-# GPU with that ID selected; otherwise it stays unchanged. `geforce-sriov
-# status` and `install --dry-run` report such a shared ID.
+# target (on|off). The target is the RTX A6000 for Ampere and the RTX 6000 Ada
+# for Ada. Off here; install --device turns it on.
+# The hook ties each reply to one GPU by its PCI address, using read-only driver
+# queries. It is written for host driver 580.159.01. Other host driver versions
+# are not guaranteed to work.
+# If the queries fail, the PCI-info reply falls back to the device ID. This
+# happens only when a fresh scan finds every NVIDIA GPU with that ID selected.
+# Otherwise the reply stays unchanged. `geforce-sriov status` and
+# `install --dry-run` report such a shared ID.
 identity=off
 #
 # identity_force_host: the hook also answers the virtualization-mode query with
-# HOST (on|off), only for a reply the driver queries tie to a selected GPU; a
-# reply it cannot tie to one is left unchanged (HOST never uses the device-ID
-# fallback). Off unless set; install --device turns it on.
+# HOST (on|off). It does this only for a reply that the driver queries tie to a
+# selected GPU. Any other reply stays unchanged, because HOST never uses the
+# device-ID fallback. Off unless set; install --device turns it on.
 identity_force_host=off
 #
-# sriov_manage: NVIDIA's tool `geforce-sriov activate` uses to enable the VFs
+# sriov_manage: the NVIDIA tool that `geforce-sriov activate` uses to enable the VFs
 # of a selected GPU that has none.
 #sriov_manage=/usr/lib/nvidia/sriov-manage
 #
 # type_ada, type_ampere: the vGPU type ID that `geforce-sriov activate` sets on
-# each VF of an Ada or Ampere card, and that `geforce-sriov check` expects. Absent:
-# 942 on Ada, 525 on Ampere. One size per card. `nvidia-smi vgpu -s` lists the
-# types a card offers before a type is set. `--type N` on activate and check
-# overrides it for one run, on a selection of one generation only.
+# each VF of an Ada or Ampere card. `geforce-sriov check` expects the same ID.
+# Absent: 942 on Ada, 525 on Ampere. One size per card.
+# `nvidia-smi vgpu -s` lists the types a card offers before a type is set.
+# `--type N` on activate and check overrides the key for one run. It works only
+# on a selection of one generation.
 #type_ada=942
 #type_ampere=525

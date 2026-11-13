@@ -8,9 +8,9 @@
 | Laptop GPUs | Supported through the same path as the desktop cards ([Laptop support](laptops.md)). No laptop GPU has been tested |
 | Presented as | RTX 6000 Ada, `10de:26b1` |
 | VFs per card | 4 |
-| Host driver | NVIDIA vGPU software 19.5, host driver 580.159.01, vGPU-KVM proprietary build, CPU-side mode with `NVreg_EnableGpuFirmware=0`, GSP not used |
+| Host driver | NVIDIA vGPU software 19.5, host driver 580.159.01, proprietary vGPU-KVM build. It runs on the CPU with `NVreg_EnableGpuFirmware=0`, so GSP is not used |
 | vGPU plugin | The patched plugin copy geforce-sriov makes from the 580.159.01 stock plugin (SHA-256 `aa4fdeb5…`) |
-| Host module | `nvidia.ko` built from the 580.159.01 object with four revisions: the scheduler, the probe gate, the VF count and the change for VM video memory ([VM video memory](#vm-video-memory)) |
+| Host module | `nvidia.ko` built from the 580.159.01 object with four revisions: the scheduler, the probe gate, the VF count and the VM video memory change. See [VM video memory](#vm-video-memory) |
 | Linux guest | 535.230.02 (vGPU 16.9) |
 | Windows guest | 539.19 (vGPU 16.9) |
 | Guest setting | `RMSetVgpuGspPluginOffloadMode=0` |
@@ -20,11 +20,11 @@
 ## How it works
 
 - NVIDIA's vGPU stack does not list the GeForce and some workstation cards.
-  geforce-sriov reveals the card's hidden SR-IOV virtual functions (VFs) and presents it to that stack as an RTX 6000 Ada, regardless of its model.
-- NVIDIA's stock host module refuses Ada cards on a vGPU host; `install` removes that check. With GSP off, the driver then runs on the CPU.
+  geforce-sriov reveals the card's hidden SR-IOV virtual functions (VFs). It presents the card to that stack as an RTX 6000 Ada, whatever its model.
+- NVIDIA's stock host module refuses Ada cards on a vGPU host. `install` removes that check. With GSP off, the driver then runs on the CPU.
 - Without the scheduler change, guest GPU work stalls. It is the same change Ampere uses.
-- Most Ada cards report 1 VF; `install` makes NVIDIA's driver accept 4.
-- The stock vGPU plugin stops an Ada vGPU from starting; the patched copy does not.
+- Most Ada cards report 1 VF. `install` makes NVIDIA's driver accept 4.
+- The stock vGPU plugin stops an Ada vGPU from starting. The patched copy does not.
 
 See [Revisions](driver-patch.md#revisions) for the symbols, codes and byte details.
 
@@ -41,20 +41,20 @@ flowchart TD
 ### With the other generation
 
 A host can hold Ada and Ampere cards together.
-Select each card with its own `--device`; no other setting is needed.
+Select each card with its own `--device`. No other setting is needed.
 See [Ampere](ampere.md#with-the-other-generation) for the Ampere side.
 
 - One module and one plugin serve both generations, alone or together, with the same bring-up procedure.
   Both use the patched plugin copy.
   On 580.159.01, `activate` refuses any plugin other than the patched copy, NVIDIA's stock plugin included.
-  On another host driver version, which is **not guaranteed to work**, it prints that and continues.
+  On another host driver version, `activate` prints that the version is **not guaranteed to work** and continues.
 - The module forces four VFs on every card bound to it, so an Ampere card beside an Ada card presents four VFs too.
 - Each generation has its own type: `type_ada` and `type_ampere` in the config, by default 942 on Ada and 525 on Ampere.
 - `--type` is refused on a mixed selection ([commands](configuration.md#commands)).
   Set the two config keys instead, or narrow `check` to one generation with `--device`.
 - `status` and `install --dry-run` warn when a selection mixes Ada with another generation.
   Apart from `--type`, nothing refuses a mixed host.
-- The recovery rule is host-wide: if any card disappears from `lspci` or the host cannot be reached, cold power cycle the whole machine ([the one rule](recovery.md#the-one-rule)).
+- The recovery rule is host-wide. If any card disappears from `lspci` or the host cannot be reached, cold power cycle the whole machine. See [the one rule](recovery.md#the-one-rule).
 
 <a id="choosing-a-profile"></a>
 ### Choosing a vGPU type
@@ -78,18 +78,18 @@ Its Q types are:
 
 NVS-class types are offered too.
 The list is not filtered by the card's memory.
-Set the type with `type_ada=` in the config; every VF of the card gets it ([Choosing a vGPU type](configuration.md#choosing-a-vgpu-type)).
+Set the type with `type_ada=` in the config. Every VF of the card gets it. See [Choosing a vGPU type](configuration.md#choosing-a-vgpu-type).
 
 > [!IMPORTANT]
-> Choose vGPU types (also called profiles) that fit your card's physical VRAM.
+> Choose vGPU types that fit your card's physical VRAM.
 > All the vGPUs you run at once must fit in the VRAM together, with some room left over because the host driver uses part of the memory too.
-> For example, four `4Q` vGPUs need 16 GB plus the host driver's share: they fit a 24 GB card and do not fit a 16 GB card.
+> For example, four `4Q` vGPUs need 16 GB plus the host driver's share. They fit a 24 GB card and do not fit a 16 GB card.
 
 Without the VM video memory change, each VF has a fixed framebuffer slot, and a later VF's slot ends higher in the card's memory.
-geforce-sriov builds the VM video memory change into the module whenever a selected card is Ada, so an Ada VM has no fixed slot and takes a free piece of video memory when it starts ([VM video memory](#vm-video-memory)).
-Until you power the machine off and on after `install`, the module that was loaded before stays in use and its slots still apply; `status` and `check` say which is the case.
+geforce-sriov builds the VM video memory change into the module whenever a selected card is Ada. An Ada VM then has no fixed slot and takes a free piece of video memory when it starts. See [VM video memory](#vm-video-memory).
+Until you power the machine off and on after `install`, the module that was loaded before stays in use and its slots still apply. `status` and `check` say which is the case.
 A VM does not start when the card holds no free piece of its size.
-`activate` names the VFs whose slot ends near the top of the card's memory only for a card whose VFs still have fixed slots; with the VM video memory change it prints no such line.
+`activate` names the VFs whose slot ends near the top of the card's memory, but only for a card whose VFs still have fixed slots. With the VM video memory change it prints no such line.
 
 The 1 GiB type (941) works: the guest sees 1024 MiB and runs CUDA.
 
@@ -110,7 +110,7 @@ What you see on a module that carries the change:
 - `placement_id` of each Ada VF (`/sys/bus/pci/devices/<vf>/nvidia/placement_id`) reads `Not Applicable`.
   On a module without the change it reads 0, 2, 4 and 6.
 - The `nvidia-vgpu-mgr` log shows `placement Id: 0xffff`.
-- `status` and `check` read `placement_id` of each Ada VF with VFs enabled and print one line, without running `nvidia-smi`:
+- `status` and `check` print one line, without running `nvidia-smi`. They read `placement_id` of each Ada VF with VFs enabled:
   - `VM video memory: taken from free memory when a VM starts (placement_id: Not Applicable)`
   - `VM video memory: fixed slots (placement_id 0, 2, 4, 6): the loaded nvidia.ko does not carry the Ada placement change. Run sudo geforce-sriov install, then power the machine off and on`
   - `VM video memory: placement_id could not be read`
@@ -123,7 +123,7 @@ Behaviour with the VM video memory change on driver 580.159.01:
 - `Homogeneous Placements: Not Supported`, `placement_id` `Not Applicable` on every Ada VF and `placement Id: 0xffff` in the manager log.
 
 Because a VM needs one contiguous free piece of its size, a full or fragmented card can refuse a VM.
-With 2112 MiB free in one piece a 2 GiB VM starts; split into two pieces of 1056 MiB it does not.
+With 2112 MiB free in one piece, a 2 GiB VM starts. Split into two pieces of 1056 MiB, it does not.
 The VM is refused, not the host program.
 `nvidia-vgpu-mgr` logged the same lines as with a full card: `Failed to alloc guest FB memory`, `NVOS status 0x51` and `vmiope_process_configuration failed with 0x1a`.
 The VM started again once the held memory was released.
@@ -148,11 +148,11 @@ With fixed slots, a host program in the slot of a stopped VM keeps that VM from 
 With the change, the VM starts.
 
 The host desktop and host CUDA put video memory on the card they use.
-With `ProbeAllGpus` set to false, which the installed X output-class file does, the X log probes only the boot display GPU, and Xorg and the window manager still hold the Ada device node open (X11 only).
+The installed X output-class file sets `ProbeAllGpus` to false, so the X log probes only the boot display GPU. Xorg and the window manager still hold the Ada device node open. This applies to X11 only.
 The desktop and the CUDA library are installed by [Host desktop](installation.md#host-desktop) and [Host CUDA](installation.md#host-cuda).
 
 geforce-sriov has no setting that gives each VF a fixed range of video memory.
-To get the fixed slots of 0.3.0 back, uninstall, power the machine off and on, and install the previous release (0.3.0).
+To get the fixed slots of 0.3.0 back, uninstall, power the machine off and on, then install release 0.3.0.
 With another driver version and an Ada card, `install` stops when it cannot make the VM video memory change.
 See [Ada VM placement](technical-reference.md#ada-vm-placement) for the mechanism, the admission rule and the refusal text.
 
@@ -160,13 +160,13 @@ See [Ada VM placement](technical-reference.md#ada-vm-placement) for the mechanis
 
 `install` applies the NVIDIA changes to copies of your own files:
 
-- It applies the three module revisions, and for a selected Ada card the placement revision, in the order below to a copy of your own `nv-kernel.o_binary`, then rebuilds and installs `nvidia.ko`.
+- It applies the three module revisions to a copy of your own `nv-kernel.o_binary`, in the order below. For a selected Ada card it adds the placement revision. It then rebuilds and installs `nvidia.ko`.
 - It applies the two plugin revisions to a copy of your own `libnvidia-vgpu.so` and points the symlink at it.
 - It writes the GSP-off module option.
 
 `install` checks every step. On 580.159.01 each result must match a recorded SHA-256 digest.
-Another version is built best effort and is **not guaranteed to work**; a file `install` cannot patch is refused with the reason ([Supported inputs](driver-patch.md#supported-inputs)).
-The finished module is compared with your stock module, and any other difference is refused ([Compare with a stock build](driver-patch.md#compare-with-a-stock-build)).
+Another version is built best effort and is **not guaranteed to work**. A file `install` cannot patch is refused with the reason. See [Supported inputs](driver-patch.md#supported-inputs).
+The finished module is compared with your stock module, and any other difference is refused. See [Compare with a stock build](driver-patch.md#compare-with-a-stock-build).
 The offsets, bytes and commands are on one page:
 
 1. Scheduler ([revisions](driver-patch.md#revisions))
@@ -176,23 +176,23 @@ The offsets, bytes and commands are on one page:
 5. Plugin placement change ([revisions](driver-patch.md#revisions))
 6. Plugin, framebuffer change ([revisions](driver-patch.md#revisions))
 
-With `install --driver=skip`, you must perform the same steps yourself ([The manual path](driver-patch.md#the-manual-path)).
+With `install --driver=skip`, you must perform the same steps yourself. See [The manual path](driver-patch.md#the-manual-path).
 `activate` checks that the symlink resolves to the patched plugin copy.
 
-- Module option: `options nvidia NVreg_EnableGpuFirmware=0`, which `install` writes to `/etc/modprobe.d/` unless a file there already sets it to 0.
+- Module option: `options nvidia NVreg_EnableGpuFirmware=0`. `install` writes it to `/etc/modprobe.d/` unless a file there already sets it to 0.
   `nvidia-smi -q` then shows `GSP Firmware Version: N/A`.
 - NVIDIA's open flavour always uses GSP and is not supported on Ada.
 - Use the host and guest driver versions in the [supported software stack](installation.md#supported-software-stack).
   Other versions are **not guaranteed to work**.
-  `install` builds another host driver version best effort when it finds the code it patches (`setup` asks first, and `--allow-unsupported-driver` answers yes).
+  `install` builds another host driver version best effort when it finds the code it patches. `setup` asks first, and `--allow-unsupported-driver` answers yes.
   580.159.01 is the only confirmed version, and an Ada build stops unless it finds the code it changes for VM video memory exactly once.
   On the manual path (`--driver=skip`), `status`, `check` and `activate` print that the host driver is not guaranteed to work and continue.
 - To have `install` take NVIDIA's `.run` package as well, see `--driver-file`,
   `--accept-nvidia-license` and `--nvidia-source` in
   [One command from a clean host](installation.md#one-command-from-a-clean-host).
 
-Until both the module and the plugin copy are in place, `activate` refuses on 580.159.01 and the Ada stack cannot be completed.
-On another host driver version, which is **not guaranteed to work**, it prints that and continues.
+Until both the module and the plugin copy are in place, `activate` refuses on 580.159.01, and the Ada stack cannot be completed.
+On another host driver version, `activate` prints that the version is **not guaranteed to work** and continues.
 
 Each change addresses a different host-side restriction:
 
@@ -208,7 +208,7 @@ flowchart LR
 
 Ada follows [Cold boot](installation.md#cold-boot): the activate unit runs `activate --boot` at boot, and `check` gates every VM start.
 Without the unit, run `activate` yourself.
-A boot display GPU is handled inside `activate`: it is refused unless the display modules are installed, and the activation transaction hands off its console ([Boot display GPU](installation.md#boot-display-gpu)).
+A boot display GPU is handled inside `activate`. It is refused unless the display modules are installed, and the activation transaction hands off its console. See [Boot display GPU](installation.md#boot-display-gpu).
 
 ```sh
 sudo geforce-sriov activate --dry-run         # preflight checks only, then prints the steps; changes nothing
@@ -218,19 +218,25 @@ geforce-sriov check                           # before every VM start
 
 See [commands](configuration.md#commands) for exit codes and `--type`.
 
-- `activate` creates the VFs if they are missing, loads `nvidia_vgpu_vfio`, restarts `nvidia-vgpud` and `nvidia-vgpu-mgr` in order, re-probes each selected PF, sets the vGPU type on every VF, powers each VF on and reads the result back.
+- `activate` does the following:
+  - creates the VFs if they are missing
+  - loads `nvidia_vgpu_vfio`
+  - restarts `nvidia-vgpud` and `nvidia-vgpu-mgr` in order
+  - re-probes each selected PF
+  - sets the vGPU type on every VF
+  - powers each VF on and reads the result back
   Restart those daemons through `activate` only.
 - A card takes one vGPU size at a time.
-  Once one VF carries a type, the other VFs of the card list only types of that size in `creatable_vgpu_types`, and writing another size fails with EIO.
+  Once one VF carries a type, the other VFs of the card list only types of that size in `creatable_vgpu_types`. Writing another size fails with EIO.
   `activate` sets the same type on every VF of a card.
 - `nvidia_vgpu_vfio` keeps the vGPU type table of a card's first registration after a boot.
-  After a change of identity, `activate` refuses the new target's types (`type N is not in nvidia/creatable_vgpu_types`) until you power the machine off and on ([Symptoms](recovery.md#symptoms)).
+  After a change of identity, `activate` refuses the new target's types until you power the machine off and on. The message is `type N is not in nvidia/creatable_vgpu_types`. See [Symptoms](recovery.md#symptoms).
 - Both commands act on every selected Ada or Ampere card.
   They refuse without changing anything when a card in scope is not in the device table.
   The daemon restart is host-wide, so `activate` also refuses while a GPU not selected in `bdfs` has VFs enabled.
 - `activate` writes `/run/geforce-sriov/activating` before its first change and removes it once every VF reads back `on` and `active`.
   `check` reports `NOT READY` while the file exists.
-  Exit 5 leaves the activation lock set and requires a cold power cycle first ([the one rule](recovery.md#the-one-rule)).
+  Exit 5 leaves the activation lock set. A cold power cycle is required first. See [the one rule](recovery.md#the-one-rule).
 - Run `activate` only while no VM start is pending, for example before the VMs autostart.
   Restarting `nvidia-vgpu-mgr` ends any vGPU on the host.
 - `activate` stops with exit 1 while a program such as `nvidia-smi`, `nvidia-persistenced` or a CUDA program holds the GPU.
@@ -238,7 +244,7 @@ See [commands](configuration.md#commands) for exit codes and `--type`.
 ### The VF power gate
 
 Every VF needs `power/control=on` and `runtime_status=active` after the last PF re-probe, and `activate` sets and verifies both.
-With `auto`, a VF suspends between attaches and the next guest start fails with `RmInitAdapter failed! (0x11:0x45)` (`NV_ERR_IRQ_NOT_FIRING`).
+With `auto`, a VF suspends between attaches and the next guest start fails with `RmInitAdapter failed! (0x11:0x45)`, which is `NV_ERR_IRQ_NOT_FIRING`.
 With `on`, every re-attach works.
 
 A `nvidia-vgpu-mgr` restart or a PF re-probe on any card can put VFs back to `auto`.
@@ -268,7 +274,13 @@ It prints one line per VF:
 OK <VF> (VF of <PF>): driver=nvidia type=942 expected=942 power/control=on runtime_status=active
 ```
 
-It prints `NOT READY` and exits 1 when `/run/geforce-sriov/activating` exists, when the activation lock `/var/lib/geforce-sriov/prepare-attempt` is set, when it cannot tell whether either file exists, or when a VF or PF is not ready.
+It prints `NOT READY` and exits 1 in any of these cases:
+
+- `/run/geforce-sriov/activating` exists
+- the activation lock `/var/lib/geforce-sriov/prepare-attempt` is set
+- it cannot tell whether either file exists
+- a VF or PF is not ready
+
 Start no VM on a VF marked `NOT READY`.
 
 `check` is a point-in-time read and takes no lock, so run it right before the VM start.
@@ -286,10 +298,10 @@ They are the confirmed guest drivers for Ada. The 16.9 branch is outside NVIDIA'
 | Linux | 535.230.02 (vGPU 16.9) | `options nvidia NVreg_RegistryDwords="RMSetVgpuGspPluginOffloadMode=0"` in `/etc/modprobe.d/`. Without it the guest driver loops `RmInitAdapter failed! (0x22:0x65:897)` |
 | Windows | 539.19 (vGPU 16.9) | DWORD `RMSetVgpuGspPluginOffloadMode` = `0` in the adapter's class key and in `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm`. Without it the device shows Code 43 |
 
-A Windows guest on an Ada card can also use driver 582.53 (vGPU software 19.5), which runs CUDA.
-A Linux guest cannot use the 19.5 driver (580.159.03) for CUDA on an Ada card: it does not run CUDA in an Ada guest, so use 535.230.02.
+A Windows guest on an Ada card can also use driver 582.53 from vGPU software 19.5, which runs CUDA.
+A Linux guest cannot use the 19.5 driver (580.159.03) for CUDA on an Ada card, because it does not run CUDA in an Ada guest. Use 535.230.02.
 
-Each VF is passed to QEMU as a plain VFIO device, with the vGPU type already set on the VF and no mdev ([Create a VM](installation.md#create-a-vm)).
+Each VF is passed to QEMU as a plain VFIO device. The vGPU type is already set on the VF, and there is no mdev. See [Create a VM](installation.md#create-a-vm).
 The argument is the same on every host.
 On Proxmox VE it goes in a raw `args` line rather than `hostpci…,mdev=`:
 
@@ -320,6 +332,6 @@ NVIDIA Control Panel and GPU-Z report guest driver 539.19.
 
 ## Known limits
 
-- `vfs` accepts values from 1 to the card's ceiling (16 on Ampere and `28b0`, 4 on other Ada cards); NVIDIA's patched driver uses at most 4 VFs per card.
+- `vfs` accepts values from 1 to the card's ceiling: 16 on Ampere and `28b0`, 4 on other Ada cards. NVIDIA's patched driver uses at most 4 VFs per card.
   The VFs take functions 4 to 7 of the card's slot, and ARI decoding in the GPU beyond function 7 does not work.
 - The open flavour and the GSP route are not supported.

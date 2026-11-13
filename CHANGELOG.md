@@ -5,70 +5,74 @@
 ### Upgrading from 0.3.0
 
 An upgrade is recommended in two cases.
-An Ada card benefits from the new VM video memory: a VM takes free video memory when it starts, and a host program no longer keeps a stopped VM from starting.
-A host whose boot display GPU is a selected card benefits from the display build: the host desktop is drawn by the GPU (X11).
-To upgrade, run `sudo geforce-sriov uninstall` of 0.3.0, power the machine off and on, then install 0.4.0 ([Upgrading](docs/installation.md#upgrading)).
+An Ada card benefits from the new VM video memory. A VM takes free video memory when it starts. A host program no longer keeps a stopped VM from starting.
+A host whose boot display GPU is a selected card benefits from the display build. The GPU then draws the host desktop on X11.
+To upgrade, run `sudo geforce-sriov uninstall` from 0.3.0, power the machine off and on, then install 0.4.0. See [Upgrading](docs/installation.md#upgrading) for the steps.
 To go back, uninstall 0.4.0, power the machine off and on, and install 0.3.0.
 
 0.4.0 also carries the fixes prepared as 0.3.1, which was not released.
 
 ### Breaking changes
 
-- Every upgrade is: run the installed version's `sudo geforce-sriov uninstall`, power the machine off and on, then install the new version.
+- Every upgrade takes the same steps. Run the installed version's `sudo geforce-sriov uninstall`, power the machine off and on, then install the new version.
   `install`, `setup` and `uninstall` stop before they write anything when a geforce-sriov of another version is installed.
-  They find one by the installed program, the build record of a module that is still installed, the DKMS registration or an enabled boot unit.
+  They look for the installed program, the build record of a module that is still installed, the DKMS registration and an enabled boot unit.
   Installing the same version again, `rebuild`, `install --device` from the installed copy and the kernel hook work as before.
   `install` writes the version in `/var/lib/geforce-sriov/format`, and `uninstall` removes it as its last step.
-- The Ada framebuffer slot reservation of 0.3.0 is gone: the config key `fb_slots`, the owner built into `nvidia.ko`, `/proc/driver/nvidia/geforce-sriov-fb`, the `--fb-owner` and `--no-fb-owner` options of the driver step and the `framebuffer slots` line of `status` and `check`.
+- The Ada framebuffer slot reservation of 0.3.0 is gone. This removes the config key `fb_slots`, the owner built into `nvidia.ko`, `/proc/driver/nvidia/geforce-sriov-fb`, the `--fb-owner` and `--no-fb-owner` options of the driver step, and the `framebuffer slots` line of `status` and `check`.
   A `fb_slots=` line left in a config is ignored, and `install` says so once.
   The Ada VM video memory change (see below) replaces it.
 - `doctor` is no longer a command.
   Its checks run in `status` after install (a FAIL line sets exit status 1) and in `install --dry-run` and `setup` before install.
-- The migrations of 0.2.x names and files are gone, and so are the old option, command and key names of 0.2.x (see Removed).
+- The migrations of 0.2.x names and files are gone, and so are the old option, command and key names of 0.2.x. See Removed.
   DKMS no longer replaces another registered version.
 
 ### Added
 
 - Ada VM video memory: an Ada VM takes its video memory from free memory when it starts.
-  Before this change an Ada card gave each VF a fixed slot at the bottom of the card, and a host program in the slot of a stopped VM kept that VM from starting.
-  When an Ada card is selected, `install` makes one more change to NVIDIA's host module: the card reports `Homogeneous Placements: Not Supported`, the VFs have no `placement_id`, and a VM takes one contiguous free piece of video memory of its size, as on Ampere ([VM video memory](docs/ada.md#vm-video-memory)).
+  Before this change an Ada card gave each VF a fixed slot at the bottom of the card. A host program in the slot of a stopped VM kept that VM from starting.
+  When an Ada card is selected, `install` makes one more change to NVIDIA's host module. The card then reports `Homogeneous Placements: Not Supported`. The VFs have no `placement_id`. A VM takes one contiguous free piece of video memory of its size, as on Ampere. See [VM video memory](docs/ada.md#vm-video-memory).
   There is no setting for it.
-  `status` and `check` print one `VM video memory:` line for each selected Ada card that has VFs enabled; the line tells whether the loaded module carries the change.
-  What can go wrong: a VM needs one contiguous free piece. A full or fragmented card refuses the VM, not the host program; the VM starts again once memory is freed.
+  `status` and `check` print one `VM video memory:` line for each selected Ada card that has VFs enabled. The line tells whether the loaded module carries the change.
+  A VM needs one contiguous free piece of video memory. A full or fragmented card refuses the VM, not the host program. The VM starts again once memory is freed.
 - The 1 GiB vGPU type (941) works on Ada: the guest sees 1024 MiB and runs CUDA.
 - `install --dry-run` checks this host for a selection and for feature and package options, and changes nothing.
   It takes no lock, starts no child process, and exits 3 when a line is a FAIL.
   `setup` runs it as its first step.
 - The host desktop is drawn by the GPU.
-  With the display build and NVIDIA's second driver package, `install` also installs NVIDIA's graphics libraries (X driver, GLX, EGL, GBM, Vulkan) into geforce-sriov's own folders, and the driver build accepts programs that use those libraries.
+  With the display build and NVIDIA's second driver package, `install` also installs NVIDIA's graphics libraries into geforce-sriov's own folders. These are the X driver, GLX, EGL, GBM and Vulkan. The driver build also accepts programs that use those libraries.
   The new key `host_desktop` (`auto`, `on`, `off`) and the options `--host-desktop` and `--no-host-desktop` control it.
-  The X file `geforce-sriov-nvidia-drm-outputclass.conf` sets `ProbeAllGpus` to `false`. The X log then shows that X probes only the GPU it draws on; this covers X11 only.
-  Xorg and the window manager still keep the device node of the other card open, so a VM card is **not** completely free of the desktop ([Host desktop](docs/installation.md#host-desktop)).
+  The X file `geforce-sriov-nvidia-drm-outputclass.conf` sets `ProbeAllGpus` to `false`. The X log then shows that X probes only the GPU it draws on. This covers X11 only.
+  Xorg and the window manager still keep the device node of the other card open. A VM card is therefore **not** completely free of the desktop. See [Host desktop](docs/installation.md#host-desktop).
 - A new kernel is built for automatically.
-  On apt-based hosts `install` adds a hook to `/etc/kernel/postinst.d` and `/etc/kernel/header_postinst.d` that runs `geforce-sriov rebuild --kernel RELEASE` for a new kernel, and an apt snippet, `/etc/apt/apt.conf.d/99geforce-sriov`, that builds after apt for every installed kernel that has headers and no build yet, asking DKMS for NVIDIA's own module first when it is missing (the headers package of Proxmox does not run the headers hook). The first apt run after `install` builds for each such kernel, a few minutes per kernel. Headers and kernel image can be installed in either order.
-  Hosts with systemd `kernel-install` get a plugin, `/etc/kernel/install.d/90-geforce-sriov.install`, which builds when the kernel is added (install the kernel headers package with or before the kernel). Hosts with pacman get a hook, `/etc/pacman.d/hooks/90-geforce-sriov.hook`, that builds for every installed kernel that has headers and no build yet, in either order. On any other system run `sudo geforce-sriov rebuild --kernel RELEASE` after a kernel update.
+  On apt-based hosts `install` adds a hook to `/etc/kernel/postinst.d` and `/etc/kernel/header_postinst.d`. The hook runs `geforce-sriov rebuild --kernel RELEASE` for a new kernel.
+  `install` also adds an apt snippet, `/etc/apt/apt.conf.d/99geforce-sriov`. The snippet builds after apt for every installed kernel that has headers and no build yet. When NVIDIA's own module is missing, it asks DKMS for that module first. The headers package of Proxmox does not run the headers hook, so the snippet covers that case.
+  The first apt run after `install` builds for each such kernel, a few minutes per kernel. Headers and kernel image can be installed in either order.
+  Hosts with systemd `kernel-install` get a plugin, `/etc/kernel/install.d/90-geforce-sriov.install`, which builds when the kernel is added. Install the kernel headers package with or before the kernel.
+  Hosts with pacman get a hook, `/etc/pacman.d/hooks/90-geforce-sriov.hook`. It builds for every installed kernel that has headers and no build yet, in either order.
+  On any other system, run `sudo geforce-sriov rebuild --kernel RELEASE` after a kernel update.
   The hooks never fail the kernel package, apt, `kernel-install` or pacman. When a build fails, `status` shows the kernel and the command that fixes it.
-- Up to 32 cards (was 8) in the config, in `--device`, in the module parameter and in the hook.
+- The limit is now 32 cards, up from 8, in the config, in `--device`, in the module parameter and in the hook.
 - The card at a selected address must be the card that was selected.
-  `install` records the cards in `/var/lib/geforce-sriov/selection`, and `activate`, `check`, `check --daemon-ready` and the early boot unit refuse to run, writing nothing to any GPU, when another card sits at an address.
+  `install` records the cards in `/var/lib/geforce-sriov/selection`. `activate`, `check`, `check --daemon-ready` and the early boot unit refuse to run when another card sits at an address. They write nothing to any GPU.
   The message prints the command that selects the cards that are there now.
   Two identical boards cannot be told apart.
-- `install` run from the installed copy takes a selection change: `--device`, `--disable-d3cold`, `--display` and `--no-display`.
-  It copies no file, except that it builds NVIDIA's modules again when the change needs another build, and it says so.
+- `install` run from the installed copy accepts these selection changes: `--device`, `--disable-d3cold`, `--display` and `--no-display`.
+  It copies no file. It builds NVIDIA's modules again only when the change needs another build, and it says so.
 - `activate` refuses to release the console when the boot display GPU is selected and the installed build has no display modules.
-- `install` can find the code it patches in a host driver version it has no record of, and then builds that version on a best-effort basis. Such a version is **not guaranteed to work**.
+- `install` can find the code it patches in a host driver version it has no record of. It then builds that version on a best-effort basis. Such a version is **not guaranteed to work**.
 
 ### Changed
 
-- The start timeout of `geforce-sriov-activate.service` is written by `install` from the number of selected cards and VFs, at least 900 s, and is an upper bound of activation.
+- `install` writes the start timeout of `geforce-sriov-activate.service` from the number of selected cards and VFs, with a minimum of 900 s. The timeout is an upper bound for activation.
   Activation also extends it with `EXTEND_TIMEOUT_USEC` before each step that can wait.
-  Normal activation takes seconds per card, so the value matters only in a real hang.
+  Normal activation takes seconds per card, so the value matters only when activation hangs.
 - Guest autostart is ordered after activation and never blocked by it.
-  The drop-ins for `pve-guests.service` and `libvirt-guests.service` no longer require the activate unit, and `check` runs first and cannot fail the unit.
-  A guest that uses a VF that is not ready can start and fail inside the guest.
+  The drop-ins for `pve-guests.service` and `libvirt-guests.service` no longer require the activate unit. `check` runs first and cannot fail the unit.
+  A guest can start with a VF that is not ready and then fail inside the guest.
 - With an Ada card selected, `install` stops when it cannot find the code it changes for Ada VM video memory. The change is made for 580.159.01.
   It names the recommended driver version, installs nothing and does not fall back to fixed slots.
-- `uninstall` puts NVIDIA's module back when the backup is current, and fails, keeping every backup, when the installed module is a changed copy of the module `install` built.
+- `uninstall` puts NVIDIA's module back when the backup is current. It fails and keeps every backup when the installed module is a changed copy of the module `install` built.
   After NVIDIA's package replaced `nvidia.ko`, `install` keeps the new stock module as the backup.
 - On a driver version with no recorded digests, `install` applies both Ada plugin rows and records the digest of the full copy.
 
@@ -77,21 +81,29 @@ To go back, uninstall 0.4.0, power the machine off and on, and install 0.3.0.
 - The Ada framebuffer slot reservation and its settings, as above.
 - The 0.2.x and 0.3.0 migration code, as above.
 - `doctor` as a command, as above.
-- The old option, command and key names are plain unknown names now: `prepare`, `--clear-guard`, `--hold-nvidia`, `--hold-note-shown`, `--release-console`, `--boot-display-release` and `boot_display_release`.
-  They print the generic `unknown command`, `unknown option` or `unknown key` message and exit 2.
+- The old option, command and key names are now plain unknown names:
+  - `prepare`
+  - `--clear-guard`
+  - `--hold-nvidia`
+  - `--hold-note-shown`
+  - `--release-console`
+  - `--boot-display-release`
+  - `boot_display_release`
+
+  Each prints the generic `unknown command`, `unknown option` or `unknown key` message and exits 2.
 
 ### Known limitations
 
-- A full or fragmented Ada card refuses the VM, not the host program: a VM needs one contiguous free piece of video memory of its size.
-  With 2112 MiB free in one piece a 2 GiB VM starts; split into two pieces of 1056 MiB it does not.
-  `nvidia-vgpu-mgr` then logs `Failed to alloc guest FB memory`, `NVOS status 0x51` and `vmiope_process_configuration failed with 0x1a`; the VM starts again once memory is freed.
+- A full or fragmented Ada card refuses the VM, not the host program. A VM needs one contiguous free piece of video memory of its size.
+  With 2112 MiB free in one piece, a 2 GiB VM starts. With two pieces of 1056 MiB, it does not.
+  `nvidia-vgpu-mgr` then logs `Failed to alloc guest FB memory`, `NVOS status 0x51` and `vmiope_process_configuration failed with 0x1a`. The VM starts again once memory is freed.
 - With an Ada card selected, use host driver 580.159.01. On another version `install` stops and installs nothing unless it finds the code it changes for VM video memory.
-  To get fixed slots back, uninstall, power the machine off and on, and install 0.3.0; there is no setting for it.
-- With the host desktop on, Xorg and the window manager still open the device node of every NVIDIA GPU, including the Ada card reserved for VMs, although the X log shows that only the display GPU is probed (`ProbeAllGpus` is `false`).
+  To get fixed slots back, uninstall, power the machine off and on, and install 0.3.0. There is no setting for it.
+- With the host desktop on, Xorg and the window manager still open the device node of every NVIDIA GPU, including the Ada card reserved for VMs. The X log still shows that only the display GPU is probed (`ProbeAllGpus` is `false`).
   The Ada card shows 1 MiB used with the desktop up; with `host_desktop=off` it shows 0 MiB.
-- On the vGPU host driver, `nvidia-smi` on the host lists the vGPU processes of a GPU but not the host CUDA processes, although their memory is counted in `memory.used`.
+- On the vGPU host driver, `nvidia-smi` on the host lists the vGPU processes of a GPU but not the host CUDA processes. Their memory is still counted in `memory.used`.
 - Host driver versions other than 580.159.01 are not guaranteed to work.
-- The host desktop feature is for X11; `ProbeAllGpus` is read by the X driver only.
+- The host desktop feature is for X11. Only the X driver reads `ProbeAllGpus`.
 - More than 4 VFs per card is not available.
 
 ## [0.3.0] - 2026-11-12

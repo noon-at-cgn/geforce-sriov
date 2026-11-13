@@ -1,7 +1,7 @@
 # Installation
 
 Use `setup` for the guided path from a clean Linux KVM host to ready virtual functions (VFs).
-Each VF backs one vGPU; you attach it to a VM yourself.
+Each VF backs one vGPU. You attach it to a VM yourself.
 For the short version, see the [README quick start](../README.md#quick-start).
 
 Ampere and Ada are supported.
@@ -25,49 +25,57 @@ To remove geforce-sriov without installing a new version, do steps 1 to 3. Detai
 > [!NOTE]
 > geforce-sriov changes software only.
 > It writes no firmware (vBIOS) and makes no permanent hardware change.
-> Installed files stay on disk until you run `uninstall`; the runtime setup (the loaded module, the VFs and the vGPU types) ends at every power-off, and the boot units make it again at the next boot ([Safety and reversibility](../README.md#safety-and-reversibility)).
+> Installed files stay on disk until you run `uninstall`.
+> The runtime setup, meaning the loaded module, the VFs and the vGPU types, ends at every power-off. The boot units make it again at the next boot ([Safety and reversibility](../README.md#safety-and-reversibility)).
 
 Run `setup` once to install, power the machine off and on, then run it again to check readiness.
 A cold power cycle means switching the machine fully off and on, not rebooting.
-After this one-time setup, the boot units (the two systemd services that `install` enables) recreate the VFs and their types each boot.
+After this one-time setup, the two systemd boot units that `install` enables recreate the VFs and their types at each boot.
 
-Unless you pass `--driver=skip`, installation rebuilds NVIDIA's kernel module `nvidia.ko` with geforce-sriov's changes, installs a patched copy of NVIDIA's vGPU plugin `libnvidia-vgpu.so`, and writes `options nvidia NVreg_EnableGpuFirmware=0` to `/etc/modprobe.d/geforce-sriov-nvidia.conf`.
-It backs up the stock module for `uninstall`.
+Unless you pass `--driver=skip`, installation:
+
+- rebuilds NVIDIA's kernel module `nvidia.ko` with geforce-sriov's changes
+- installs a patched copy of NVIDIA's vGPU plugin `libnvidia-vgpu.so`
+- writes `options nvidia NVreg_EnableGpuFirmware=0` to `/etc/modprobe.d/geforce-sriov-nvidia.conf`
+
+It also backs up the stock module for `uninstall`.
 The individual commands below are for manual operation and troubleshooting.
 
 ## Before you start
 
-- NVIDIA's vGPU host driver for Linux KVM with the proprietary kernel module (NVIDIA's installer offers a proprietary and an open kernel module; geforce-sriov supports only the proprietary one), host driver 580.159.01 (vGPU software 19.5), the confirmed version. Other versions are **not guaranteed to work**.
-  Obtain it from NVIDIA with your own entitlement: the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run` from the vGPU software 19.5 download.
-  Either install it with DKMS, which rebuilds kernel modules for each new kernel, or have its `.run` file ready for `--driver-file` ([One command from a clean host](#one-command-from-a-clean-host)).
-- For host CUDA, NVIDIA's Linux driver package; for the display build on the boot display GPU, the Linux driver package and NVIDIA's public kernel module source ([What to download](#what-to-download)).
-- A card from the [device table](devices.md#generations). A [boot display GPU](#boot-display-gpu) is allowed; it needs the display modules.
+- NVIDIA's vGPU host driver for Linux KVM, version 580.159.01 (vGPU software 19.5). This is the confirmed version. Other versions are **not** guaranteed to work.
+  Install its proprietary kernel module. NVIDIA's installer also offers an open kernel module, which geforce-sriov does not support.
+  Get the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run` from the vGPU software 19.5 download, with your own NVIDIA entitlement.
+  Install it with DKMS, which rebuilds kernel modules for each new kernel. Or have the `.run` file ready for `--driver-file` ([One command from a clean host](#one-command-from-a-clean-host)).
+- For host CUDA: NVIDIA's Linux driver package.
+- For the display build on the boot display GPU: the Linux driver package and NVIDIA's public kernel module source ([What to download](#what-to-download)).
+- A card from the [device table](devices.md#generations). A [boot display GPU](#boot-display-gpu) is allowed and needs the display modules.
 - On a laptop, read [Laptop support](laptops.md) first: system sleep must be blocked and NVIDIA's runtime power management turned off.
 - The IOMMU turned on in firmware (VT-d or AMD-Vi, plus *Above 4G decoding*) and in the kernel.
 - A vGPU licence setup of your own for the guests. Licensing is outside this project.
-- A way to power the machine off and on (IPMI, a smart plug or the power button), and SSH or a console
-  to get back in.
+- A way to power the machine off and on: IPMI, a smart plug or the power button.
+- SSH or a console to get back in.
 
 ### What to download
 
 | Feature | What to download | Exact version | Needed when |
 |---|---|---|---|
-| vGPU host driver | NVIDIA vGPU host driver for Linux KVM, the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`, from the NVIDIA vGPU software 19.5 download (NVIDIA Licensing Portal) | 580.159.01 | Always |
-| Host CUDA | NVIDIA's Linux driver package: NVIDIA's Linux driver 580.159.03 as a `.run` file. Either the vGPU guest driver from the same vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`) or NVIDIA's GeForce Linux driver, [`NVIDIA-Linux-x86_64-580.159.03.run`](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/NVIDIA-Linux-x86_64-580.159.03.run) from NVIDIA's public Unix driver archive | 580.159.03 | You turn host CUDA on (`--host-cuda`) |
-| Host display and desktop on the boot display GPU | The Linux driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | A GPU you select is the boot display GPU. The desktop libraries come from the Linux driver package; the public kernel module source is used only for the display modules |
+| vGPU host driver | NVIDIA vGPU host driver for Linux KVM: the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run` from the NVIDIA vGPU software 19.5 download (NVIDIA Licensing Portal) | 580.159.01 | Always |
+| Host CUDA | NVIDIA's Linux driver package: NVIDIA's Linux driver 580.159.03 as a `.run` file. Either the vGPU guest driver from the same vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`) or NVIDIA's GeForce Linux driver [`NVIDIA-Linux-x86_64-580.159.03.run`](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/NVIDIA-Linux-x86_64-580.159.03.run) from NVIDIA's public Unix driver archive | 580.159.03 | You turn host CUDA on (`--host-cuda`) |
+| Host display and desktop on the boot display GPU | The Linux driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | A GPU you select is the boot display GPU. The desktop libraries come from the Linux driver package. The public kernel module source is used only for the display modules |
 
 What each input is used for:
 
-- The Linux driver package supplies NVIDIA's CUDA libraries (host CUDA), NVIDIA's graphics libraries (host desktop) and the source files that the display build adds to NVIDIA's kernel source.
+- The Linux driver package supplies the CUDA libraries for host CUDA, the graphics libraries for the host desktop, and the source files the display build adds to NVIDIA's kernel source.
   Give it as a `.run` file (`--companion-file PATH`) or as an extracted directory (`--companion-source DIR`).
-  The version is read from the package, not from the file name, and a `.run` file is run to extract it, so use only a package you trust.
+  The version is read from the package, not from the file name. A `.run` file is run to extract it, so use only a package you trust.
   A file whose name states 580.159.03 but whose SHA-256 is not a recorded one is refused.
 - NVIDIA's public kernel module source supplies `nvidia-modeset` and `nvidia-drm` for the display build.
   Give it as a tarball or a directory (`--nvkms-source PATH`).
-- The Linux driver package has its own NVIDIA licence; see [NVIDIA's Linux driver package and its licence](#nvidias-linux-driver-package-and-its-licence).
+- The Linux driver package has its own NVIDIA licence. See [NVIDIA's Linux driver package and its licence](#nvidias-linux-driver-package-and-its-licence).
 
-The host runs Linux (x86_64, kernel 6.8 or later built with livepatch support, `CONFIG_LIVEPATCH`: the kernel feature that replaces functions of the running kernel, which the `geforce_sriov` kernel module uses; see the [glossary](glossary.md#livepatch)) with KVM and libvirt or QEMU. Install these prerequisites with your
-distribution's package manager:
+The host runs Linux on x86_64 with KVM and libvirt or QEMU. The kernel must be 6.8 or later and built with livepatch support (`CONFIG_LIVEPATCH`). The `geforce_sriov` kernel module uses this feature to replace functions of the running kernel. See the [glossary](glossary.md#livepatch).
+Install these prerequisites with your distribution's package manager:
 
 - kernel headers for the running kernel release
 - `dkms`
@@ -77,21 +85,21 @@ distribution's package manager:
 
 Check these on the host before you run `setup`:
 
-- The packages: for example `apt install build-essential dkms pciutils proxmox-headers-$(uname -r)` (`linux-headers-$(uname -r)` on Debian).
+- The packages, for example `apt install build-essential dkms pciutils proxmox-headers-$(uname -r)`. On Debian use `linux-headers-$(uname -r)` instead.
 - The `nouveau` driver is not loaded: `lsmod | grep nouveau` prints nothing. Otherwise put `blacklist nouveau` and `options nouveau modeset=0` in `/etc/modprobe.d/blacklist-nouveau.conf`, run `update-initramfs -u` and power-cycle.
 - The IOMMU is on: `ls /sys/kernel/iommu_groups` lists numbered folders. Otherwise turn on VT-d or AMD-Vi and *Above 4G decoding* in the BIOS/UEFI setup. `setup` only warns about it, and the VM start fails later.
 - Secure Boot is off: `mokutil --sb-state`.
-- If the card is the boot display (it is when it is the host's only GPU): `cat /sys/bus/pci/devices/<address>/boot_vga` prints `1`. Then the Linux driver package (580.159.03) and NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03) are needed ([What to download](#what-to-download)).
+- If the card is the boot display, `cat /sys/bus/pci/devices/<address>/boot_vga` prints `1`. This is the case when it is the host's only GPU. You then need the Linux driver package (580.159.03) and NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03) ([What to download](#what-to-download)).
 
 ### Prepare a way back
 
 Normal recovery needs only a power cycle, never a reinstall of the operating system ([Recovery](recovery.md#the-one-rule)).
 Have these ready before the first `setup`:
 
-- a backup of your VM configs and of any data you cannot recreate;
-- a bootable recovery medium, such as a USB installer for the host;
-- SSH access to the host from another machine, which you have tried once and which keeps the host reachable while the screen is blank;
-- a way to power-cycle the host (the power button, a smart plug or a remote management port).
+- a backup of your VM configs and of any data you cannot recreate
+- a bootable recovery medium, such as a USB installer for the host
+- SSH access to the host from another machine, tried once beforehand, so the host stays reachable while the screen is blank
+- a way to power-cycle the host, such as the power button, a smart plug or a remote management port
 
 See [What install --dry-run and status check](#what-install---dry-run-and-status-check) for everything the tools need.
 
@@ -99,9 +107,9 @@ See [What install --dry-run and status check](#what-install---dry-run-and-status
 
 | Part | Ampere | Ada |
 |---|---|---|
-| Host driver | NVIDIA vGPU software 19.5 for Linux KVM, host driver 580.159.01 (`NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`), with the proprietary kernel module, loaded with `NVreg_EnableGpuFirmware=0` so that the driver runs on the host CPU and not on the GPU's own processor (GSP). See the [glossary](glossary.md#gsp) for GSP | Same |
-| vGPU plugin | A copy of NVIDIA's vGPU plugin `libnvidia-vgpu.so.580.159.01` with two byte changes, which `install` makes and points the `libnvidia-vgpu.so` link at (SHA-256 `aa4fdeb5…`). See [Revisions](driver-patch.md#revisions) for the changes | Same |
-| Host module | `nvidia.ko` rebuilt from NVIDIA's precompiled object `nv-kernel.o_binary` of 580.159.01 with three byte changes (the scheduler, probe gate and VF count revisions). See [Revisions](driver-patch.md#revisions) for each one | The same, plus the VM video memory change when an Ada card is selected ([VM video memory](ada.md#vm-video-memory)) |
+| Host driver | NVIDIA vGPU software 19.5 for Linux KVM, host driver 580.159.01 (`NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`), with the proprietary kernel module. The module is loaded with `NVreg_EnableGpuFirmware=0`, so the driver runs on the host CPU and not on the GPU's own processor (GSP). See the [glossary](glossary.md#gsp) for GSP | Same |
+| vGPU plugin | A copy of NVIDIA's vGPU plugin `libnvidia-vgpu.so.580.159.01` with two byte changes. `install` makes it and points the `libnvidia-vgpu.so` link at it (SHA-256 `aa4fdeb5…`). See [Revisions](driver-patch.md#revisions) for the changes | Same |
+| Host module | `nvidia.ko` rebuilt from NVIDIA's precompiled object `nv-kernel.o_binary` of 580.159.01 with three byte changes: the scheduler, probe gate and VF count revisions. See [Revisions](driver-patch.md#revisions) for each one | The same, plus the VM video memory change when an Ada card is selected ([VM video memory](ada.md#vm-video-memory)) |
 | Linux guest | 580.159.03 | 535.230.02 (vGPU 16.9) |
 | Windows guest | 582.53 | 539.19 (vGPU 16.9) |
 | Guest setting | `RMSetVgpuGspPluginOffloadMode=0` | Same |
@@ -122,8 +130,8 @@ flowchart TD
     P -->|No| R
 ```
 
-- With another host driver version, `install` prints that the version is not guaranteed to work and carries on with a best-effort build: it builds when it finds each byte sequence it changes exactly once in NVIDIA's files, and records the build as unconfirmed. Its input and safety checks still apply ([Supported inputs](driver-patch.md#supported-inputs)).
-  `setup` asks first. The default answer is no, and `--allow-unsupported-driver` answers yes. 580.159.01 is the only confirmed version: for it geforce-sriov checks NVIDIA's files, and each file it produces from them, against recorded SHA-256 digests.
+- With another host driver version, `install` prints that the version is not guaranteed to work and carries on with a best-effort build. It builds when it finds each byte sequence it changes exactly once in NVIDIA's files, and records the build as unconfirmed. Its input and safety checks still apply ([Supported inputs](driver-patch.md#supported-inputs)).
+  `setup` asks first. The default answer is no, and `--allow-unsupported-driver` answers yes. 580.159.01 is the only confirmed version. For it, geforce-sriov checks NVIDIA's files and each file it produces from them against recorded SHA-256 digests.
 - With an Ada card selected, `install` stops on a host driver version in which it cannot make the VM video memory change ([VM video memory](ada.md#vm-video-memory)). It does not stop when only Ampere cards are selected.
 - With another host driver version loaded, `status`, `check` and `activate` print `NVIDIA's driver X is not guaranteed to work; confirmed versions: 580.159.01.` and carry on. In `status` this is an ordinary line and does not change the exit status.
   This holds on the manual path (`--driver=skip`) too.
@@ -147,7 +155,7 @@ tar xzf geforce-sriov-<version>.tar.gz
 cd geforce-sriov-<version>
 ```
 
-The first command prints the file's SHA-256; compare it with the `SHA-256 of geforce-sriov-<version>.tar.gz` line in the release notes.
+The first command prints the file's SHA-256. Compare it with the `SHA-256 of geforce-sriov-<version>.tar.gz` line in the release notes.
 `make` (below) builds the tools in that folder and installs nothing.
 
 With the source of this repository and NVIDIA's `.run` package on the host:
@@ -164,32 +172,32 @@ Otherwise, pass one `--device BDF` per card, at most 32.
 You can select the boot display GPU like any other ([Boot display GPU](#boot-display-gpu)):
 
 - `setup` runs `install --dry-run` first, printed as `== install --dry-run`. A failure stops it with `Stopped: fix what the checks above name, then run setup again. Nothing changed.`
-- When a selected GPU is the boot display, the host console needs NVIDIA's display modules. `setup` asks for the path of the Linux driver package (580.159.03) and of NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03). Without a terminal, or with `--no-prompt`, pass `--companion-file PATH` (or `--companion-source DIR`) and `--nvkms-source PATH`, or pass `--no-display`.
-- If any selected GPU is a laptop GPU, `setup` then shows a notice about D3cold (the state in which a laptop cuts power to an idle GPU) and asks for consent to keep the GPU powered; the default is no ([Consent](laptops.md#consent)).
+- When a selected GPU is the boot display, the host console needs NVIDIA's display modules. `setup` asks for the path of the Linux driver package (580.159.03) and of NVIDIA's public kernel module source (`open-gpu-kernel-modules`, tag 580.159.03). Without a terminal, or with `--no-prompt`, pass `--no-display` or both of these: `--companion-file PATH` (or `--companion-source DIR`) and `--nvkms-source PATH`.
+- If any selected GPU is a laptop GPU, `setup` shows a notice about D3cold, the state in which a laptop cuts power to an idle GPU. It asks for consent to keep the GPU powered. The default is no ([Consent](laptops.md#consent)).
   Answering yes passes `--disable-d3cold` to `install --dry-run` and `install`.
-  `setup` exits 3 before installing anything if you decline, or if it cannot prompt (`--no-prompt` or no terminal) and `--disable-d3cold` was not given.
-- Missing prerequisites cause refusal; install the listed packages and rerun.
+  `setup` exits 3 before installing anything if you decline. It also exits 3 if it cannot prompt (`--no-prompt` or no terminal) and `--disable-d3cold` was not given.
+- Missing prerequisites cause refusal. Install the listed packages and rerun.
 
 If NVIDIA's driver already owns a card, activation waits until the next boot.
 After installation, run `geforce-sriov status`, then power the machine off and on.
 `geforce-sriov-livepatch.service` loads the `geforce_sriov` kernel module and NVIDIA's driver, and `geforce-sriov-activate.service` activates the VFs.
 Run `sudo ./geforce-sriov setup` again after boot to check every VF and see the required guest drivers.
 
-`setup` prints `Setup runs with:`, a summary and one `geforce-sriov setup --no-prompt …` command that repeats the run without questions; copy it, so that a run that stops can be repeated without answering every question.
-Then `== install --dry-run`, `== install` (the NVIDIA module build takes a few minutes), `== activate` and `== check` run in turn.
-If `setup` prints `The install is complete.` and `Next: power the machine off and on.`, switch the machine fully off and on, then run `geforce-sriov setup` again; the installed command works from any folder without `./`.
+`setup` prints `Setup runs with:`, a summary and one `geforce-sriov setup --no-prompt …` command that repeats the run without questions. Copy it to repeat a run that stops without answering every question.
+Then `== install --dry-run`, `== install`, `== activate` and `== check` run in turn. The NVIDIA module build in `== install` takes a few minutes.
+If `setup` prints `The install is complete.` and `Next: power the machine off and on.`, switch the machine fully off and on, then run `geforce-sriov setup` again. The installed command works from any folder without `./`.
 `check` prints one line per VF:
 
 ```text
 OK 0000:01:00.4 (VF of 0000:01:00.0): driver=nvidia type=942 expected=942 power/control=on runtime_status=active
 ```
 
-`OK` means the VF is bound to NVIDIA's driver, powered on and carries its vGPU type (942 on an Ada card, 525 on an Ampere card).
+`OK` means the VF is bound to NVIDIA's driver, powered on and carries its vGPU type: 942 on an Ada card, 525 on an Ampere card.
 A first run prints `activation finished` above these lines.
 The run after a power cycle prints `Every selected VF is ready. Nothing to bring up.` below them, then `Guest drivers:` with the versions for your card.
 A line that begins with `NOT READY` means start no VM yet ([If something goes wrong](recovery.md#if-something-goes-wrong)).
 
-Repeating the first command is safe: once installed, `setup` ignores `--driver-file`, `--vfs`, `--nvidia-source` and `--driver=skip`.
+Repeating the first command is safe. Once installed, `setup` ignores `--driver-file`, `--vfs`, `--nvidia-source` and `--driver=skip`.
 A `--device` selection that differs from the config is refused.
 On an installed host, `setup` asks for D3cold consent before its checks if the config lacks it and a laptop GPU is selected.
 Accepting or passing `--disable-d3cold` runs `install --driver=skip --disable-d3cold` to record consent, then ends the `setup` run.
@@ -201,12 +209,12 @@ The flags below work on `install` directly as well.
 
 | Flag | What it does |
 |---|---|
-| `--driver-file PATH` | Uses NVIDIA's `.run` package and its `kernel/` tree; copies NVIDIA's systemd units `nvidia-vgpud.service` and `nvidia-vgpu-mgr.service`, and NVIDIA's `sriov-manage` script (which enables a card's VFs), from the package when the host lacks them. Reuses the same extraction but refuses a directory containing another package's extraction. Before writing, refuses a non-vGPU driver or distribution-owned driver and names its removal command. Cannot combine with `--nvidia-source` or `--driver=skip`. |
-| `--accept-nvidia-license` | Accepts NVIDIA's licence and runs `sh PATH --silent --dkms --skip-module-load --kernel-module-type=proprietary` when the programs and libraries of NVIDIA's package (everything except the kernel module) are not already installed. The licence is `LICENSE` in the extraction. Without this flag, installation extracts the package, then refuses before other writes if they are missing and gives the manual installer command (`sh PATH --dkms --skip-module-load --kernel-module-type=proprietary`). |
+| `--driver-file PATH` | Uses NVIDIA's `.run` package and its `kernel/` tree. Copies NVIDIA's systemd units `nvidia-vgpud.service` and `nvidia-vgpu-mgr.service`, and its `sriov-manage` script for enabling a card's VFs, from the package when the host lacks them. Reuses the same extraction but refuses a directory containing another package's extraction. Before writing, refuses a non-vGPU driver or distribution-owned driver and names its removal command. Cannot combine with `--nvidia-source` or `--driver=skip`. |
+| `--accept-nvidia-license` | Accepts NVIDIA's licence and runs `sh PATH --silent --dkms --skip-module-load --kernel-module-type=proprietary` when the package's programs and libraries, everything except the kernel module, are not already installed. The licence is `LICENSE` in the extraction. Without this flag, installation extracts the package and refuses before other writes if they are missing. It then gives the manual installer command, `sh PATH --dkms --skip-module-load --kernel-module-type=proprietary`. |
 | `--nvidia-source DIR` | Uses a kernel source tree outside `/usr/src/nvidia-<version>`, such as an extracted `kernel/` directory. Cannot combine with `--driver-file`. |
 | `--driver=skip` | Leaves NVIDIA's `nvidia.ko`, the `libnvidia-vgpu.so` link and the `NVreg_EnableGpuFirmware` modprobe option untouched. Use only after completing [the manual driver path](driver-patch.md#the-manual-path). |
-| `--display`, `--no-display` | Builds NVIDIA's display modules (`nvidia-modeset`, `nvidia-drm`) or leaves them out. By default they are built when a selected GPU is the boot display ([Boot display GPU](#boot-display-gpu)). `--companion-file PATH` or `--companion-source DIR` names the Linux driver package, and `--nvkms-source PATH` NVIDIA's public kernel module source; both are inputs of the display build (the build of `nvidia.ko` that includes the display modules) ([What to download](#what-to-download)). |
-| `--disable-d3cold` | Records D3cold consent as `d3cold=off` in the config so `activate` keeps the selected laptop GPUs powered ([Consent](laptops.md#consent)).<br><br>Requires at least one selected laptop GPU (exit 2 otherwise); an install that only copies files below another directory (`--destdir PATH`, for building a package) records consent without this check. Passing `--device` without this flag removes consent from the config. |
+| `--display`, `--no-display` | Builds NVIDIA's display modules (`nvidia-modeset`, `nvidia-drm`) or leaves them out. By default they are built when a selected GPU is the boot display ([Boot display GPU](#boot-display-gpu)). `--companion-file PATH` or `--companion-source DIR` names the Linux driver package. `--nvkms-source PATH` names NVIDIA's public kernel module source. Both are inputs of the display build, the build of `nvidia.ko` that includes the display modules ([What to download](#what-to-download)). |
+| `--disable-d3cold` | Records D3cold consent as `d3cold=off` in the config so `activate` keeps the selected laptop GPUs powered ([Consent](laptops.md#consent)).<br><br>Requires at least one selected laptop GPU (exit 2 otherwise). An install that only copies files below another directory (`--destdir PATH`, for building a package) records consent without this check. Passing `--device` without this flag removes consent from the config. |
 | `--host-cuda`, `--no-host-cuda` | Builds `nvidia-uvm` and installs NVIDIA's CUDA library, so CUDA programs can run on the host, or leaves them out. Off by default. Needs the Linux driver package (`--companion-file PATH` or `--companion-source DIR`). See [Host CUDA](#host-cuda). |
 | `--host-desktop`, `--no-host-desktop` | Installs NVIDIA's graphics libraries, so the host desktop is drawn by the GPU, or leaves them out. By default (`auto`) they are installed when the display build is in effect and the Linux driver package is given. See [Host desktop](#host-desktop). |
 
@@ -238,7 +246,7 @@ The individual commands below are for manual setup and troubleshooting.
 ## Check before installing
 
 `install --dry-run` checks the host and cards without changing anything.
-It writes nothing and does not take geforce-sriov's run lock (`/run/geforce-sriov/lock`, which keeps two geforce-sriov commands from changing the host at the same time).
+It writes nothing. It does not take the run lock, `/run/geforce-sriov/lock`, which keeps two geforce-sriov commands from changing the host at once.
 Run it first to see what must change before `install`.
 With the source of this repository on the host:
 
@@ -250,11 +258,11 @@ sudo ./geforce-sriov install --dry-run --driver-file PATH   # the same, for the 
 
 It takes the selection, feature and package options of `install`: `--device`, `--display` and `--no-display`, `--host-cuda` and `--no-host-cuda`, `--host-desktop` and `--no-host-desktop`, `--companion-file`, `--companion-source`, `--nvkms-source`, `--driver-file`, `--nvidia-source`, `--driver=skip`, `--disable-d3cold` and `--accept-nvidia-license`.
 With them it accounts for the components that installation will add.
-It refuses the options that only a real install uses (`--prefix`, `--destdir`, `--source`, `--vfs`, `--ari` and `--msix`; exit 2; see [install](configuration.md#install) for what each one does), and `--disable-d3cold` without a laptop GPU (exit 2).
+It refuses the options that only a real install uses: `--prefix`, `--destdir`, `--source`, `--vfs`, `--ari` and `--msix` (exit 2). See [install](configuration.md#install) for what each one does. It also refuses `--disable-d3cold` without a laptop GPU (exit 2).
 
 It reports each check as OK, information, warning or failure and ends with the number of failures and warnings.
 It exits 0, or 3 when a line is a failure.
-Resolve failures before installing; see [Symptoms](recovery.md#symptoms).
+Resolve failures before installing. See [Symptoms](recovery.md#symptoms).
 With no failures, run `install` or let `setup` run it for you: `setup` runs `install --dry-run` as its first step and stops on a failure.
 
 When the host has exactly one eligible card, `install` and `setup` select it automatically.
@@ -264,7 +272,7 @@ The first column, for example `0000:01:00.0`, is the address every command here 
 
 Before installation, warnings about the unbuilt module or a card already owned by NVIDIA are expected.
 An absent config is informational.
-For a laptop GPU, pass `--disable-d3cold` when you plan to record D3cold consent with `install`; the check then treats consent as recorded.
+For a laptop GPU, pass `--disable-d3cold` when you plan to record D3cold consent with `install`. The check then treats consent as recorded.
 `setup` adds this option when you answer yes to its D3cold question.
 
 After installation, `status` shows the checks that still apply, after each card's report.
@@ -286,20 +294,32 @@ sudo ./geforce-sriov install
 # same thing via make: sudo make install DEVICES="0000:01:00.0"
 ```
 
-Loading `nvidia` binds every NVIDIA card on the host; geforce-sriov cannot restrict that.
-A mixed host (Ada and Ampere, see [Combining generations](devices.md#combining-generations)) must therefore list every card it will use, with one `--device` each.
+Loading `nvidia` binds every NVIDIA card on the host, and geforce-sriov cannot restrict that. A mixed host, with Ada and Ampere cards ([Combining generations](devices.md#combining-generations)), must therefore list every card it will use, with one `--device` each.
 A card left out is bound by the driver but not activated, and the rebuilt `nvidia.ko` applies to it as well.
 
 `install` puts these on the host. See [Install details](technical-reference.md#install-details) for the paths. `uninstall` removes what `install` recorded.
 
-- The `geforce-sriov` program, the identity hook, the tools that change NVIDIA's files (`geforce-sriov-driver` and `geforce-sriov-patch`), the source of the kernel module for DKMS, the config and the systemd units, including two drop-ins (small files that add settings to another service) for `nvidia-vgpud` and for VM autostart.
+- The `geforce-sriov` program, the identity hook, the config, the source of the kernel module for DKMS, and the tools that change NVIDIA's files (`geforce-sriov-driver` and `geforce-sriov-patch`).
+- The systemd units, including drop-ins for `nvidia-vgpud` and for VM autostart. A drop-in is a small file that adds settings to another service.
 - Patched copies of NVIDIA's module and plugin, and a backup of the stock module (not with `--driver=skip`).
-- The kernel hook (a script that the package manager runs when a kernel or its headers are installed), `/etc/kernel/postinst.d/geforce-sriov` and `/etc/kernel/header_postinst.d/geforce-sriov`, for each of those directories that exists, and the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`; on a host with `kernel-install` and no `/etc/kernel/postinst.d`, the plugin `/etc/kernel/install.d/90-geforce-sriov.install`; on a host with pacman, `/etc/pacman.d/hooks/90-geforce-sriov.hook`; and, for the last two, the hook script `geforce-sriov-kernel-hook` beside the program ([After a kernel update](#after-a-kernel-update)).
-- State files in `/var/lib/geforce-sriov/`: `installed-files` (every file `install` recorded), `format` (the version stamp), `selection` (the identity of each selected card), `driver-build` (the build record: the kernel, SHA-256 and build-id of the `nvidia.ko` that `install` built), `inputs/` (the packages and source `install` kept for later builds), `kernel-hook-logs/` and `kernel-hook-failed/` (the output and the failures of the kernel hook), and `driver-step.log`.
+- The kernel hook, a script that the package manager runs when a kernel or its headers are installed ([After a kernel update](#after-a-kernel-update)). Its files are:
+  - `/etc/kernel/postinst.d/geforce-sriov` and `/etc/kernel/header_postinst.d/geforce-sriov`, for each of those directories that exists
+  - the apt snippet `/etc/apt/apt.conf.d/99geforce-sriov`
+  - on a host with `kernel-install` and no `/etc/kernel/postinst.d`, the plugin `/etc/kernel/install.d/90-geforce-sriov.install`
+  - on a host with pacman, `/etc/pacman.d/hooks/90-geforce-sriov.hook`
+  - for the last two, the hook script `geforce-sriov-kernel-hook` beside the program
+- State files in `/var/lib/geforce-sriov/`:
+  - `installed-files`: every file `install` recorded
+  - `format`: the version stamp
+  - `selection`: the identity of each selected card
+  - `driver-build`: the build record, meaning the kernel, SHA-256 and build-id of the `nvidia.ko` that `install` built
+  - `inputs/`: the packages and source `install` kept for later builds
+  - `kernel-hook-logs/` and `kernel-hook-failed/`: the output and the failures of the kernel hook
+  - `driver-step.log`
 - The files named in [Modprobe files](#modprobe-files).
 - With host CUDA or the host desktop, NVIDIA's libraries ([Host CUDA](#host-cuda), [Host desktop](#host-desktop)).
 
-The boot units are enabled, not started; the cards wait until the cold power cycle.
+The boot units are enabled, not started. The cards wait until the cold power cycle.
 See [Install details](technical-reference.md#install-details) for paths and [What install does](driver-patch.md#what-install-does) for the driver work.
 
 It refuses a card in any of these cases:
@@ -314,10 +334,10 @@ With a host driver version other than 580.159.01 the build is best effort ([Supp
 
 Rerunning leaves identical files alone and updates older plugin copies.
 It can repair a missing or wrong-kernel build record only when the installed module, plugin, modprobe option and stock backup match the expected build.
-Otherwise it refuses; see [driver build records](driver-patch.md#after-a-kernel-or-nvidia-driver-update).
+Otherwise it refuses. See [driver build records](driver-patch.md#after-a-kernel-or-nvidia-driver-update).
 
-The vGPU drop-in and config are written only after the driver step (the part of `install` that patches NVIDIA's files and rebuilds `nvidia.ko`; the script `geforce-sriov-driver` does it) succeeds.
-Exit 3 means refusal without changes; after any write, a later failure exits 1.
+The vGPU drop-in and config are written only after the driver step succeeds. The driver step is the part of `install` that patches NVIDIA's files and rebuilds `nvidia.ko`, done by the script `geforce-sriov-driver`.
+Exit 3 means refusal without changes. After any write, a later failure exits 1.
 Full driver output goes to `/var/lib/geforce-sriov/driver-step.log` (mode 0600, replaced each run).
 On failure, the command also shows the last 40 lines and the log path.
 
@@ -338,15 +358,15 @@ Then power the machine off and on.
 Power the machine fully off and on, so the card gets a clean start.
 
 > [!TIP]
-> To skip both boot units for one boot, add `geforce_sriov.skip` to the kernel command line (in GRUB,
-> press `e` on the entry and append it to the `linux` line). Neither unit runs, and that boot has no NVIDIA driver at all, because geforce-sriov keeps udev from loading it: run `modprobe nvidia` if you need it.
+> To skip both boot units for one boot, add `geforce_sriov.skip` to the kernel command line. In GRUB, press `e` on the entry and append it to the `linux` line.
+> Neither unit runs. That boot has no NVIDIA driver at all, because geforce-sriov keeps udev from loading it. Run `modprobe nvidia` if you need it.
 
-At boot, `geforce-sriov-livepatch.service` loads the `geforce_sriov` kernel module (a livepatch) and NVIDIA's `nvidia` module before udev starts, so nothing else can bind the cards first.
-The unit runs before udev and needs `/var/lib/geforce-sriov` and the install directory on the root filesystem.
-Then `geforce-sriov-activate.service` runs `activate --boot`, after the livepatch unit and before VM autostart, so the VFs exist and carry their vGPU types before guests start, unless activation fails (below).
+At boot, `geforce-sriov-livepatch.service` loads the `geforce_sriov` kernel module, which is a livepatch, and then NVIDIA's `nvidia` module. It runs before udev starts, so nothing else can bind the cards first.
+The unit needs `/var/lib/geforce-sriov` and the install directory on the root filesystem.
+Then `geforce-sriov-activate.service` runs `activate --boot`. It runs after the livepatch unit and before VM autostart, so the VFs exist and carry their vGPU types before guests start, unless activation fails (below).
 Boot activation never prompts, and it does not stop a running display manager.
-Guest autostart (`pve-guests.service`, `libvirt-guests.service`) starts after the activate unit has finished, whatever its result, and runs `geforce-sriov check` first, which only logs which VFs are not ready. A failed activation never keeps guests from starting; a guest that uses a vGPU can then fail to start, so run `geforce-sriov check` before starting it.
-`install` sets the activate unit's start timeout from the number of selected cards and VFs, at least 900 seconds. Normal activation takes seconds per card, so the timeout matters only in a real hang; activation also extends the timeout before each step that can wait.
+Guest autostart (`pve-guests.service` or `libvirt-guests.service`) starts after the activate unit has finished, whatever its result. It first runs `geforce-sriov check`, which only logs which VFs are not ready. A failed activation never keeps guests from starting. A guest that uses a vGPU can then fail to start, so run `geforce-sriov check` before starting it.
+`install` sets the activate unit's start timeout from the number of selected cards and VFs, at least 900 seconds. Normal activation takes seconds per card, so the timeout matters only in a real hang. Activation also extends the timeout before each step that can wait.
 
 After boot:
 
@@ -356,7 +376,7 @@ systemctl status geforce-sriov-livepatch.service geforce-sriov-activate.service 
 journalctl -b -u geforce-sriov-livepatch.service -u geforce-sriov-activate.service
 ```
 
-`status` shows each selected card's state and exits 0 when every selected VF is ready and no host check fails; otherwise it names the next step.
+`status` shows each selected card's state and exits 0 when every selected VF is ready and no host check fails. Otherwise it names the next step.
 `check` tells whether the VFs are ready for a VM.
 Use the journal and [Symptoms](recovery.md#symptoms) to investigate failures.
 
@@ -378,8 +398,8 @@ flowchart TD
 ```
 
 The PF is the physical card.
-Re-probing a card unbinds it from NVIDIA's driver and binds it again, after NVIDIA's driver has granted `unbindLock`, which it does only while no program holds the GPU; it removes no device and rescans no bus.
-`activate` sets each VF's type from `--type N`, then the generation's config key, then its default (942 on Ada, 525 on Ampere).
+Re-probing a card unbinds it from NVIDIA's driver and binds it again. It waits until NVIDIA's driver grants `unbindLock`, which happens only while no program holds the GPU. It removes no device and rescans no bus.
+`activate` sets each VF's type from `--type N`, else the generation's config key, else its default: 942 on Ada, 525 on Ampere.
 It powers each VF on and reads the type and power state back before running `check`.
 
 ```sh
@@ -389,21 +409,22 @@ sudo geforce-sriov activate               # or: activate --type N, for one run o
 
 Safety conditions:
 
-- Preflight refusal exits 3 and changes nothing; `--dry-run` stops after preflight.
+- Preflight refusal exits 3 and changes nothing. `--dry-run` stops after preflight.
 - The patched plugin is required on 580.159.01.
-  Another host driver version is **not guaranteed to work**; activation prints that and continues.
+  Another host driver version is **not guaranteed to work**. Activation prints that and continues.
 - No vGPU may exist when activation restarts `nvidia-vgpu-mgr` (NVIDIA's daemon that runs the vGPUs).
-  Hold VM starts back; stop existing VMs, then use the printed command to clear their VF types to `0`.
+  Hold VM starts back. Stop existing VMs, then use the printed command to clear their VF types to `0`.
 - `activate` refuses when the installed `nvidia.ko` is not the one recorded in `/var/lib/geforce-sriov/driver-build` for the running kernel.
-  Run `install` for the running kernel to rewrite the record; no record at all causes only a warning.
+  Run `install` for the running kernel to rewrite the record. No record at all causes only a warning.
 - `--type N` on a mixed-generation selection is refused.
   Set `type_ada` and `type_ampere` in the config instead.
-- If a PF fails to return to `nvidia`, or the activation lock is set (the file `/var/lib/geforce-sriov/prepare-attempt`, which an unfinished activation leaves behind; see [The activation lock](recovery.md#the-activation-lock) for how to clear it), exit 5 requires [the one rule](recovery.md#the-one-rule): power the machine off and on, never blindly rescan the bus.
+- If a PF fails to return to `nvidia`, or the activation lock is set, `activate` exits 5. The activation lock is the file `/var/lib/geforce-sriov/prepare-attempt`, which an unfinished activation leaves behind. See [The activation lock](recovery.md#the-activation-lock) for how to clear it.
+  Follow [the one rule](recovery.md#the-one-rule): power the machine off and on, never blindly rescan the bus.
 - Exit 1 means a step failed after preflight.
   Start no VM until a later `activate` and `check` succeed.
 
 Restart NVIDIA's daemons through `activate`, which runs `nvidia-vgpud` before `nvidia-vgpu-mgr`.
-`nvidia-vgpud` normally exits successfully after registering types; the log lines of the identity hook (`geforce-sriov-hook:` in the journal of `nvidia-vgpud`) appear twice, which is normal.
+`nvidia-vgpud` normally exits successfully after registering types. The identity hook's log lines, `geforce-sriov-hook:` in the journal of `nvidia-vgpud`, appear twice. This is normal.
 After any daemon restart or PF re-probe outside `activate`, stop vGPU VMs, clear their VF types to `0` and run `activate` again to restore VF power.
 For harmless NVIDIA messages, see [Expected messages](recovery.md#expected-messages).
 
@@ -419,7 +440,7 @@ cat /sys/bus/pci/devices/0000:01:00.4/nvidia/creatable_vgpu_types   # 0000:01:00
 
 In the type list, the first column is the type ID. Some hypervisors name the type `nvidia-<ID>`.
 
-See [activate and the VF power gate](technical-reference.md#activate-and-the-vf-power-gate) for all stages, preconditions and exit codes, and [Commands](configuration.md#commands). The VF power gate is the requirement that each VF is kept powered on (`power/control=on`) before a VM starts.
+The VF power gate is the requirement that each VF is kept powered on (`power/control=on`) before a VM starts. See [activate and the VF power gate](technical-reference.md#activate-and-the-vf-power-gate) for all stages, preconditions and exit codes, and [Commands](configuration.md#commands).
 
 ### check
 
@@ -483,8 +504,8 @@ Choose the attachment syntax for your hypervisor:
   args: -device vfio-pci,host=0000:01:00.4,enable-migration=off
   ```
 
-Proxmox VE also accepts the `hostpci` form, `qm set <vmid> -hostpci0 0000:01:00.4,mdev=nvidia-<N>`,
-where `<N>` is the type the VF carries, by default 525 on Ampere and 942 on Ada ([Choosing a vGPU type](#choosing-a-vgpu-type)).
+Proxmox VE also accepts the `hostpci` form: `qm set <vmid> -hostpci0 0000:01:00.4,mdev=nvidia-<N>`.
+Here `<N>` is the type the VF carries. By default it is 525 on Ampere and 942 on Ada ([Choosing a vGPU type](#choosing-a-vgpu-type)).
 
 Run `geforce-sriov check` immediately before starting the VM with your hypervisor's usual command (`virsh start <name>`, or `qm start <vmid>` on Proxmox).
 Afterwards, check that the VF carries the type:
@@ -493,7 +514,7 @@ Afterwards, check that the VF carries the type:
 cat /sys/bus/pci/devices/0000:01:00.4/nvidia/current_vgpu_type   # the type ID, e.g. 527; 0 = none
 ```
 
-Some VM-start warnings are harmless; see [Expected messages](recovery.md#expected-messages).
+Some VM-start warnings are harmless. See [Expected messages](recovery.md#expected-messages).
 Then configure the [guest driver and setting](#guests).
 
 ### Choosing a vGPU type
@@ -515,12 +536,13 @@ To choose another:
 
 > [!IMPORTANT]
 > Choose vGPU types that fit your card's physical VRAM.
-> The type list comes from the professional card, so it includes types bigger than your card, and it is not filtered by your card's memory.
+> The type list comes from the professional card. It includes types bigger than your card and is not filtered by your card's memory.
 > All the vGPUs you run at once must fit in the VRAM together, with some room left over because the host driver uses part of the memory too.
-> For example, four `4Q` vGPUs need 16 GB plus the host driver's share: they fit a 24 GB card and do not fit a 16 GB card ([memory limit](devices.md#status-of-every-row)).
+> For example, four `4Q` vGPUs need 16 GB plus the host driver's share. They fit a 24 GB card and do not fit a 16 GB card ([memory limit](devices.md#status-of-every-row)).
 
-On an Ada card whose loaded module does not carry the VM video memory change, each VF has a fixed slot in the card's memory, and the last VFs cannot start a VM of a large type.
-`activate` names those VFs; the line is advice and does not stop activation. With the VM video memory change a VM takes free video memory when it starts and there are no slots, so `activate` prints no hint ([VM video memory](ada.md#vm-video-memory)).
+On an Ada card whose loaded module lacks the VM video memory change, each VF has a fixed slot in the card's memory. The last VFs cannot start a VM of a large type.
+`activate` names those VFs. The line is advice and does not stop activation.
+With the VM video memory change there are no slots. A VM takes free video memory when it starts, so `activate` prints no hint ([VM video memory](ada.md#vm-video-memory)).
 See [Choosing a vGPU type](configuration.md#choosing-a-vgpu-type).
 
 ## Guests
@@ -537,7 +559,7 @@ flowchart TD
 geforce-sriov does not install anything in a guest.
 Install NVIDIA's vGPU guest driver in each guest yourself. A regular GeForce or Data Center driver does not work. The versions listed in the [supported stack](#supported-software-stack) are confirmed to work.
 
-For an Ada card, use Windows guest driver 582.53 or 539.19. For a Linux guest on an Ada card use 535.230.02 (vGPU 16.9): the 580.159.03 Linux driver does not run CUDA in an Ada guest.
+For an Ada card, use Windows guest driver 582.53 or 539.19. For a Linux guest on an Ada card use 535.230.02 (vGPU 16.9). The 580.159.03 Linux driver does not run CUDA in an Ada guest.
 
 In a Linux guest (for example Debian 12):
 
@@ -549,7 +571,7 @@ sudo update-initramfs -u
 sudo reboot
 ```
 
-If the installer says the `nouveau` driver (the open-source NVIDIA driver Linux loads by default) is in use, let it disable `nouveau`, reboot the VM and run the installer again.
+If the installer says the `nouveau` driver is in use, let it disable `nouveau`, reboot the VM and run the installer again. `nouveau` is the open-source NVIDIA driver that Linux loads by default.
 After the reboot, `nvidia-smi` lists the vGPU, for example `NVIDIA RTX6000-Ada-2Q` on an Ada card and `NVIDIA RTXA6000-2Q` on an Ampere card.
 
 In a Windows guest, run NVIDIA's installer, then open PowerShell as Administrator and run:
@@ -584,13 +606,14 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08
 pnputil /restart-device "<instance id>"
 ```
 
-To check the vGPU in a Windows guest, read the device status in Device Manager or with `Get-PnpDevice`: a working vGPU reads OK. Code 43 means the guest driver or its setting is wrong ([Symptoms](recovery.md#symptoms)).
+To check the vGPU in a Windows guest, read the device status in Device Manager or with `Get-PnpDevice`. A working vGPU reads OK. Code 43 means the guest driver or its setting is wrong ([Symptoms](recovery.md#symptoms)).
 A D3D11 test that does not name the NVIDIA adapter can pass on the Microsoft Basic Render Driver and does not verify the vGPU.
 
 ## After a kernel update
 
-`install` puts a kernel hook in `/etc/kernel/postinst.d` and in `/etc/kernel/header_postinst.d` (Debian runs the first when a kernel image is installed and the second when its headers are; Proxmox runs only the first, from the image package's postinst), and an apt snippet when `/etc/apt/apt.conf.d` exists.
-It runs `geforce-sriov rebuild --kernel RELEASE` for the new kernel, which builds the patched `nvidia.ko` and records it for that kernel, so you run nothing by hand.
+`install` puts a kernel hook in `/etc/kernel/postinst.d` and in `/etc/kernel/header_postinst.d`. It also adds an apt snippet when `/etc/apt/apt.conf.d` exists.
+Debian runs the first hook when a kernel image is installed and the second when its headers are. Proxmox runs only the first, from the image package's postinst.
+The hook runs `geforce-sriov rebuild --kernel RELEASE` for the new kernel. That builds the patched `nvidia.ko` and records it for that kernel, so you run nothing by hand.
 Its output goes to the journal (`journalctl -t geforce-sriov-kernel-hook`) and to `/var/lib/geforce-sriov/kernel-hook-logs/RELEASE.log`.
 
 ```mermaid
@@ -606,15 +629,20 @@ flowchart TD
 ```
 
 1. Install the new kernel and its headers with `apt`, in one transaction or in two, in either order. When the headers come after the image, the snippet below builds for the kernel after apt has finished. Until the build exists, `status` keeps the `kernel hook:` line.
-2. Power the machine off and on, so that the boot units start from a clean state; boot the new kernel.
+2. Power the machine off and on, so that the boot units start from a clean state. Boot the new kernel.
 
-The apt snippet, `/etc/apt/apt.conf.d/99geforce-sriov`, runs `geforce-sriov-kernel-hook --retry` after every apt run that ran dpkg, because the headers package can come after the image and Proxmox's headers package does not run `/etc/kernel/header_postinst.d`.
-It builds for each installed kernel (one with an image in `/boot`) that has its headers and no build yet, and returns at once when there is none. The first apt run after `install` therefore builds for every installed kernel that has headers, a few minutes per kernel, so any kernel you pick in the boot menu has its build. When NVIDIA's own module for that kernel is missing, it first asks DKMS to build it (`dkms autoinstall -k RELEASE`).
-It never fails apt, and it does not wait for another geforce-sriov process: a build that finds the lock held prints `another geforce-sriov process is running; the next apt run tries again` and is tried at the next apt run.
-Without the headers of the new kernel the hook builds nothing and records that (`status` says "the headers of kernel RELEASE are not installed; install them, then run the command below"); the same holds when NVIDIA's own module for the kernel cannot be built (`status` says "NVIDIA's own module for kernel RELEASE is not built yet"). The snippet tries the first again at every apt run, and the second again when NVIDIA's own module exists or the headers changed since, so that no apt run repeats a DKMS build that fails every time. An activation just after boot holding the lock is waited for, six tries ten seconds apart. `status` stops naming a kernel once its module is the recorded build.
+The apt snippet `/etc/apt/apt.conf.d/99geforce-sriov` runs `geforce-sriov-kernel-hook --retry` after every apt run that ran dpkg. It is needed because the headers package can come after the image, and Proxmox's headers package does not run `/etc/kernel/header_postinst.d`.
+It builds for each installed kernel that has its headers and no build yet, and returns at once when there is none. An installed kernel is one with an image in `/boot`. The first apt run after `install` therefore builds for every installed kernel that has headers, a few minutes per kernel. Any kernel you pick in the boot menu then has its build. When NVIDIA's own module for that kernel is missing, the snippet first asks DKMS to build it with `dkms autoinstall -k RELEASE`.
+It never fails apt and does not wait for another geforce-sriov process. A build that finds the lock held prints `another geforce-sriov process is running; the next apt run tries again` and is tried at the next apt run.
+Two cases build nothing, and the hook records them:
+
+- The headers of the new kernel are missing. `status` says "the headers of kernel RELEASE are not installed; install them, then run the command below".
+- NVIDIA's own module for the kernel cannot be built. `status` says "NVIDIA's own module for kernel RELEASE is not built yet".
+
+The snippet tries the first case again at every apt run. It tries the second again only when NVIDIA's own module exists or the headers changed since, so no apt run repeats a DKMS build that fails every time. If an activation just after boot holds the lock, the snippet waits for it, six tries ten seconds apart. `status` stops naming a kernel once its module is the recorded build.
 A failed build never fails the kernel package or apt. `geforce-sriov status` then names the kernel (`kernel hook: the automatic build for kernel RELEASE failed ...`), and `activate` on that kernel refuses with the build it lacks. The snippet does not try that failed build again, so a failure for another reason stays reported until you fix it.
-To fix it, read `/var/lib/geforce-sriov/kernel-hook-logs/RELEASE.log`, then run `sudo geforce-sriov rebuild --kernel RELEASE`, the one command that does what the hook does.
-These systems build for a new kernel by themselves; `install` writes the file for each one whose directory exists:
+To fix it, read `/var/lib/geforce-sriov/kernel-hook-logs/RELEASE.log`, then run `sudo geforce-sriov rebuild --kernel RELEASE`. This is the one command that does what the hook does.
+These systems build for a new kernel by themselves. `install` writes the file for each one whose directory exists:
 
 | System | What runs the build | File |
 |---|---|---|
@@ -623,20 +651,20 @@ These systems build for a new kernel by themselves; `install` writes the file fo
 | hosts with pacman | a hook after a transaction that installs or upgrades kernel modules or headers | `/etc/pacman.d/hooks/90-geforce-sriov.hook` |
 
 The `kernel-install` plugin and the pacman hook call the hook script `geforce-sriov-kernel-hook`, which `install` puts beside the program. The plugin is written only on a host without `/etc/kernel/postinst.d`.
-On an apt-based host and on a pacman host the build is made whichever of the kernel and its headers is installed first. On a `kernel-install` host the build runs when the kernel is added, so install the kernel headers package with or before the kernel; otherwise run `sudo geforce-sriov rebuild --kernel RELEASE` after it.
+On an apt-based host and on a pacman host the build is made whichever of the kernel and its headers is installed first. On a `kernel-install` host the build runs when the kernel is added, so install the kernel headers package with or before the kernel. Otherwise run `sudo geforce-sriov rebuild --kernel RELEASE` after it.
 On any other system, and on a host without these directories, run `sudo geforce-sriov rebuild --kernel RELEASE` after each kernel update. `uninstall` removes the hook files and the snippet.
 
-A new NVIDIA driver version is built best effort when `install` finds the code it patches; 580.159.01 is the only confirmed version.
+A new NVIDIA driver version is built best effort when `install` finds the code it patches. 580.159.01 is the only confirmed version.
 With an Ada card selected, `install` stops on a host driver version in which it cannot make the VM video memory change.
-Run `geforce-sriov status` to see whether the identity hook acts on the loaded build; on any other build it passes calls through unchanged.
+Run `geforce-sriov status` to see whether the identity hook acts on the loaded build. On any other build it passes calls through unchanged.
 See [After a kernel or NVIDIA driver update](driver-patch.md#after-a-kernel-or-nvidia-driver-update).
 
 <a id="boot-display-card"></a>
 ## Boot display GPU
 
 The boot display shows the firmware startup screen and Linux text console.
-It is often the only NVIDIA card; a server with BMC graphics usually uses that instead.
-Check the card with `cat /sys/bus/pci/devices/0000:01:00.0/boot_vga` (`lspci | grep -i nvidia` lists addresses).
+It is often the only NVIDIA card. A server with BMC graphics usually uses that instead.
+Check the card with `cat /sys/bus/pci/devices/0000:01:00.0/boot_vga`. `lspci | grep -i nvidia` lists addresses.
 A value of `1` means boot display.
 
 You select a boot display GPU like any other card.
@@ -645,23 +673,23 @@ All other VM and guest steps stay the same.
 
 What to expect while `activate` runs on the boot display GPU:
 
-- The monitor can go blank briefly, and can stay blank until the next boot after a failure; SSH and the journal keep working. Run `setup` over SSH.
+- The monitor can go blank briefly. After a failure it can stay blank until the next boot. SSH and the journal keep working, so run `setup` over SSH.
 - Stopping the display manager ends the running desktop session, so save your work first.
 - After a failure, do not rebind the console or rescan the card by hand ([Recovery](recovery.md#the-console-of-the-boot-display-gpu)).
 
 ### What activation does
 
-The console that the firmware set up draws into a memory region of the card (one of its BARs), and activation removes and rescans the card, which can move that region.
-`activate` therefore hands the firmware framebuffer to NVIDIA's display modules (`nvidia-modeset` and `nvidia-drm`) before it removes the card, and the display modules then drive the console.
+The console that the firmware set up draws into a memory region of the card, one of its BARs. Activation removes and rescans the card, which can move that region.
+`activate` therefore hands the firmware framebuffer to NVIDIA's display modules, `nvidia-modeset` and `nvidia-drm`, before it removes the card. The display modules then drive the console.
 Display output goes only to the boot display GPU, even with `display=on`.
-KMS (kernel mode setting, which lets the display driver set the screen mode) is limited to the boot display GPU even with `display=on`, because a display driver on any other card that serves VFs breaks that card's first VF.
+KMS (kernel mode setting) lets the display driver set the screen mode. It is limited to the boot display GPU even with `display=on`, because a display driver on any other card that serves VFs breaks that card's first VF.
 A host desktop on that GPU is drawn by it when `host_desktop` is on ([Host desktop](#host-desktop)).
 
 Activation needs a build of NVIDIA's module with the display modules:
 
 - `install` builds them when a selected GPU is the boot display (`display=auto`).
 - The build needs the Linux driver package (`--companion-file PATH` or `--companion-source DIR`) and NVIDIA's public kernel module source (`--nvkms-source PATH`).
-  The Linux driver package is NVIDIA's Linux driver 580.159.03: the vGPU guest driver from the vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`), or NVIDIA's GeForce Linux driver (`NVIDIA-Linux-x86_64-580.159.03.run` from `https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/`).
+  The Linux driver package is NVIDIA's Linux driver 580.159.03. Use either the vGPU guest driver from the vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`) or NVIDIA's GeForce Linux driver (`NVIDIA-Linux-x86_64-580.159.03.run` from `https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/`).
   The kernel module source is NVIDIA's `open-gpu-kernel-modules` tag 580.159.03, `https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz`.
   `setup` asks for both. `install --dry-run` names a missing input.
 - With `--no-display`, or with a build that has no display modules, `activate` refuses the boot display GPU before it releases anything.
@@ -672,7 +700,7 @@ Activation needs a build of NVIDIA's module with the display modules:
 A running display manager and other display clients hold the card, and activation needs them gone.
 `status` lists them.
 The boot unit never stops a display manager.
-Stop it by hand, or run `sudo geforce-sriov activate --stop-display-manager` after boot; activation then starts the display manager again afterwards.
+Stop it by hand, or run `sudo geforce-sriov activate --stop-display-manager` after boot. Activation then starts the display manager again afterwards.
 `setup` asks before it does so.
 
 ### If something goes wrong
@@ -719,9 +747,9 @@ flowchart LR
 
 You need:
 
-- the display build in effect: a selected GPU is the boot display and `display` is not `off`;
-- the Linux driver package (`--companion-file PATH` or `--companion-source DIR`);
-- no other NVIDIA graphics driver on the host.
+- the display build in effect: a selected GPU is the boot display and `display` is not `off`
+- the Linux driver package (`--companion-file PATH` or `--companion-source DIR`)
+- no other NVIDIA graphics driver on the host
 
 The setting is `host_desktop=auto|on|off`, default `auto`. The options are `--host-desktop` and `--no-host-desktop`.
 `auto` is on when the display build is in effect, the Linux driver package is given and no other NVIDIA graphics driver is on the host.
@@ -729,15 +757,20 @@ Changing it needs `sudo ./geforce-sriov install` from the source folder, no rebu
 
 ### What install adds
 
-- NVIDIA's libraries for X (the X driver and GLX), EGL, GBM and Vulkan in `<prefix>/lib/geforce-sriov/gl`, and the X modules in `<prefix>/lib/geforce-sriov/xorg`. `/etc/ld.so.conf.d/geforce-sriov-gl.conf` names the library directory to the loader.
-- Small files that say where the libraries are: EGL vendor and platform files, the Vulkan ICD file, NVIDIA's application profiles in `/usr/share/nvidia`, and one link, `nvidia-drm_gbm.so`, in the `gbm` directory of `libgbm`.
-- `/etc/X11/xorg.conf.d/geforce-sriov-nvidia-drm-outputclass.conf`, an X11 configuration file (NVIDIA's `nvidia-drm-outputclass.conf` with the path of the X modules added).
+- NVIDIA's libraries for X, EGL, GBM and Vulkan in `<prefix>/lib/geforce-sriov/gl`. The X libraries are the X driver and GLX. `/etc/ld.so.conf.d/geforce-sriov-gl.conf` names that directory to the loader.
+- The X modules in `<prefix>/lib/geforce-sriov/xorg`.
+- Small files that say where the libraries are:
+  - EGL vendor and platform files
+  - the Vulkan ICD file
+  - NVIDIA's application profiles in `/usr/share/nvidia`
+  - one link, `nvidia-drm_gbm.so`, in the `gbm` directory of `libgbm`
+- `/etc/X11/xorg.conf.d/geforce-sriov-nvidia-drm-outputclass.conf`, an X11 configuration file. It is NVIDIA's `nvidia-drm-outputclass.conf` with the path of the X modules added.
 
 No file that a distribution package owns is replaced, and NVIDIA's copies of libglvnd are not installed.
 The link in the `gbm` directory is the one new entry inside a directory that a package owns.
 
 NVIDIA's host driver 580.159.01 refuses libraries of another version, and the Linux driver package carries 580.159.03.
-The module build therefore carries a small source patch (`client_accept`) that lets the driver accept programs of exactly the version of the Linux driver package.
+The module build therefore carries a small source patch, `client_accept`. It lets the driver accept programs of exactly the version of the Linux driver package.
 NVIDIA's own version check still runs and still requires the same major version.
 `modinfo` shows `gs_client_accept` for a build that has the patch.
 See [The host desktop](technical-reference.md#the-host-desktop) for the mechanism.
@@ -745,19 +778,23 @@ See [The host desktop](technical-reference.md#the-host-desktop) for the mechanis
 ### Which GPUs X opens
 
 The output-class file sets `ProbeAllGpus` to false, so X probes only the boot display GPU.
-Xorg and the window manager still hold the device node of the other NVIDIA GPUs open, and such a card shows about 1 MiB in use.
+Xorg and the window manager still hold the device node of the other NVIDIA GPUs open. Such a card shows about 1 MiB in use.
 `ProbeAllGpus` is an X11 option.
 To change it, edit or remove the file, or run `install --no-host-desktop`. `install` writes the file again.
 
 ### After install
 
-1. Restart the display manager, for example `sudo systemctl restart display-manager`, or reboot. X must be restarted before it uses NVIDIA's driver; this ends the running desktop session.
-2. Run `geforce-sriov status`. Its `host desktop:` lines show the requested and effective setting, the libraries, whether the driver accepts them, and whether the display server draws with NVIDIA's driver, draws in software, or is not running.
+1. Restart the display manager, for example `sudo systemctl restart display-manager`, or reboot. X must be restarted before it uses NVIDIA's driver. This ends the running desktop session.
+2. Run `geforce-sriov status`. Its `host desktop:` lines show:
+   - the requested and effective setting
+   - the libraries
+   - whether the driver accepts them
+   - whether the display server draws with NVIDIA's driver, draws in software, or is not running
 
 When only these libraries changed, the `install` run needs no power cycle.
 A cold power cycle that an earlier run asked for still applies.
 
-The desktop uses video memory on the boot display GPU: some hundred MiB, more with many windows. VMs on that GPU cannot have it.
+The desktop uses video memory on the boot display GPU, some hundred MiB and more with many windows. VMs on that GPU cannot have it.
 
 ### If something goes wrong
 
@@ -768,7 +805,7 @@ The desktop uses video memory on the boot display GPU: some hundred MiB, more wi
 
 ### Turn it off
 
-`sudo ./geforce-sriov install --no-host-desktop` (or `host_desktop=off`, then `install`) removes every file `install` added for the desktop. It needs no rebuild and no reboot. Restart the display manager afterwards.
+Run `sudo ./geforce-sriov install --no-host-desktop`, or set `host_desktop=off` and run `install`. Either removes every file `install` added for the desktop. It needs no rebuild and no reboot. Restart the display manager afterwards.
 `uninstall` removes the files too.
 
 ## Host CUDA
@@ -777,27 +814,28 @@ Host CUDA lets CUDA programs run on the host itself.
 It is off by default.
 
 You need the Linux driver package (`--companion-file PATH` or `--companion-source DIR`).
-`setup` asks `Build NVIDIA's CUDA module for the host too, so CUDA programs can run on the host? [y/N]`; the default is no.
+`setup` asks `Build NVIDIA's CUDA module for the host too, so CUDA programs can run on the host? [y/N]`. The default is no.
 
 The setting is `host_cuda=on|off`, default `off`. The options are `--host-cuda` and `--no-host-cuda`.
 With it on, `install`:
 
-- builds `nvidia-uvm` together with NVIDIA's module;
-- installs NVIDIA's CUDA library from the Linux driver package into `<prefix>/lib/geforce-sriov/cuda/`, and `/etc/ld.so.conf.d/geforce-sriov-cuda.conf` names that directory to the loader;
-- writes `/etc/modprobe.d/geforce-sriov-uvm.conf` ([Modprobe files](#modprobe-files)).
+- builds `nvidia-uvm` together with NVIDIA's module
+- installs NVIDIA's CUDA library from the Linux driver package into `<prefix>/lib/geforce-sriov/cuda/`
+- writes `/etc/ld.so.conf.d/geforce-sriov-cuda.conf`, which names that directory to the loader
+- writes `/etc/modprobe.d/geforce-sriov-uvm.conf` ([Modprobe files](#modprobe-files))
 
 A CUDA library that belongs to another package is left alone.
-If programs on the host load it first, `install` warns and names it. It works only if it has the version of the loaded NVIDIA driver; otherwise remove it or move it away, then run `ldconfig`.
+If programs on the host load it first, `install` warns and names it. It works only if it has the version of the loaded NVIDIA driver. Otherwise remove it or move it away, then run `ldconfig`.
 The module build is a driver step like any other, so the boot after it needs the cold power cycle.
 When the desktop is on as well, a second copy of `libnvidia-gpucomp` is installed.
 
 On an Ada card, a host CUDA program does not block a VM, because a VM takes free video memory when it starts ([VM video memory](ada.md#vm-video-memory)).
 A full or fragmented card refuses a VM.
-On the vGPU host driver, `nvidia-smi` lists no host CUDA process, only the vGPU processes, although the memory counts in `memory.used`.
-`activate` loads `nvidia_uvm` last, after every VF is configured, and not while a CUDA client uses the host GPU: it then prints `nvidia_uvm is not loaded while a CUDA client exists; stop it, then run activate again` and exits 1.
+On the vGPU host driver, `nvidia-smi` lists only the vGPU processes and no host CUDA process, although the memory counts in `memory.used`.
+`activate` loads `nvidia_uvm` last, after every VF is configured. It does not load it while a CUDA client uses the host GPU. It then prints `nvidia_uvm is not loaded while a CUDA client exists; stop it, then run activate again` and exits 1.
 Stop host CUDA programs before you run `activate` again.
 
-To turn it off, run `sudo ./geforce-sriov install --no-host-cuda` (or `host_cuda=off`, then `install`). It builds the module without `nvidia-uvm` and removes the CUDA library and `geforce-sriov-uvm.conf`, each while it is unchanged. `uninstall` removes them too.
+To turn it off, run `sudo ./geforce-sriov install --no-host-cuda`, or set `host_cuda=off` and run `install`. This builds the module without `nvidia-uvm` and removes the CUDA library and `geforce-sriov-uvm.conf`, each while it is unchanged. `uninstall` removes them too.
 
 ## Modprobe files
 
@@ -808,7 +846,7 @@ To turn it off, run `sudo ./geforce-sriov install --no-host-cuda` (or `host_cuda
 |---|---|---|
 | `geforce-sriov-nvidia.conf` | `options nvidia NVreg_EnableGpuFirmware=0` | The driver step writes it, unless another file there already sets the option to `0`. Not with `--driver=skip` |
 | `geforce-sriov-autoload.conf` | Three `alias pci:v000010DE... off` lines for NVIDIA's PCI class aliases | While a GPU is selected. The aliases match by PCI class, so they cover every NVIDIA GPU on the host, not only the selected ones. They keep udev from loading NVIDIA's modules. `geforce-sriov-livepatch.service` loads `nvidia`, and `activate` loads the other modules |
-| `geforce-sriov-uvm.conf` | `options nvidia_uvm uvm_disable_hmm=1` | Only with `host_cuda=on` ([Host CUDA](#host-cuda)). `activate` requires this setting of `nvidia_uvm`: it stops when the module is loaded with another value |
+| `geforce-sriov-uvm.conf` | `options nvidia_uvm uvm_disable_hmm=1` | Only with `host_cuda=on` ([Host CUDA](#host-cuda)). `activate` requires this setting of `nvidia_uvm` and stops when the module is loaded with another value |
 
 ## Upgrading
 
@@ -833,12 +871,9 @@ flowchart TD
     C2 --> S["Run setup again"]
 ```
 
-The installed version's uninstall removes `/etc/geforce-sriov`, which holds your card selection and settings (a config you
-edited by hand is kept, as for every changed file). Once it is gone the new install has no selection to start from, so note the settings
-you want to keep before you uninstall: `bdfs`, `display`, `host_cuda`, `host_desktop`, `vfs`, `type_ada` and
-`type_ampere`. The refusal prints them from the installed config, and `sudo geforce-sriov status` shows what is in effect.
-Then give the new install the same choices (`--device` for each card, `--vfs`, and so on), or put them back into the config
-it writes. A `fb_slots=` line in a kept config (a setting of 0.3.0, removed in 0.4.0) is ignored; `install` prints `note: fb_slots was removed in 0.4.0 and is ignored; delete the line from /etc/geforce-sriov/config.`
+The installed version's uninstall removes `/etc/geforce-sriov`, which holds your card selection and settings. A config you edited by hand is kept, as for every changed file. Once the config is gone, the new install has no selection to start from. Note the settings you want to keep before you uninstall: `bdfs`, `display`, `host_cuda`, `host_desktop`, `vfs`, `type_ada` and `type_ampere`. The refusal prints them from the installed config, and `sudo geforce-sriov status` shows what is in effect.
+Then give the new install the same choices: `--device` for each card, `--vfs`, and so on. Or put them back into the config it writes.
+A `fb_slots=` line in a kept config is ignored. It was a setting of 0.3.0 and was removed in 0.4.0. `install` prints `note: fb_slots was removed in 0.4.0 and is ignored; delete the line from /etc/geforce-sriov/config.`
 
 ## Uninstall
 
@@ -849,7 +884,7 @@ sudo geforce-sriov uninstall
 `uninstall` disables the boot units, removes the DKMS module and deletes unchanged installed files.
 It restores the stock `nvidia.ko`, restores the plugin link and removes its patched plugin and modprobe file only while those files still match what installation wrote.
 Changed modules, links and files, including an edited config, are left alone.
-When `install` ran with `--driver-file`, the extraction in `/var/lib/geforce-sriov/nvidia/` stays; `uninstall` names it and prints the `rm -r` command that deletes it.
+When `install` ran with `--driver-file`, the extraction in `/var/lib/geforce-sriov/nvidia/` stays. `uninstall` names it and prints the `rm -r` command that deletes it.
 
 What `install` adds and what `uninstall` does with it:
 
@@ -859,16 +894,16 @@ What `install` adds and what `uninstall` does with it:
 | Patched `nvidia.ko`, stock module backed up | Restores the stock module while the installed one is unchanged |
 | Patched plugin copy and the `libnvidia-vgpu.so` link | Removes the copy and points the link back, while they are unchanged |
 | Modprobe files | Removes each one while it is unchanged |
-| Kernel hook, state files, kept inputs | Removes them; keeps the build inputs while a restore of NVIDIA's module is owed, and keeps a set activation lock |
-| `/etc/geforce-sriov/config` | Removes it; keeps a config you edited |
-| NVIDIA's own driver install and the extracted package | Leaves them; remove the driver with `nvidia-uninstall` |
+| Kernel hook, state files, kept inputs | Removes them. Keeps the build inputs while a restore of NVIDIA's module is owed, and keeps a set activation lock |
+| `/etc/geforce-sriov/config` | Removes it. Keeps a config you edited |
+| NVIDIA's own driver install and the extracted package | Leaves them. Remove the driver with `nvidia-uninstall` |
 
 The usual procedure is to uninstall, then power the machine off and on.
 The livepatch stays loaded until that boot.
-`--unload` works only when no card has VFs and no activation was interrupted; otherwise it refuses.
+`--unload` works only when no card has VFs and no activation was interrupted. Otherwise it refuses.
 
 Backups live in `/var/lib/geforce-sriov/stock/`.
-The running kernel's backup is removed after restoration; backups for other kernels remain with printed restore commands:
+The running kernel's backup is removed after restoration. Backups for other kernels remain, with printed restore commands:
 
 ```text
 restore <kernel release>: cp /var/lib/geforce-sriov/stock/<kernel release>/nvidia.ko <path to nvidia.ko> && depmod -a <kernel release>
@@ -900,19 +935,19 @@ For implementation details, see the [Technical reference](technical-reference.md
 | Check | Passes when | By hand |
 |---|---|---|
 | Kernel | Built with `CONFIG_LIVEPATCH`. The module build also needs x86_64 Linux 6.8 or later with `CONFIG_PCI_IOV`, not built with Clang LTO ([Requirements in detail](technical-reference.md#requirements-in-detail)) | `uname -r`; `/sys/kernel/livepatch` exists |
-| Build tools | Kernel headers for the running kernel, `dkms`, a C compiler, `make` | `dkms status`; `cc --version`. `install --dry-run` names what is missing; install it with your package manager |
-| System tools | `systemd` and `pciutils` (`lspci` and `setpci`, which NVIDIA's `sriov-manage` needs) | `lspci --version`. `install --dry-run` names `pciutils` when it is missing |
+| Build tools | Kernel headers for the running kernel, `dkms`, a C compiler, `make` | `dkms status`; `cc --version`. `install --dry-run` names what is missing. Install it with your package manager |
+| System tools | `systemd` and `pciutils`. NVIDIA's `sriov-manage` needs its `lspci` and `setpci` | `lspci --version`. `install --dry-run` names `pciutils` when it is missing |
 | IOMMU | On in firmware (VT-d or AMD-Vi) and in the kernel. In firmware also enable *Above 4G decoding*, and SR-IOV and ARI if offered | `dmesg \| grep -i -e DMAR -e IOMMU`; `ls /sys/kernel/iommu_groups` is not empty |
-| NVIDIA's host package | Proprietary flavour, installed with DKMS: vGPU software 19.5, host driver 580.159.01. While `nvidia` is loaded, `status` prints `driver: NVIDIA's driver X is not guaranteed to work; confirmed versions: 580.159.01.` for another host driver version; it is an ordinary line, and the check neither warns nor fails. `install --dry-run` reports nothing about the version | `modinfo -F version nvidia` (works without loading the module; `/proc/driver/nvidia/version` exists only while `nvidia` is loaded) |
+| NVIDIA's host package | Proprietary flavour, installed with DKMS: vGPU software 19.5, host driver 580.159.01. While `nvidia` is loaded, `status` prints `driver: NVIDIA's driver X is not guaranteed to work; confirmed versions: 580.159.01.` for another host driver version. This is an ordinary line, and the check neither warns nor fails. `install --dry-run` reports nothing about the version | `modinfo -F version nvidia` works without loading the module. `/proc/driver/nvidia/version` exists only while `nvidia` is loaded |
 | NVIDIA's units | `nvidia-vgpud.service` and `nvidia-vgpu-mgr.service` exist | `systemctl list-unit-files 'nvidia-vgpu*'` lists both. If not, see [below](#nvidias-vgpu-daemon-units) |
 | The card | In the device table, function `.0`, a PCI bridge directly above it, and no other device on its PCI bus | `./geforce-sriov devices`; `./geforce-sriov install --dry-run --device BDF` checks the rest |
 | Laptop power | On a laptop GPU:<br>D3cold consent is recorded as `d3cold=off`, or assessed as recorded when `--disable-d3cold` is given to `install --dry-run`.<br>The GPU answers a config read.<br>A file in `/etc/modprobe.d/` sets `options nvidia NVreg_DynamicPowerManagement=0`.<br>`sleep.target` is masked ([D3cold](laptops.md#d3cold)). | `grep d3cold /etc/geforce-sriov/config`; `grep -h NVreg_DynamicPowerManagement /etc/modprobe.d/*.conf`; `systemctl is-enabled sleep.target` prints `masked` |
-| Display build | A selected GPU that is the boot display needs the display modules. Installing them takes the Linux driver package and NVIDIA's public kernel module source (`--companion-file` or `--companion-source`, and `--nvkms-source`), or `--no-display` | `cat /sys/bus/pci/devices/<BDF>/boot_vga` prints `1` for the boot display |
+| Display build | A selected GPU that is the boot display needs the display modules. Installing them takes the Linux driver package (`--companion-file` or `--companion-source`) and NVIDIA's public kernel module source (`--nvkms-source`). Or pass `--no-display` | `cat /sys/bus/pci/devices/<BDF>/boot_vga` prints `1` for the boot display |
 | `nvidia` not loaded early | Nothing loads `nvidia` before `geforce-sriov-livepatch.service`: not `/etc/modules`, `/etc/modules-load.d/` or the initramfs | `status` warns when it finds it |
-| `nvidia` not blocked | No file in `/etc/modprobe.d/` holds `nvidia` back with `blacklist nvidia` and `install nvidia /bin/false`, because `activate` loads the driver itself | `grep -h nvidia /etc/modprobe.d/*.conf` |
-| GPU firmware option (`NVreg_EnableGpuFirmware`) | No file in `/etc/modprobe.d/` sets `NVreg_EnableGpuFirmware` to a value other than `0`; a file that sets `0` is noted, and the driver step keeps it | `grep -h NVreg_EnableGpuFirmware /etc/modprobe.d/*.conf` |
+| `nvidia` not blocked | No file in `/etc/modprobe.d/` holds `nvidia` back with `blacklist nvidia` and `install nvidia /bin/false`. `activate` loads the driver itself | `grep -h nvidia /etc/modprobe.d/*.conf` |
+| GPU firmware option (`NVreg_EnableGpuFirmware`) | No file in `/etc/modprobe.d/` sets `NVreg_EnableGpuFirmware` to a value other than `0`. A file that sets `0` is noted, and the driver step keeps it | `grep -h NVreg_EnableGpuFirmware /etc/modprobe.d/*.conf` |
 | Identity hook and driver version | The loaded driver build is one the identity hook acts on | `status` reports it once the driver is loaded |
-| Daemon drop-ins | No drop-in of `nvidia-vgpud` or `nvidia-vgpu-mgr` other than the package's own `geforce-sriov.conf` sets `LD_PRELOAD`; in `nvidia-vgpud.service.d` only a file read after `geforce-sriov.conf` counts. Each one found is a warning naming the file, the unit and the hook to point it at | `grep -l LD_PRELOAD /etc/systemd/system/nvidia-vgpu*.service.d/*.conf` |
+| Daemon drop-ins | No drop-in of `nvidia-vgpud` or `nvidia-vgpu-mgr` other than the package's own `geforce-sriov.conf` sets `LD_PRELOAD`. In `nvidia-vgpud.service.d` only a file read after `geforce-sriov.conf` counts. Each one found is a warning naming the file, the unit and the hook to point it at | `grep -l LD_PRELOAD /etc/systemd/system/nvidia-vgpu*.service.d/*.conf` |
 | vGPU plugin | `libnvidia-vgpu.so` resolves to the patched plugin copy, SHA-256 `aa4fdeb5…`. Any other file is a warning with the reason. For a copy that has only the first of the two plugin changes, the warning tells you to run `install` again. Before the driver step has run, the stock plugin is expected there and is only noted | `sha256sum "$(readlink -f /usr/lib/x86_64-linux-gnu/libnvidia-vgpu.so)"` |
 | Activation lock | `/var/lib/geforce-sriov/prepare-attempt` is absent. `status` names the recovery when it is set ([the one rule](recovery.md#the-one-rule)) | `ls /var/lib/geforce-sriov/prepare-attempt` |
 
@@ -938,7 +973,7 @@ Both daemon unit files must exist for the hook drop-in and activation:
 systemctl list-unit-files 'nvidia-vgpu*'   # expect nvidia-vgpud.service and nvidia-vgpu-mgr.service
 ```
 
-Missing units are supplied in NVIDIA's extracted `init-scripts/systemd/`; some installs keep them in `/usr/lib/nvidia/systemd/`.
+Missing units are supplied in NVIDIA's extracted `init-scripts/systemd/`. Some installs keep them in `/usr/lib/nvidia/systemd/`.
 Copy both unchanged and reload systemd:
 
 ```sh
@@ -947,5 +982,5 @@ sudo install -m 0644 /usr/lib/nvidia/systemd/nvidia-vgpud.service \
 sudo systemctl daemon-reload
 ```
 
-After changing the `nvidia-vgpud` drop-in or `libnvidia-vgpu.so` link, run `sudo systemctl daemon-reload`, stop the vGPU VMs, clear their VF types to `0` and run `sudo geforce-sriov activate`, which restarts both daemons in order.
+After changing the `nvidia-vgpud` drop-in or `libnvidia-vgpu.so` link, run `sudo systemctl daemon-reload`, stop the vGPU VMs and clear their VF types to `0`. Then run `sudo geforce-sriov activate`, which restarts both daemons in order.
 The units need no enabling: `activate` starts them after VFs exist.
