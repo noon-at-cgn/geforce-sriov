@@ -10,9 +10,11 @@ Upgrade if you use an Ada card or if the boot display GPU is one of your selecte
 
 ### Breaking changes
 
-- Every upgrade now uses the same steps: uninstall the installed version, power the machine off and on, then install the new version. The commands stop before they change anything when another version is installed.
-- The Ada framebuffer slot reservation of 0.3.0 is gone, together with its setting and options. Ada VM video memory replaces it.
-- `doctor` is no longer a command. Its checks now run in `status` and in `install --dry-run`.
+- Every upgrade uses the same steps: uninstall the installed version, power the machine off and on, then install the new version.
+- Commands stop before they change anything when another version is installed, and DKMS no longer replaces another registered version.
+- The Ada framebuffer slot reservation of 0.3.0 and its setting are gone, and a leftover `fb_slots=` line is ignored.
+- Ada VM video memory replaces the slot reservation.
+- `doctor` is no longer a command, and its checks now run in `status` and in `install --dry-run`.
 - The old 0.2.x names and the migrations that handled them are gone.
 
 ### Added
@@ -25,7 +27,7 @@ Upgrade if you use an Ada card or if the boot display GPU is one of your selecte
 - Up to 32 cards can be selected, up from 8.
 - The commands refuse to run when a different card sits at a selected address.
 - `install` run from the installed copy can change the card selection and the display setting.
-- Other host driver versions are built on a best-effort basis. They are not guaranteed to work.
+- Other host driver versions are built on a best-effort basis, but they are not guaranteed to work.
 
 ### Changed
 
@@ -33,10 +35,6 @@ Upgrade if you use an Ada card or if the boot display GPU is one of your selecte
 - Guest autostart waits for activation but is never blocked by it.
 - With an Ada card, `install` stops when it cannot make the video memory change, and it installs nothing.
 - `uninstall` is safer about restoring NVIDIA's module and keeps every backup when something looks wrong.
-
-### Removed
-
-- The Ada framebuffer slot reservation, `doctor`, the migration code and the old 0.2.x option, command and key names.
 
 ### Known limitations
 
@@ -52,8 +50,10 @@ This beta release lets the boot display GPU serve VFs, adds host CUDA, and repla
 
 ### Breaking changes and how to migrate
 
-- `prepare` is replaced by `activate`, and `--clear-guard` is now `--clear-lock`. The old names stop with a message that names the new one.
-- `--release-console`, `--boot-display-release`, `--hold-nvidia` and the `boot_display_release` key are gone. Run `install` once to remove the old config line and obsolete files.
+- `prepare` is replaced by `activate`, and `--clear-guard` is now `--clear-lock`, so use the new names.
+- `--release-console`, `--boot-display-release`, `--hold-nvidia` and `--hold-note-shown` are gone, so drop them and use `--display` or `--no-display` to choose the display build.
+- The `boot_display_release=` config line is gone, so run `install` once to remove it, or delete the line yourself if you edited the config.
+- Obsolete units and files are removed by `install`, and a file or unit you changed is kept or disabled with a message.
 - After a kernel update, run `sudo geforce-sriov rebuild` instead of `install`. See [After a kernel update](docs/installation.md#after-a-kernel-update).
 
 ### Added
@@ -85,6 +85,8 @@ This beta release lets the boot display GPU serve VFs, adds host CUDA, and repla
 
 ## [0.2.2] - 2026-11-10
 
+This release makes the driver step stricter about which NVIDIA module flavour it accepts.
+
 ### Added
 
 - The driver step refuses an installed open-flavour NVIDIA module and explains how to install the proprietary one.
@@ -94,6 +96,8 @@ This beta release lets the boot display GPU serve VFs, adds host CUDA, and repla
 - NVIDIA's installer now receives the proprietary module type (thanks to @Neko-0v0, PR #3).
 
 ## [0.2.1] - 2026-11-08
+
+This release adds laptop GPU support and makes several messages and removals safer.
 
 ### Added
 
@@ -152,4 +156,4 @@ Initial release with the `geforce-sriov` command, the livepatch module, the iden
 ### Known limitations
 
 - Hardware ARI decoding does not work, so the VF count defaults to 4.
-- NVIDIA's vGPU host driver and guest licences are not included. You must supply both.
+- NVIDIA's vGPU host driver and guest licences are not included, so you must supply both.
