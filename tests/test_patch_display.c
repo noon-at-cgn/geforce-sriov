@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "display.h"
+#include "tmpdir.h"
 #include "patch.h"
 #include "safe_output.h"
 #include <elf.h>
@@ -32,7 +33,7 @@ static void fixture(size_t text,size_t call)
 static void relocation(Elf64_Rela r){memcpy(b+2000,&r,sizeof(r));}
 int main(void)
 {
- struct gs_display_info info;struct gs_display_recipe row;Elf64_Rela r;Elf64_Shdr s;Elf64_Sym sym;char err[256],hash[65],output[65],dir[]="/tmp/gs-display-XXXXXX",path[256];
+ struct gs_display_info info;struct gs_display_recipe row;Elf64_Rela r;Elf64_Shdr s;Elf64_Sym sym;char err[256],hash[65],output[65],dir[256],path[512];
  fixture(512,79);memcpy(original,b,sizeof(b));
  CHECK(!gs_display_inspect(b,sizeof(b),&info,err,sizeof(err))&&!info.digest&&info.function_offset==79);
  CHECK(!gs_display_transform(b,sizeof(b),&info,0,err,sizeof(err)));memcpy(output,info.output_sha,65);
@@ -75,6 +76,6 @@ int main(void)
  fixture(512,79);memcpy(&r,b+2000,sizeof(r));r.r_offset++;relocation(r);CHECK(gs_display_inspect(b,sizeof(b),&info,err,sizeof(err))<0);
  fixture(512,79);memcpy(&s,b+64+6*sizeof(s),sizeof(s));s.sh_size=sizeof(r);memcpy(b+64+6*sizeof(s),&s,sizeof(s));memcpy(b+2100,b+2000,sizeof(r));CHECK(gs_display_inspect(b,sizeof(b),&info,err,sizeof(err))<0);
  fixture(512,79);CHECK(gs_display_inspect(b,2001,&info,err,sizeof(err))<0);
- CHECK(mkdtemp(dir)!=NULL);snprintf(path,sizeof(path),"%s/out",dir);CHECK(gs_write_new_output(path,b,sizeof(b),err,sizeof(err))>=0);CHECK(gs_write_new_output(path,b,sizeof(b),err,sizeof(err))<0);CHECK(!unlink(path));CHECK(!symlink("missing",path));CHECK(gs_write_new_output(path,b,sizeof(b),err,sizeof(err))<0);CHECK(!unlink(path));CHECK(!rmdir(dir));
+ gs_test_template(dir,sizeof(dir),"gs-display-XXXXXX");CHECK(mkdtemp(dir)!=NULL);snprintf(path,sizeof(path),"%s/out",dir);CHECK(gs_write_new_output(path,b,sizeof(b),err,sizeof(err))>=0);CHECK(gs_write_new_output(path,b,sizeof(b),err,sizeof(err))<0);CHECK(!unlink(path));CHECK(!symlink("missing",path));CHECK(gs_write_new_output(path,b,sizeof(b),err,sizeof(err))<0);CHECK(!unlink(path));CHECK(!rmdir(dir));
  printf("test_patch_display: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }

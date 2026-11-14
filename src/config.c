@@ -276,8 +276,10 @@ int gs_config_parse(const char *text, size_t len, struct gs_config *cfg, char *e
 				cfg->display = GS_DISPLAY_ON;
 			else if (strcmp(value, "off") == 0)
 				cfg->display = GS_DISPLAY_OFF;
+			else if (strcmp(value, "boot") == 0)
+				cfg->display = GS_DISPLAY_BOOT;
 			else {
-				snprintf(err, errlen, "line %u: display must be auto, on or off", lineno);
+				snprintf(err, errlen, "line %u: display must be auto, on, boot or off", lineno);
 				return -1;
 			}
 			break;
@@ -411,8 +413,8 @@ int gs_config_render(const struct gs_config *cfg, char *buf, size_t len)
 		     "# d3cold_allowed to 0); `install --disable-d3cold` writes it.\n"
 		     "d3cold=off\n");
 	EMIT("ari=%s\n", cfg->ari == GS_SW_OFF ? "off" : "on");
-	EMIT("display=%s\n", cfg->display == GS_DISPLAY_ON ? "on" :
-	     cfg->display == GS_DISPLAY_OFF ? "off" : "auto");
+	EMIT("display=%s\n", cfg->display == GS_DISPLAY_ON ? "on" : cfg->display == GS_DISPLAY_OFF ? "off" :
+	     cfg->display == GS_DISPLAY_BOOT ? "boot" : "auto");
 	EMIT("host_cuda=%s\n", cfg->host_cuda == GS_SW_ON ? "on" : "off");
 	EMIT("host_desktop=%s\n", cfg->host_desktop == GS_DESKTOP_ON ? "on" : cfg->host_desktop == GS_DESKTOP_OFF ? "off" : "auto");
 	EMIT("msix=%s\n", cfg->msix == GS_SW_OFF ? "off" : "on");
@@ -496,7 +498,7 @@ int gs_version_confirmed(enum gs_version_package package, const char *version)
 	for (size_t i = 0; i < confirmed_count; i++) {
 		const char *have = package == GS_VERSION_HOST ? confirmed_rows[i].host : confirmed_rows[i].second;
 
-		/* A row may record no second package. */
+		/* A row may record no Linux driver package. */
 		if (have && !strcmp(version, have))
 			return 1;
 	}

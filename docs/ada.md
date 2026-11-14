@@ -85,11 +85,11 @@ Set the type with `type_ada=` in the config. Every VF of the card gets it. See [
 > All the vGPUs you run at once must fit in the VRAM together, with some room left over because the host driver uses part of the memory too.
 > For example, four `4Q` vGPUs need 16 GB plus the host driver's share. They fit a 24 GB card and do not fit a 16 GB card.
 
-Without the VM video memory change, each VF has a fixed framebuffer slot, and a later VF's slot ends higher in the card's memory.
-geforce-sriov builds the VM video memory change into the module whenever a selected card is Ada. An Ada VM then has no fixed slot and takes a free piece of video memory when it starts. See [VM video memory](#vm-video-memory).
-Until you power the machine off and on after `install`, the module that was loaded before stays in use and its slots still apply. `status` and `check` say which is the case.
+Without the VM video memory change, each VF has a fixed range of video memory, and a later VF's range ends higher in the card's memory.
+geforce-sriov builds the VM video memory change into the module whenever a selected card is Ada. An Ada VM then has no fixed range and takes a free piece of video memory when it starts. See [VM video memory](#vm-video-memory).
+Until you power the machine off and on after `install`, the module that was loaded before stays in use and its fixed ranges still apply. `status` and `check` say which is the case.
 A VM does not start when the card holds no free piece of its size.
-`activate` names the VFs whose slot ends near the top of the card's memory, but only for a card whose VFs still have fixed slots. With the VM video memory change it prints no such line.
+`activate` names the VFs whose range ends near the top of the card's memory, but only for a card whose VFs still have fixed ranges. With the VM video memory change it prints no such line.
 
 The 1 GiB type (941) works: the guest sees 1024 MiB and runs CUDA.
 

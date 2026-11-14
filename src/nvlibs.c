@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 /*
- * NVIDIA's libraries from the second package: for host CUDA and for the host desktop.
+ * NVIDIA's libraries from the Linux driver package: for host CUDA and for the host desktop.
  *
- * NVIDIA's vGPU host package has no CUDA or graphics libraries; the second package, which nvidia-uvm
+ * NVIDIA's vGPU host package has no CUDA or graphics libraries; the Linux driver package, which nvidia-uvm
  * and the display modules are built from, has them. The driver step copies the libraries from that
  * package into a staging directory with an index (stage_cuda and stage_desktop in
  * scripts/geforce-sriov-driver.sh), and install puts them in place from there. There are two sets,
@@ -821,7 +821,7 @@ int gs_nvlibs_sync(struct ctx *x, const struct gs_nvset *set, const struct gs_nv
 	}
 	if (staged == 0 && set->desktop && d->accept && d->accept[0] && strcmp(st->version, d->accept) != 0) {
 		fprintf(stderr, "geforce-sriov: warning: NVIDIA's graphics libraries are not installed: the staged ones are version %s and the installed\n"
-			"nvidia.ko accepts version %s. Run `sudo ./geforce-sriov install --companion-file PATH` with NVIDIA's second package of\n"
+			"nvidia.ko accepts version %s. Run `sudo ./geforce-sriov install --companion-file PATH` with the Linux driver package of\n"
 			"the version the driver was built for.\n", st->version, d->accept);
 		staged = -ECANCELED;
 	}
@@ -869,7 +869,7 @@ int gs_nvlibs_sync(struct ctx *x, const struct gs_nvset *set, const struct gs_nv
 				if (snprintf(text, sizeof(text), "%s\n", d->dir) > 0)
 					r = gs_install_put(x, d->conf, text, strlen(text), 0644);
 				if (!r) {
-					/* The libraries of another version, from an earlier second package. */
+					/* The libraries of another version, from an earlier Linux driver package. */
 					nv_sweep(x, set, d->dir, &plan, set->desktop ? "it belongs to another version of NVIDIA's graphics libraries" :
 						 "it belongs to another version of NVIDIA's CUDA libraries");
 					/* The desktop set's loader cache has the libraries before NVIDIA's EGL is made reachable. */
@@ -945,18 +945,18 @@ int gs_nvlibs_sync(struct ctx *x, const struct gs_nvset *set, const struct gs_nv
 	} else if (state == 0 && staged != -ECANCELED) {
 		if (!set->desktop)
 			fprintf(stderr, "geforce-sriov: warning: host CUDA is on, but NVIDIA's CUDA library (libcuda) is not installed, so CUDA\n"
-				"programs on the host cannot start. It comes from NVIDIA's second driver package, and this run did not get it\n"
+				"programs on the host cannot start. It comes from the Linux driver package, and this run did not get it\n"
 				"from there (%s has the reason when that package was read).\n"
 				"Run `sudo ./geforce-sriov install --host-cuda --companion-file PATH` in the source folder with that package.\n",
 				GS_DRIVER_LOG);
 		else if (want == GS_NVLIBS_AUTO)
-			printf("host desktop: not installed (host_desktop=auto): NVIDIA's graphics libraries were not taken from NVIDIA's\n"
-			       "second driver package (%s has the reason when that package was read). Run\n"
+			printf("host desktop: not installed (host_desktop=auto): NVIDIA's graphics libraries were not taken from the\n"
+			       "Linux driver package (%s has the reason when that package was read). Run\n"
 			       "`sudo ./geforce-sriov install --companion-file PATH` in the source folder with that package to turn it on.\n",
 			       GS_DRIVER_LOG);
 		else
 			fprintf(stderr, "geforce-sriov: warning: host_desktop=on, but NVIDIA's graphics libraries are not installed, so the desktop\n"
-				"is drawn by the CPU. They come from NVIDIA's second driver package, and this run did not get them from\n"
+				"is drawn by the CPU. They come from the Linux driver package, and this run did not get them from\n"
 				"there (%s has the reason when that package was read).\n"
 				"Run `sudo ./geforce-sriov install --host-desktop --companion-file PATH` in the source folder with that package.\n",
 				GS_DRIVER_LOG);
@@ -1055,10 +1055,10 @@ int gs_nvlibs_line(const struct gs_nvset *set, const char *manifest, int want,
 	if (!state) {
 		if (set->desktop)
 			snprintf(line, len, "not installed, so the desktop is drawn by the CPU; run `sudo ./geforce-sriov install "
-				 "--host-desktop --companion-file PATH` in the source folder with NVIDIA's second driver package");
+				 "--host-desktop --companion-file PATH` in the source folder with the Linux driver package");
 		else
 			snprintf(line, len, "not installed, so CUDA programs on the host cannot start; run `sudo ./geforce-sriov install "
-				 "--host-cuda --companion-file PATH` in the source folder with NVIDIA's second driver package");
+				 "--host-cuda --companion-file PATH` in the source folder with the Linux driver package");
 		return -1;
 	}
 	if (state < 0) {

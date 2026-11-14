@@ -28,7 +28,7 @@ state=$tmp/state
 stubs=$tmp/stubs
 mkdir -p "$bin" "$state" "$stubs"
 # The headers directory and the wait between tries are the fixture's own, so that nothing outside the tree is read and no test sleeps.
-sed -e "s|@BINDIR@|$bin|g" -e "s|@STATE@|$state|g" -e "s|@VERSION@|0.4.0|g" \
+sed -e "s|@BINDIR@|$bin|g" -e "s|@STATE@|$state|g" -e "s|@VERSION@|0.4.1|g" \
 	-e "s|/boot/vmlinuz-|$tmp/boot/vmlinuz-|g" -e "s|/lib/modules/|$tmp/modules/|g" -e "s|sleep 10|sleep 0|" "$template" >"$tmp/hook"
 for k in 7.0.99-1-pve 7.0.99-2-pve; do
 	mkdir -p "$tmp/modules/$k/build"
@@ -69,7 +69,8 @@ mkdir -p "$tmp/stock"
 for k in 7.0.99-1-pve 7.0.99-2-pve 7.0.99-3-pve; do : >"$tmp/stock/$k"; done
 cat >"$stubs/modinfo" <<EOF
 #!/bin/sh
-[ -e "$tmp/stock/\$2" ]
+[ -e "$tmp/stock/\$2" ] || exit 1
+case "\$*" in *vermagic*) if [ -e "$tmp/vermagic-wrong/\$2" ]; then echo "6.0.0-other SMP mod_unload"; else echo "\$2 SMP mod_unload"; fi ;; esac
 EOF
 cat >"$stubs/dkms" <<EOF
 #!/bin/sh
@@ -235,6 +236,63 @@ rm -f "$tmp/dkms-fails" "$tmp/calls"
 run --retry
 check "retry, the module exists now (built by other means): no DKMS run, the build is made and the report is gone" test ! -e "$tmp/dkmscalls" -a "$(cat "$tmp/calls")" = "rebuild --kernel 7.0.99-12-pve" -a ! -e "$state/kernel-hook-failed/7.0.99-12-pve"
 
+# NVIDIA's module is there but was built for another kernel (its vermagic names a different release): the build does not start, the
+# report is the retryable one (the stock module is "not built yet"), and a later run with a matching vermagic builds.
+newkernel 7.0.99-14-pve 1 1
+mkdir -p "$tmp/vermagic-wrong"
+: >"$tmp/vermagic-wrong/7.0.99-14-pve"
+: >"$tmp/dkms-fails"
+rm -f "$tmp/calls" "$tmp/dkmscalls"
+run 7.0.99-14-pve
+check "vermagic of another kernel: the hook succeeds and builds nothing" test "$rc" -eq 0 -a ! -e "$tmp/calls"
+check "vermagic of another kernel: DKMS is asked for the module" test "$(cat "$tmp/dkmscalls")" = "dkms autoinstall -k 7.0.99-14-pve"
+check "vermagic of another kernel: the retryable report is written, not a build failure" contains "$(cat "$state/kernel-hook-failed/7.0.99-14-pve")" "NVIDIA's own module for kernel 7.0.99-14-pve is not built yet"
+check "vermagic of another kernel: no build failure is recorded" not_contains "$(cat "$state/kernel-hook-failed/7.0.99-14-pve")" "exit "
+check "vermagic of another kernel: no build record" test ! -e "$state/driver-builds/7.0.99-14-pve"
+rm -f "$tmp/dkmscalls"
+run --retry
+check "vermagic of another kernel, apt retry gate: the report is retried only when something changed, so nothing runs" test ! -e "$tmp/calls" -a ! -e "$tmp/dkmscalls"
+# The retry gate itself: the report is old and the headers changed, so DKMS is asked again, and still no build while the vermagic is wrong.
+sleep 1
+touch -d '2001-01-01 00:00:00' "$tmp/modules/7.0.99-14-pve/build/Makefile"
+run --retry
+check "vermagic of another kernel, apt retry gate: the module does not count, DKMS is asked and nothing is built" test "$(cat "$tmp/dkmscalls")" = "dkms autoinstall -k 7.0.99-14-pve" -a ! -e "$tmp/calls" -a -f "$state/kernel-hook-failed/7.0.99-14-pve"
+# The module is rebuilt for the kernel: the vermagic matches, the retry builds and the report is gone.
+rm -f "$tmp/vermagic-wrong/7.0.99-14-pve" "$tmp/dkms-fails" "$tmp/dkmscalls"
+run --retry
+check "vermagic matches now: apt's retry builds, no DKMS run, report gone" test "$(cat "$tmp/calls")" = "rebuild --kernel 7.0.99-14-pve" -a ! -e "$tmp/dkmscalls" -a ! -e "$state/kernel-hook-failed/7.0.99-14-pve" -a -f "$state/driver-builds/7.0.99-14-pve"
+# The direct run: a wrong vermagic is also not built, and DKMS making a matching module lets the build go ahead.
+newkernel 7.0.99-15-pve 1 1
+: >"$tmp/vermagic-wrong/7.0.99-15-pve"
+cat >"$stubs/dkms" <<EOF
+#!/bin/sh
+printf 'dkms %s\n' "\$*" >>"$tmp/dkmscalls"
+rm -f "$tmp/vermagic-wrong/\$3"
+: >"$tmp/stock/\$3"
+EOF
+rm -f "$tmp/calls" "$tmp/dkmscalls"
+run 7.0.99-15-pve
+check "vermagic of another kernel, DKMS rebuilds it for the kernel: the build is made" test "$(cat "$tmp/calls")" = "rebuild --kernel 7.0.99-15-pve" -a ! -e "$state/kernel-hook-failed/7.0.99-15-pve"
+
+# The published record names the kernel of the latest build, which a hook build for a kernel that is not running republishes: that kernel
+# has no copy under driver-builds, and the published record is its build. It is left alone while its module is installed, and built
+# again when the module is gone (a headers reinstall after the module was removed).
+newkernel 7.0.99-16-pve 1 1
+printf 'kernel=7.0.99-16-pve\n' >"$state/driver-build"
+rm -f "$tmp/calls" "$tmp/dkmscalls" "$state/driver-builds/7.0.99-16-pve"
+run --retry
+check "published record names a kernel that is not running, its module is there: nothing is built" test ! -e "$tmp/calls" -a ! -e "$tmp/dkmscalls"
+rm -f "$tmp/stock/7.0.99-16-pve"
+sleep 1
+touch -d '2001-01-01 00:00:00' "$tmp/modules/7.0.99-16-pve/build/Makefile"
+run --retry
+check "published record names that kernel, its NVIDIA module is gone: DKMS is asked and the build is made again" test "$(cat "$tmp/dkmscalls")" = "dkms autoinstall -k 7.0.99-16-pve" -a "$(cat "$tmp/calls")" = "rebuild --kernel 7.0.99-16-pve"
+printf 'kernel=7.0.99-2-pve\nguest_fb=1\n' >"$state/driver-build"
+rm -f "$tmp/calls" "$state/kernel-hook-failed/7.0.99-2-pve"
+run --retry
+check "published record of the running kernel, built with the cap: the build is made again" test "$(cat "$tmp/calls")" = "rebuild --kernel 7.0.99-2-pve"
+echo "kernel=7.0.14-16-pve" >"$state/driver-build"
+
 # A kernel built by an earlier build of this version that carried the guest framebuffer cap is built again, once.
 printf 'kernel=7.0.99-4-pve\nguest_fb=1\n' >"$state/driver-builds/7.0.99-4-pve"
 rm -f "$tmp/calls"
@@ -256,7 +314,7 @@ check "retry, the image is in the kernel's own directory: the build is made" tes
 plugin=$tmp/90-geforce-sriov.install
 hookbin=$tmp/pluginbin
 mkdir -p "$hookbin"
-sed -e "s|@BINDIR@|$hookbin|g" -e "s|@VERSION@|0.4.0|g" "$here/../../scripts/geforce-sriov-kernel-install.install" >"$plugin"
+sed -e "s|@BINDIR@|$hookbin|g" -e "s|@VERSION@|0.4.1|g" "$here/../../scripts/geforce-sriov-kernel-install.install" >"$plugin"
 chmod 755 "$plugin"
 check "plugin: every placeholder is replaced" test -z "$(grep '@[A-Z]' "$plugin" || true)"
 check "plugin: valid shell" sh -n "$plugin"

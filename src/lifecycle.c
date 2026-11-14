@@ -36,7 +36,7 @@ const char *gs_sw_name(int v)
 
 const char *gs_display_mode_name(enum gs_display_mode m)
 {
-	return m == GS_DISPLAY_ON ? "on" : m == GS_DISPLAY_OFF ? "off" : "auto";
+	return m == GS_DISPLAY_ON ? "on" : m == GS_DISPLAY_OFF ? "off" : m == GS_DISPLAY_BOOT ? "boot" : "auto";
 }
 
 /* <pf>/power/runtime_status into buf: 0, or -1 when it is absent or unreadable (buf ""). */

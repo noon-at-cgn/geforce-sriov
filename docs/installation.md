@@ -48,7 +48,7 @@ The individual commands below are for manual operation and troubleshooting.
   Get the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run` from the vGPU software 19.5 download, with your own NVIDIA entitlement.
   Install it with DKMS, which rebuilds kernel modules for each new kernel. Or have the `.run` file ready for `--driver-file` ([One command from a clean host](#one-command-from-a-clean-host)).
 - For host CUDA: NVIDIA's Linux driver package.
-- For the display build on the boot display GPU: the Linux driver package and NVIDIA's public kernel module source ([What to download](#what-to-download)).
+- For the display build: the Linux driver package and NVIDIA's public kernel module source ([What to download](#what-to-download)).
 - A card from the [device table](devices.md#generations). A [boot display GPU](#boot-display-gpu) is allowed and needs the display modules.
 - On a laptop, read [Laptop support](laptops.md) first: system sleep must be blocked and NVIDIA's runtime power management turned off.
 - The IOMMU turned on in firmware (VT-d or AMD-Vi, plus *Above 4G decoding*) and in the kernel.
@@ -62,7 +62,7 @@ The individual commands below are for manual operation and troubleshooting.
 |---|---|---|---|
 | vGPU host driver | NVIDIA vGPU host driver for Linux KVM: the `.run` file `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run` from the NVIDIA vGPU software 19.5 download (NVIDIA Licensing Portal) | 580.159.01 | Always |
 | Host CUDA | NVIDIA's Linux driver package: NVIDIA's Linux driver 580.159.03 as a `.run` file. Use one of two files. The first is the vGPU guest driver from the same vGPU software 19.5 download, `NVIDIA-Linux-x86_64-580.159.03-grid.run`. The second is NVIDIA's GeForce Linux driver [`NVIDIA-Linux-x86_64-580.159.03.run`](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/NVIDIA-Linux-x86_64-580.159.03.run) from NVIDIA's public Unix driver archive | 580.159.03 | You turn host CUDA on (`--host-cuda`) |
-| Host display and desktop on the boot display GPU | The Linux driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | A GPU you select is the boot display GPU. The desktop libraries come from the Linux driver package. The public kernel module source is used only for the display modules |
+| Host display and desktop | The Linux driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | You select the boot display GPU, or you give both inputs for another selected GPU. The desktop libraries come from the Linux driver package. The public kernel module source is used only for the display modules |
 
 What each input is used for:
 
@@ -294,9 +294,10 @@ sudo ./geforce-sriov install
 # same thing via make: sudo make install DEVICES="0000:01:00.0"
 ```
 
-Loading `nvidia` binds every NVIDIA card on the host, and geforce-sriov cannot restrict that.
+Loading `nvidia` binds every NVIDIA card on the host that no other driver holds.
 A mixed host, with Ada and Ampere cards ([Combining generations](devices.md#combining-generations)), must therefore list every card it will use, with one `--device` each.
 A card left out is bound by the driver but not activated, and the rebuilt `nvidia.ko` applies to it as well.
+See [NVIDIA GPUs that are not selected](#nvidia-gpus-that-are-not-selected) for keeping a card away from NVIDIA's driver.
 
 `install` puts these on the host. See [Install details](technical-reference.md#install-details) for the paths. `uninstall` removes what `install` recorded.
 
@@ -362,9 +363,10 @@ Power the machine fully off and on, so the card gets a clean start.
 > To skip both boot units for one boot, add `geforce_sriov.skip` to the kernel command line. In GRUB, press `e` on the entry and append it to the `linux` line.
 > Neither unit runs. That boot has no NVIDIA driver at all, because geforce-sriov keeps udev from loading it. Run `modprobe nvidia` if you need it.
 
-At boot, `geforce-sriov-livepatch.service` loads the `geforce_sriov` kernel module, which is a livepatch, and then NVIDIA's `nvidia` module. It runs before udev starts, so nothing else can bind the cards first.
+At boot, `geforce-sriov-livepatch.service` loads the `geforce_sriov` kernel module, which is a livepatch. It runs before udev starts. So the kernel's first enumeration of each selected card sees the hidden capabilities, and nothing else can bind the cards first.
 The unit needs `/var/lib/geforce-sriov` and the install directory on the root filesystem.
-Then `geforce-sriov-activate.service` runs `activate --boot`. It runs after the livepatch unit and before VM autostart, so the VFs exist and carry their vGPU types before guests start, unless activation fails (below).
+Then `geforce-sriov-activate.service` starts. Its first step runs `geforce-sriov livepatch --boot --load-driver`. That step waits for udev to finish its queue, for at most 30 seconds, and loads NVIDIA's `nvidia` module. A failed load does not stop activation, which then says what is wrong.
+The unit then runs `activate --boot`. It runs after the livepatch unit and before VM autostart and the display manager, so the VFs exist and carry their vGPU types before guests start, unless activation fails (below).
 Boot activation never prompts, and it does not stop a running display manager.
 Guest autostart (`pve-guests.service` or `libvirt-guests.service`) starts after the activate unit has finished, whatever its result. It first runs `geforce-sriov check`, which only logs which VFs are not ready. A failed activation never keeps guests from starting. A guest that uses a vGPU can then fail to start, so run `geforce-sriov check` before starting it.
 `install` sets the activate unit's start timeout from the number of selected cards and VFs, at least 900 seconds. Normal activation takes seconds per card, so the timeout matters only in a real hang. Activation also extends the timeout before each step that can wait.
@@ -380,6 +382,76 @@ journalctl -b -u geforce-sriov-livepatch.service -u geforce-sriov-activate.servi
 `status` shows each selected card's state and exits 0 when every selected VF is ready and no host check fails. Otherwise it names the next step.
 `check` tells whether the VFs are ready for a VM.
 Use the journal and [Symptoms](recovery.md#symptoms) to investigate failures.
+
+### NVIDIA GPUs that are not selected
+
+`nvidia` loads at the start of `geforce-sriov-activate.service`. By then udev has processed the devices present at boot, and `systemd-modules-load` has run.
+The kernel offers a card to `nvidia` only when no other driver is bound to it. The card's `driver_override` must also be empty or name `nvidia`.
+A card you keep for another driver therefore stays with that driver when your own configuration gave it to that driver before the module loads. These methods do that:
+
+- `vfio-pci` with `options vfio-pci ids=VENDOR:DEVICE` in `/etc/modprobe.d/`, or `vfio-pci.ids=` on the kernel command line. `vfio-pci` must load from `/etc/modules`, `/etc/modules-load.d/` or the initramfs. `ids=` matches every card with that ID, selected cards included.
+- `softdep nvidia pre: vfio-pci` in a file in `/etc/modprobe.d/`, together with `ids=`. `modprobe nvidia` then loads `vfio-pci` first.
+- A `driver_override` for one address. Use a udev rule that writes the driver name to the card's `driver_override` file. Use this when a selected card and a passthrough card have the same device ID.
+
+If `ids=` makes `vfio-pci` take a selected card as well, boot activation waits for `nvidia` to bind it. It prints `<BDF>: still bound to vfio-pci after N ms` and refuses with `<BDF> is bound to vfio-pci, not nvidia`. Use a `driver_override` for the passthrough card instead.
+
+The first step waits for udev's queue before the load, for at most 30 seconds. If the queue is not empty by then, the load goes ahead. It prints `udev has not finished its queue after 30 s; a driver_override rule of yours may not have applied yet`. Without `udevadm` on the host, the line says that `udevadm` was not found.
+After the load the step waits once more, so that what udev does on NVIDIA's module ends before activation starts. Activation then tests each unselected card that `nvidia` bound ([A GPU that NVIDIA's driver cannot start](#a-gpu-that-nvidias-driver-cannot-start)) and prints one line for each in the journal.
+A host that lists `nvidia` in `/etc/modules`, `/etc/modules-load.d/` or the initramfs still loads it before your udev rules. `status` names that file.
+
+A card that none of your methods holds is bound by `nvidia` and not activated.
+`status` lists every NVIDIA GPU that is not selected under `NVIDIA GPUs that are not selected`. It shows the driver, the `driver_override` and what that means. It changes no exit status, and `check` does not list these cards.
+To give a card to `nvidia` again, remove your method for it. See [Cold boot](#cold-boot) for `geforce_sriov.skip`, which skips both units for one boot.
+
+#### A GPU that NVIDIA's driver cannot start
+
+NVIDIA's driver binds every NVIDIA GPU that no other driver holds, including a GPU it cannot run.
+Every program that then opens such a card gets an error, and the kernel log gets an `RmInitAdapter failed` line each time.
+`activate` (at boot, the second command of `geforce-sriov-activate.service`) therefore tests an unselected card that `nvidia` bound, unless one of the cases listed below applies. A run by hand tests it too, once per boot.
+It runs the test after its last load of `nvidia` and before it loads `nvidia_vgpu_vfio`, and unloads `nvidia` no more in that run.
+It opens the card's device node once, as `nvidia-smi` does. It makes the node with `nvidia-modprobe -c MINOR` when the node is missing.
+When the open fails with `Input/output error`, NVIDIA's driver cannot start the card. geforce-sriov then releases the card in four steps:
+
+1. It asks the driver for `unbindLock`. The driver grants it only while no program holds the card.
+2. It writes `geforce-sriov-released` to the card's `driver_override`. No driver is named that, so no driver can bind the card.
+3. It unbinds the card from `nvidia`.
+4. It removes the device node.
+
+The kernel log gets one refusal for the card per boot. The journal of `geforce-sriov-activate.service` gets one line, for example:
+
+```text
+0000:03:00.0 (10de:2d04): NVIDIA's driver cannot start this GPU (open /dev/nvidia1: Input/output error). Released: no driver binds it now (driver_override=geforce-sriov-released)
+```
+
+The step binds no other driver. It does not remove, rescan or reset the card.
+The `driver_override` lasts until the machine is powered off or restarted. The next boot tests the card again.
+The step never changes the exit status of activation and never touches a selected card.
+geforce-sriov leaves a card alone, and prints one line that says why, in these cases:
+
+- another driver holds the card, or the card has a `driver_override`;
+- the card is in the device table, such as a GeForce card you did not select;
+- NVIDIA's driver gives the card no device number;
+- the open works, fails with another error, or does not finish within 30 seconds;
+- `nvidia-modprobe` is missing or does not make the node;
+- the driver does not grant `unbindLock`, because a program holds the card;
+- a write to NVIDIA's driver for this or an earlier card does not finish, or the `driver_override` write or the unbind fails;
+- a VF exists on the host, because an unbind would put the power management of its VFs back to `auto`;
+- `nvidia_vgpu_vfio` is loaded;
+- the card was tested earlier in this boot, as in a second `activate` after one that stopped;
+- the step has used its 120 seconds.
+
+`status` lists a released card as `driver none, driver_override=geforce-sriov-released`. Its following lines explain the release and the undo.
+To ask NVIDIA's driver to bind a released card again until the next boot, run these commands as root:
+
+```bash
+echo > /sys/bus/pci/devices/0000:03:00.0/driver_override
+echo 0000:03:00.0 > /sys/bus/pci/drivers_probe
+```
+
+A card that the driver still cannot start stays without a driver.
+With VFs on the host, run `geforce-sriov check` afterwards. If it says NOT READY, stop the VMs and run `geforce-sriov activate`.
+To keep the card on `nvidia` at every boot, write `nvidia` to its `driver_override` with a udev rule.
+The step then leaves the card alone. Writing another driver name to the `driver_override` replaces `geforce-sriov-released` in the same way.
 
 ### activate
 
@@ -682,13 +754,17 @@ What to expect while `activate` runs on the boot display GPU:
 
 The console that the firmware set up draws into a memory region of the card, one of its BARs. Activation removes and rescans the card, which can move that region.
 `activate` therefore hands the firmware framebuffer to NVIDIA's display modules, `nvidia-modeset` and `nvidia-drm`, before it removes the card. The display modules then drive the console.
-Display output goes only to the boot display GPU, even with `display=on`.
-KMS (kernel mode setting) lets the display driver set the screen mode. It is limited to the boot display GPU even with `display=on`, because a display driver on any other card that serves VFs breaks that card's first VF.
-A host desktop on that GPU is drawn by it when `host_desktop` is on ([Host desktop](#host-desktop)).
+A selected GPU that has the display modules shows the host console on its monitor. The boot display GPU always has them. Another selected GPU has them when the build has them. An Ada card that is not the boot display GPU also needs the VM video memory change in the build. See the `display` key in [configuration](configuration.md).
+KMS (kernel mode setting) lets the display driver set the screen mode. `nvidia-drm` loads with `gpu_allow` naming every selected GPU that has KMS.
+Only the boot display GPU needs the firmware framebuffer handoff above.
+An Ada card that is not the boot display GPU also needs the VM video memory change in the build ([VM video memory](ada.md#vm-video-memory)).
+A host desktop on a card is drawn by it when `host_desktop` is on and X runs on that card ([Host desktop](#host-desktop)).
+Set `display=boot` in the config to give KMS to the boot display GPU only. The other selected cards then serve VMs only.
+Set `display=off` to leave the display modules out.
 
 Activation needs a build of NVIDIA's module with the display modules:
 
-- `install` builds them when a selected GPU is the boot display (`display=auto`).
+- `install` builds them when a selected GPU takes them (`display=auto`). The boot display GPU always does. Any other selected GPU does when you give both inputs below.
 - The build needs the Linux driver package (`--companion-file PATH` or `--companion-source DIR`) and NVIDIA's public kernel module source (`--nvkms-source PATH`).
   The Linux driver package is NVIDIA's Linux driver 580.159.03. Use either the vGPU guest driver from the vGPU software 19.5 download (`NVIDIA-Linux-x86_64-580.159.03-grid.run`) or NVIDIA's GeForce Linux driver (`NVIDIA-Linux-x86_64-580.159.03.run` from `https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/`).
   The kernel module source is NVIDIA's `open-gpu-kernel-modules` tag 580.159.03, `https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz`.
@@ -727,7 +803,7 @@ It is not legal advice.
 
 ## Host desktop
 
-With the display build, the console of the boot display GPU is shown through NVIDIA's display modules ([Boot display GPU](#boot-display-gpu)).
+With the display build, the console of each selected GPU that has KMS is shown through NVIDIA's display modules ([Boot display GPU](#boot-display-gpu)).
 Without NVIDIA's graphics libraries, the CPU draws the desktop of the host.
 The host desktop feature installs those libraries, so the GPU draws it.
 It supports X11 desktops.
@@ -846,7 +922,7 @@ To turn it off, run `sudo ./geforce-sriov install --no-host-cuda`, or set `host_
 | File | Content | When |
 |---|---|---|
 | `geforce-sriov-nvidia.conf` | `options nvidia NVreg_EnableGpuFirmware=0` | The driver step writes it, unless another file there already sets the option to `0`. Not with `--driver=skip` |
-| `geforce-sriov-autoload.conf` | Three `alias pci:v000010DE... off` lines for NVIDIA's PCI class aliases | While a GPU is selected. The aliases match by PCI class, so they cover every NVIDIA GPU on the host, not only the selected ones. They keep udev from loading NVIDIA's modules. `geforce-sriov-livepatch.service` loads `nvidia`, and `activate` loads the other modules |
+| `geforce-sriov-autoload.conf` | Three `alias pci:v000010DE... off` lines for NVIDIA's PCI class aliases | While a GPU is selected. The aliases match by PCI class, so they cover every NVIDIA GPU on the host, not only the selected ones. They keep udev from loading NVIDIA's modules. The first step of `geforce-sriov-activate.service` loads `nvidia` after udev's rules have applied. `activate` loads the other modules |
 | `geforce-sriov-uvm.conf` | `options nvidia_uvm uvm_disable_hmm=1` | Only with `host_cuda=on` ([Host CUDA](#host-cuda)). `activate` requires this setting of `nvidia_uvm` and stops when the module is loaded with another value |
 
 ## Upgrading

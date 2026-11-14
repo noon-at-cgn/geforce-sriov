@@ -14,7 +14,9 @@
 # identity=on and identity_force_host=on. This example lists every key. It
 # selects no GPU, so nothing would be activated with it as is.
 #
-# d3cold: consent to keep the selected laptop GPUs powered (off). Only
+# d3cold: `off` records your consent that activate keeps the selected laptop
+# GPUs powered. This turns off D3cold, the state in which a laptop cuts power
+# to an idle GPU. `off` is the only value. Only
 # `geforce-sriov install --disable-d3cold` writes it, and only for laptop GPUs.
 # Without it, activate refuses the run when a laptop GPU is selected. Absent:
 # no consent.
@@ -22,33 +24,37 @@
 #
 # bdfs: the GPUs (physical function, canonical lowercase dddd:bb:ss.0, comma
 # separated, at most 32) that activate and the hook act on.
-# Absent: no GPU is selected and the boot unit does nothing.
+# Absent: no GPU is selected, and the boot services activate nothing.
 #bdfs=0000:01:00.0
 #
-# ari: enable ARI in software (on|off). This presents the hidden ARI capability
-# and turns on ARI forwarding in the bridge above. ARI decoding in the GPU
-# hardware does not work, so vfs defaults to 4 either way. Set off if VF enable
-# or VM start does not complete. pci=noari on the kernel command line also
-# forces it off.
+# ari: enable ARI in software (on|off). ARI is a PCIe feature that lets a
+# device have more than 8 functions. This presents the card's hidden ARI
+# capability and turns on ARI forwarding in the bridge above. ARI decoding in
+# the GPU hardware does not work, so vfs defaults to 4 either way. Set off if
+# VF enable or VM start does not complete. pci=noari on the kernel command line
+# also forces it off.
 ari=on
 #
-# display: NVIDIA's display modules, which take over the console of the boot
-# display GPU (auto|on|off). With auto and with on, they are built only when a
-# selected GPU is the boot display GPU. off never builds them. auto is what an
-# absent key means.
+# display: NVIDIA's display modules, which drive the console of every selected
+# GPU (auto|on|boot|off). With auto and with on, they are built when a selected
+# GPU takes them: the boot display GPU always does, and another selected GPU
+# does when the Linux driver package and the public kernel module source are
+# given. boot gives the display modules to the boot display GPU only; the other
+# selected cards serve VMs only. off never builds them. auto is what an absent
+# key means.
 display=auto
 #
 # host_cuda: build nvidia-uvm and install NVIDIA's CUDA library, so that CUDA
-# programs can run on the host (on|off). Needs NVIDIA's second driver package.
+# programs can run on the host (on|off). Needs the Linux driver package.
 # A CUDA library that another package owns is left alone. Off unless set.
 host_cuda=off
 #
 # host_desktop: NVIDIA's graphics libraries for the host desktop (auto|on|off).
-# They come from NVIDIA's second driver package. They go into geforce-sriov's own
+# They come from the Linux driver package. They go into geforce-sriov's own
 # folders (<prefix>/lib/geforce-sriov/gl and .../xorg), with a few small files
 # that say where they are. No file of your distribution is replaced.
 # auto is what an absent key means. It is on when the display build is in effect
-# and the second package is given. The boot display GPU then draws the desktop.
+# and the Linux driver package is given. The boot display GPU then draws the desktop.
 # The libraries are not installed when another NVIDIA graphics driver owns
 # those files. off removes them again.
 # To change it, run `geforce-sriov install` from the source folder
@@ -56,33 +62,36 @@ host_cuda=off
 # display server afterwards.
 host_desktop=auto
 #
-# msix: unhide MSI-X (on|off).
+# msix: reveal the card's hidden MSI-X capability, the interrupt mechanism of
+# the card (on|off).
 msix=on
 #
 # vfs: VFs presented per selected GPU. The range is 1 up to the card's hardware
 # default (`geforce-sriov status` shows it). On an Ada card that reports 1, the
-# upper limit is 4 (set by the VF-count revision of the host module). Default 4.
-# ARI decoding in the GPU does not work, so with more than 4 VFs the module
-# refuses to load if the card's VF layout check fails.
+# upper limit is 4: geforce-sriov's change to NVIDIA's nvidia.ko makes the
+# driver accept 4. Default 4. The card does not answer functions above 7, so
+# with more than 4 VFs the module refuses to load when a VF would not land on a
+# free function.
 # `install --vfs N` writes it. It takes effect at the next boot.
 #vfs=4
 #
-# identity: let the hook in nvidia-vgpud present each selected GPU as its vGPU
-# target (on|off). The target is the RTX A6000 for Ampere and the RTX 6000 Ada
-# for Ada. Off here; install --device turns it on.
-# The hook ties each reply to one GPU by its PCI address, using read-only driver
+# identity: let the hook in nvidia-vgpud report each selected GPU under the
+# device ID of a professional card, the RTX A6000 for Ampere and the RTX 6000
+# Ada for Ada (on|off). Off here; install --device turns it on.
+# The hook asks the driver which GPU each answer belongs to, using read-only
 # queries. Host driver 580.159.01 is the confirmed version. Other host driver
 # versions are not guaranteed to work.
-# If the queries fail, the PCI-info reply falls back to the device ID only when
-# a fresh scan finds every NVIDIA GPU with that ID selected. Otherwise the reply
-# stays unchanged. `geforce-sriov status` and
-# `install --dry-run` report such a shared ID.
+# If the queries fail, the hook changes the device ID only when every NVIDIA
+# GPU with that ID is selected. Otherwise the reply stays unchanged.
+# `geforce-sriov status` and `install --dry-run` report a device ID that selected
+# and unselected GPUs share.
 identity=off
 #
-# identity_force_host: the hook also answers the virtualization-mode query with
-# HOST (on|off). It does this only for a reply that the driver queries tie to a
-# selected GPU. Any other reply stays unchanged, because HOST never uses the
-# device-ID fallback. Off unless set; install --device turns it on.
+# identity_force_host: the hook also tells nvidia-vgpud that a selected GPU is
+# a vGPU host (the driver's virtualization-mode answer becomes HOST) (on|off).
+# It does this only for a reply that the driver queries tie to a selected GPU.
+# Any other reply stays unchanged, because HOST never uses the device-ID
+# fallback. Off unless set; install --device turns it on.
 identity_force_host=off
 #
 # sriov_manage: the NVIDIA tool that `geforce-sriov activate` uses to enable the VFs

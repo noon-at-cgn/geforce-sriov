@@ -1,0 +1,140 @@
++ mkdir -p DRYDIR/smoke040
+=== smoke040 tag=smoke040 placement=top phases=boot,display,place,managed,load,full,ampere,win135,tail dry=1
+=== layout: Ada=0000:03:00.0 Ampere=0000:04:00.0 boot display=0000:04:00.0 (ampere); NVIDIA KMS expected: Ada=0 Ampere=1
+dry run: nothing below is executed; 'CHECK name :: condition' lines show what a real run tests
+=== boot: version, format stamp, build record, status and check lines
+CHECK version is 0.4.0 :: geforce-sriov --version | grep -q "geforce-sriov $EXPECT_VER"
+CHECK format stamp names 0.4.0 :: [ "$(cat /var/lib/geforce-sriov/format 2>/dev/null)" = "$EXPECT_VER" ]
+CHECK record names fb_placement=top :: grep -q "^fb_placement=$PLACEMENT$" $REC
+CHECK record: no fb_owner key (slot reservation removed in 0.4.0) :: ! grep -q "^fb_owner" $REC
+CHECK record: no test_only key :: ! grep -q "^test_only=" $REC
+CHECK record: guest framebuffer cap built (guest_fb=1) :: grep -q "^guest_fb=1$" $REC
+CHECK no /proc/driver/nvidia/geforce-sriov-fb (owner gone) :: [ ! -e $P ]
+CHECK guest-fb proc file present, abi 1 :: grep -q "^abi 1" $GFB
+CHECK status: host programs placed from the top :: geforce-sriov status | grep -q "host programs. video memory: placed from the top of the card down"
+CHECK check: same line :: geforce-sriov check 2>&1 | grep -q "host programs. video memory: placed from the top of the card down"
+CHECK check is ready :: geforce-sriov check >/dev/null 2>&1
+CHECK status exits 0 :: geforce-sriov status >/dev/null 2>&1
+CHECK 4 VFs on the Ada card :: [ "$(ls -d /sys/bus/pci/devices/$B/virtfn* | wc -l)" = 4 ]
+CHECK 4 VFs on the Ampere card :: [ "$(ls -d /sys/bus/pci/devices/$A/virtfn* | wc -l)" = 4 ]
++ nvidia-smi -i 0000:03:00.0 --query-gpu=memory.used,memory.free --format=csv,noheader
+=== display: console/desktop on the boot display card 0000:04:00.0 (ampere); NVIDIA KMS expected on 0000:04:00.0 only (display=auto)
+CHECK boot_vga is 1 on 0000:04:00.0 :: [ "$(cat /sys/bus/pci/devices/$BOOT/boot_vga)" = 1 ]
+CHECK display: NVIDIA DRM cards on 0000:03:00.0 (Ada): expected 0 :: [ "$(drmcount ${B#0000:})" = $EXP_B ]
+CHECK display: NVIDIA DRM cards on 0000:04:00.0 (Ampere): expected 1 :: [ "$(drmcount ${A#0000:})" = $EXP_A ]
+CHECK display: nvidia_drm modeset is Y :: grep -q "^Y" /sys/module/nvidia_drm/parameters/modeset
+CHECK display: display manager is active :: systemctl is-active lightdm >/dev/null 2>&1 || systemctl is-active display-manager >/dev/null 2>&1
++ vmcheck: VMs 134 136 137 138 135 must map a VF of the Ada card 0000:03:00.0; VMs 144 145 146 147 must map a VF of the Ampere card 0000:04:00.0; otherwise REFUSE, exit 3, no VM started
++ qm status 134
++ qm status 136
++ qm status 137
++ qm status 138
++ qm status 144
++ qm status 145
++ qm status 146
++ qm status 147
++ for v in 134 136 137 138 144 145 146 147: start the VM if it is not running (up)
+CHECK VM134 running :: qm status $v | grep -q running
+CHECK VM136 running :: qm status $v | grep -q running
+CHECK VM137 running :: qm status $v | grep -q running
+CHECK VM138 running :: qm status $v | grep -q running
+CHECK VM144 running :: qm status $v | grep -q running
+CHECK VM145 running :: qm status $v | grep -q running
+CHECK VM146 running :: qm status $v | grep -q running
+CHECK VM147 running :: qm status $v | grep -q running
+CHECK VM134 guest CUDA :: cuda $v
+CHECK VM136 guest CUDA :: cuda $v
+CHECK VM137 guest CUDA :: cuda $v
+CHECK VM138 guest CUDA :: cuda $v
+CHECK VM144 guest CUDA :: cuda $v
+CHECK VM146 guest CUDA :: cuda $v
+CHECK VM147 guest CUDA :: cuda $v
+CHECK VM145 (Windows) guest agent :: for i in $(seq 1 36); do qm guest cmd $AMP_WIN ping >/dev/null 2>&1 && break; sleep 5; done; qm guest cmd $AMP_WIN ping >/dev/null 2>&1
+=== place: E1 placement of host allocations (all four Ada VMs stopped)
++ qm shutdown 134 --timeout 180 --forceStop 1
++ qm shutdown 136 --timeout 180 --forceStop 1
++ qm shutdown 137 --timeout 180 --forceStop 1
++ qm shutdown 138 --timeout 180 --forceStop 1
++ hold DRYDIR/smoke040/e1-1.out 0x10000000
++ hold DRYDIR/smoke040/e1-2.out 0x10000000
+CHECK E1: first allocation lands above the four slot ranges (>= 0x1f8000000) :: [ -n "$OFF1" ] && [ $((OFF1)) -ge $((SLOTTOP)) ]
+CHECK E1: second allocation lands directly below the first (top-down) :: [ $((OFF2 + 0x10000000)) -eq $((OFF1)) ]
+CHECK E1: slot 0 (0x0) is free of host memory :: $T collide --bdf $B --offset ${SLOT[$i]} --size $SLOTSZ --align 0x2000000 --expect ok >/dev/null 2>&1
+CHECK E1: slot 1 (0x7e000000) is free of host memory :: $T collide --bdf $B --offset ${SLOT[$i]} --size $SLOTSZ --align 0x2000000 --expect ok >/dev/null 2>&1
+CHECK E1: slot 2 (0xfc000000) is free of host memory :: $T collide --bdf $B --offset ${SLOT[$i]} --size $SLOTSZ --align 0x2000000 --expect ok >/dev/null 2>&1
+CHECK E1: slot 3 (0x17a000000) is free of host memory :: $T collide --bdf $B --offset ${SLOT[$i]} --size $SLOTSZ --align 0x2000000 --expect ok >/dev/null 2>&1
++ release the two E1 allocations (kill the hold processes)
++ qm start 134
++ qm start 136
++ qm start 137
++ qm start 138
+CHECK E1: VM134 starts after the host allocations are freed :: qm status $v | grep -q running
+CHECK E1: VM136 starts after the host allocations are freed :: qm status $v | grep -q running
+CHECK E1: VM137 starts after the host allocations are freed :: qm status $v | grep -q running
+CHECK E1: VM138 starts after the host allocations are freed :: qm status $v | grep -q running
+=== managed: CUDA managed memory (512 MiB) resident on the Ada card while VM134 starts
++ qm shutdown 134; python3 /root/geforce-sriov-win/v040/final/managed-probe.py --bdf 0000:03:00.0 --mib 512 > DRYDIR/smoke040/managed.out &  (cuMemAllocManaged, CPU write, GPU kernel, prefetch, hold)
++ nvidia-smi memory.used and per-process used_memory before/after; collide on slot 0; qm start 134; guest CUDA; SIGTERM; VERIFY ok
+CHECK managed: the probe reached RESIDENT on the Ada card (kernel ok, last prefetch location = the card's ordinal) :: grep -q "^KERNEL ok" $E/managed.out && awk "/^RESIDENT/ {exit !(\$2 == \$3)}" $E/managed.out
+CHECK managed: the Ada card's memory.used grew by at least 480 MiB (the pages are in video memory) :: [ $((MEM1 - MEM0)) -ge 480 ]
+CHECK managed: the probe process is listed on the Ada card with at least 480 MiB (nvidia-smi per-process) :: awk -F"[ ,]+" -v p=$MPID "\$1 == p && \$(NF-1)+0 >= 480 {f=1} END {exit !f}" $E/managed-apps.txt
+CHECK managed: slot 0 (0x0, VM134's range) is still free of host memory with the managed pages resident :: $T collide --bdf $B --offset ${SLOT[0]} --size $SLOTSZ --align 0x2000000 --expect ok >/dev/null 2>&1
+CHECK managed: VM134 starts while the managed memory is resident :: qm status $ADA_FIRST | grep -q running
+CHECK managed: VM134 guest CUDA passes :: cuda $ADA_FIRST
+CHECK managed: the probe is still alive and still resident after the VM start :: kill -0 $MPID 2>/dev/null && tail -1 $E/managed.out | grep -qE "^(STILL|RESIDENT) "
+CHECK managed: the data survived the VM start (VERIFY ok, exit 0) :: grep -q "^VERIFY ok" $E/managed.out && [ "$MRC" = 0 ]
+CHECK managed: no stop condition :: [ -z "$(kerr)" ]
+managed: where the allocation lands: the CUDA API shows no offset; evidence is the memory.used and per-process delta above, and the free slot ranges (placement top keeps host memory above the VF ranges)
+=== load: per-process video memory of the Ada VMs, host CUDA from the top, 5 restarts of each Ada VM
++ nvidia-smi -i 0000:03:00.0 > DRYDIR/smoke040/nvidia-smi-vms-up.txt; nvidia-smi vgpu -i 0000:03:00.0 -q
+CHECK nvidia-smi: Ada card memory.used with 4 VMs up is non-zero :: [ "$(nvidia-smi -i $B --query-gpu=memory.used --format=csv,noheader,nounits)" -gt 0 ]
++ python3 /root/geforce-sriov-win/v040/cuda-live.py >/dev/null &
+CHECK host CUDA (cuda-live.py) holds a context on the Ada card :: kill -0 $LIVEPID 2>/dev/null && nvidia-smi -i $B --query-compute-apps=pid --format=csv,noheader | grep -q .
++ fill: 14 x 256 MiB host allocations (flags 0x19100) on 0000:03:00.0, one at a time
+CHECK load: every fill allocation above the slots (lowest offset >= 0x1f8000000) :: [ -n "$LOWEST" ] && [ $((LOWEST)) -ge $((SLOTTOP)) ]
+=== 5 restarts of each Ada VM under that load
++ for c in 1..5: for v in 134 136 137 138: down $v; up $v; check guest CUDA after the restart
+CHECK load: VM134 running after 5 restarts under host load :: qm status $v | grep -q running
+CHECK load: VM136 running after 5 restarts under host load :: qm status $v | grep -q running
+CHECK load: VM137 running after 5 restarts under host load :: qm status $v | grep -q running
+CHECK load: VM138 running after 5 restarts under host load :: qm status $v | grep -q running
+CHECK load: no stop condition during the loop :: [ -z "$(kerr)" ]
++ release the fill; stop cuda-live.py
+=== full: the host fills the card with VM138 stopped; with placement=top the fill reaches the stopped VM's range last
++ qm shutdown 138 --timeout 180 --forceStop 1
++ fill: up to 40 x 256 MiB host allocations until one is refused
+CHECK full: the fill reached into the highest stopped VM range (< 0x1f8000000) :: [ -n "$LOWEST" ] && [ $((LOWEST)) -lt $((SLOTTOP)) ]
++ qm start 138
+CHECK full: VM138 fails to start while the host holds its range :: ! qm status $ADA_LAST | grep -q running
+CHECK full: the failure names the reason (qm start output or vGPU log) :: grep -qiE "Failed to alloc|0x51|0x1a|plugin registration|out of memory|vgpu|error getting device" $E/start-$ADA_LAST.out || journalctl -b --since -2min --no-pager | grep -qiE "Failed to alloc guest FB|0x51|start failed"
++ release the fill
++ qm start 138
+CHECK full: after the fill is freed VM138 starts :: qm status $ADA_LAST | grep -q running
+CHECK full: VM138 guest CUDA :: cuda $ADA_LAST
+CHECK full: no stop condition :: [ -z "$(kerr)" ]
+=== ampere: regression (VMs, guest CUDA, host CUDA, display)
+CHECK Ampere VM144 running :: qm status $v | grep -q running
+CHECK Ampere VM145 running :: qm status $v | grep -q running
+CHECK Ampere VM146 running :: qm status $v | grep -q running
+CHECK Ampere VM147 running :: qm status $v | grep -q running
+CHECK Ampere VM144 guest CUDA :: cuda $v
+CHECK Ampere VM146 guest CUDA :: cuda $v
+CHECK Ampere VM147 guest CUDA :: cuda $v
+CHECK Ampere VM145 (Windows 582.53) guest agent :: qm guest cmd $AMP_WIN ping >/dev/null 2>&1
+CHECK Ampere VM145 guest nvidia-smi names an NVIDIA vGPU :: grep -q "NVIDIA" $E/win$AMP_WIN-smi.txt
+CHECK host CUDA on both cards (ptx-probe, clean env) :: env -i PATH=/usr/bin:/bin python3 $PTX 2>&1 | tail -3 | grep -qi "ok\|pass"
+CHECK display: NVIDIA DRM cards on 0000:04:00.0: expected 1 :: [ "$(drmcount ${A#0000:})" = $EXP_A ]
+CHECK display: NVIDIA DRM cards on 0000:03:00.0: expected 0 :: [ "$(drmcount ${B#0000:})" = $EXP_B ]
+CHECK display: display manager is active :: systemctl is-active lightdm >/dev/null 2>&1 || systemctl is-active display-manager >/dev/null 2>&1
++ nvidia-smi -i 0000:04:00.0
+=== win135: Windows 11 (539.19) on the Ada card's VF .7: VM138 stops first, they share the VF
++ qm shutdown 138; qm start 135; wait for the agent; qm guest exec 135 nvidia-smi; qm shutdown 135; qm start 138
+CHECK VM135 (Windows, Ada) running :: qm status $ADA_WIN | grep -q running
+CHECK VM135 guest agent answers :: for i in $(seq 1 36); do qm guest cmd $ADA_WIN ping >/dev/null 2>&1 && break; sleep 5; done; qm guest cmd $ADA_WIN ping >/dev/null 2>&1
+CHECK VM135 guest driver shows the Ada vGPU :: grep -q "RTX6000-Ada" $E/win$ADA_WIN-smi.txt
+CHECK VM138 runs again after VM135 stopped :: qm status $ADA_LAST | grep -q running
+CHECK win135: no stop condition :: [ -z "$(kerr)" ]
+=== tail
+CHECK no stop condition since the script began :: [ -z "$(kerr)" ]
+CHECK no /proc/driver/nvidia/geforce-sriov-fb (owner gone) :: [ ! -e $P ]
+=== smoke040: 0 failure(s)

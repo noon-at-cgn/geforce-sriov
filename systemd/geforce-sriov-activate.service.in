@@ -2,10 +2,13 @@
 # geforce-sriov @VERSION@: run the complete activation before display and VM autostart.
 # The transaction starts NVIDIA's daemons itself; it must not be ordered after them.
 # Boot activation never prompts or stops a running display manager.
+# The pre-step loads NVIDIA's nvidia module once udev has finished its queue, so a card you gave
+# another driver is not taken by it. The display manager waits for the pre-step and the activation.
 # Add geforce_sriov.skip to the kernel command line to skip this boot.
 [Unit]
 Description=geforce-sriov: activate selected GPUs
 After=geforce-sriov-livepatch.service
+# The default dependencies also order it after sysinit.target. That is after systemd-modules-load and udev's trigger.
 Before=display-manager.service libvirt-guests.service pve-guests.service
 # nvidia-persistenced opens every GPU. It must not hold one while the card is removed and rescanned.
 Before=nvidia-persistenced.service
@@ -15,17 +18,20 @@ RequiresMountsFor=/var/lib/geforce-sriov @BINDIR@
 
 [Service]
 Type=oneshot
+# The leading - keeps a failed driver load from stopping activation, which then says what is wrong.
+ExecStartPre=-@BINDIR@/geforce-sriov livepatch --boot --load-driver
 ExecStart=@BINDIR@/geforce-sriov activate --boot
 RemainAfterExit=yes
-# TimeoutStartSec is written by install: an upper bound of activation, the sum of its own limits
-# (every wait, write and process at its limit, per selected card and VF; at least 900 s). The
+# TimeoutStartSec is written by install: an upper bound of the start, the sum of the limits of the first
+# step (two udev waits, the livepatch wait, two module loads and the release of unselected GPUs) and of activation (every wait, write and
+# process at its limit, per selected card and VF; at least 900 s). The
 # waiting loops end on elapsed time, so activation ends through its own limits before systemd does,
 # even on a systemd that ignores the extension below (the manual names only Type=notify; measured on
 # systemd 257.13 only). Normal activation takes seconds per card; the value matters only in a real
 # hang. The selection and the VF count change through install, which rewrites this unit.
 # Before each step that can wait, the CLI also sends EXTEND_TIMEOUT_USEC (that step's own limit
 # plus a margin) to the notify socket.
-NotifyAccess=main
+NotifyAccess=exec
 TimeoutStartSec=@START_TIMEOUT@
 StandardOutput=journal+console
 StandardError=journal+console

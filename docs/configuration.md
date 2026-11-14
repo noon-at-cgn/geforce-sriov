@@ -13,7 +13,7 @@ The full reference follows below.
   Power the machine fully off and on afterwards.
 - vGPU type: set `type_ada=N` or `type_ampere=N` in the config to choose the size of each vGPU.
   Stop the VMs, write `0` to `nvidia/current_vgpu_type` of every VF of the card, then run `sudo geforce-sriov activate`. No power cycle is needed ([Choosing a vGPU type](#choosing-a-vgpu-type)).
-- Display on or off for the boot display GPU: run `sudo ./geforce-sriov install --display` or `--no-display` from the source folder.
+- Display on or off: run `sudo ./geforce-sriov install --display` or `--no-display` from the source folder.
   `--display` needs the Linux driver package and NVIDIA's public kernel module source ([What to download](installation.md#what-to-download)).
 - Host CUDA on or off: run `sudo ./geforce-sriov install --host-cuda` or `--no-host-cuda` from the source folder.
   `--host-cuda` needs the Linux driver package ([What to download](installation.md#what-to-download)).
@@ -46,7 +46,7 @@ The configuration file holds your card selection, feature switches, VF count and
 | `type_ada` | vGPU type ID | `942` | The vGPU type that `activate` sets on each VF of an Ada card and `check` expects ([Choosing a vGPU type](#choosing-a-vgpu-type)) |
 | `type_ampere` | vGPU type ID | `525` | The same for an Ampere card |
 | `d3cold` | `off` | none (no consent) | Records consent to keep the selected laptop GPUs powered. Without it, `activate` refuses the run if a laptop GPU is selected. `install --disable-d3cold` writes the key. Any value but `off` is refused ([Consent](laptops.md#consent)) |
-| `display` | `auto`/`on`/`off` | `auto` | Build NVIDIA's display modules and hand the boot display GPU's console to them. With `auto` or `on`, they are built only when a selected GPU is the boot display. `off` never builds them ([Boot display GPU](installation.md#boot-display-gpu)) |
+| `display` | `auto`/`on`/`boot`/`off` | `auto` | Build NVIDIA's display modules and give them to every selected GPU that has them, so a monitor on it shows the host console. With `auto` or `on`, they are built when a selected GPU takes them. The boot display GPU always does. Any other selected GPU does when both build inputs are given. An Ada card that is not the boot display GPU also needs the VM video memory change in the build. `boot` gives KMS to the boot display GPU only, and the other selected cards serve VMs only. `off` never builds them ([Boot display GPU](installation.md#boot-display-gpu)) |
 | `host_cuda` | `on`/`off` | `off` | Build `nvidia-uvm` and install NVIDIA's CUDA library, so that CUDA programs can run on the host. Needs the Linux driver package ([Host CUDA](installation.md#host-cuda)) |
 | `host_desktop` | `auto`/`on`/`off` | `auto` | Install NVIDIA's graphics libraries for the host desktop. `auto` turns them on when the display build is in effect and the Linux driver package was given ([Host desktop](installation.md#host-desktop)) |
 
@@ -100,13 +100,13 @@ To change a card's vGPU size:
    Never write a type while `nvidia-vgpu-mgr` is stopped.
 3. Set `type_ada` or `type_ampere` in the file and run `activate`.
 
-On an Ada card whose loaded module lacks the VM video memory change ([VM video memory](ada.md#vm-video-memory)), each VF has a fixed framebuffer slot. The slot of a later VF ends higher in the card's memory.
+On an Ada card whose loaded module lacks the VM video memory change ([VM video memory](ada.md#vm-video-memory)), each VF has a fixed range of video memory. The range of a later VF ends higher in the card's memory.
 With a large type, the last VFs may not start a VM even when the card is otherwise empty and the type is set.
-With the VM video memory change there are no slots, because a VM takes free video memory when it starts. `activate` prints no line for such a card.
+With the VM video memory change there are no fixed ranges, because a VM takes free video memory when it starts. `activate` prints no line for such a card.
 After setting the types, `activate` prints one line for a card without the change, for example:
 
 ```text
-0000:01:00.0: with type 946 the VFs 0000:01:00.5, 0000:01:00.6 and 0000:01:00.7 may not start: their framebuffer slots end near the top of the card's 16376 MiB. Put VMs on the lower VFs, or choose a smaller type.
+0000:01:00.0: with type 946 the VFs 0000:01:00.5, 0000:01:00.6 and 0000:01:00.7 may not start: their fixed ranges of video memory end near the top of the card's 16376 MiB. Put VMs on the lower VFs, or choose a smaller type.
 ```
 
 This is an advisory message: `activate` still sets the type and its exit status does not change.
@@ -127,7 +127,7 @@ Ampere cards get no such line.
 | [`geforce-sriov check`](#check) | no | Check readiness before VM start |
 | [`geforce-sriov uninstall`](#uninstall) | yes | Remove files and restore stock files |
 | [`geforce-sriov rebuild`](#rebuild) | yes | Build NVIDIA's modules again for a kernel |
-| `geforce-sriov --version`, `version`, `help` | no | Print the version, such as `geforce-sriov 0.4.0`, or the usage text |
+| `geforce-sriov --version`, `version`, `help` | no | Print the version, such as `geforce-sriov 0.4.1`, or the usage text |
 | [`geforce-sriov-patch`](#driver-patcher) | no | Inspect, apply or revert driver patches |
 
 Exit codes:
@@ -147,7 +147,7 @@ Exit codes:
 
 ### status
 
-`geforce-sriov status` shows each selected card's state and next step, then the host checks.
+`geforce-sriov status` shows each selected card's state and next step. It then shows the NVIDIA GPUs that are not selected, when the host has any, and the host checks.
 It exits 0 once every selected card has every VF ready and no host check fails, and 1 otherwise.
 
 Options:
@@ -212,6 +212,7 @@ See [`status` and `install --dry-run`](technical-reference.md#status-and-install
   `status` exits 1 and ends with `next: run the command above, then power the machine off and on`.
   When no identity is recorded yet, it prints `selection: the card identities are not recorded yet, ...` once, with the command that records them.
 - `VM video memory:` is printed inside the block of each selected Ada card when VFs are enabled. It says whether a VM takes its video memory from free memory or from a fixed slot. Each VF's `nvidia/placement_id` file shows this: NVIDIA's driver writes the fixed range there, or `Not Applicable` ([VM video memory](ada.md#vm-video-memory)).
+- `NVIDIA GPUs that are not selected:` is printed after the selected cards. It appears only when the host has an NVIDIA GPU outside `bdfs`. The GPU is of the VGA or 3D class, or of the bridge class that NVIDIA's driver also binds. Each card has one line with its address, ID, driver, `driver_override`, and `boot display` when it is the boot display GPU. A second line says what that means: bound by NVIDIA's driver and not activated, kept by another driver, no driver bound, or released by geforce-sriov because NVIDIA's driver cannot start it. A released card shows `driver_override=geforce-sriov-released`, and the following lines give the commands that undo it. This section changes no exit status, and `check` does not list these cards. See [NVIDIA GPUs that are not selected](installation.md#nvidia-gpus-that-are-not-selected).
 - `host desktop:` lines: the requested and effective state, and whether the driver build accepts the installed libraries ([Host desktop](installation.md#host-desktop)).
   `host CUDA libraries:` reports the same for host CUDA ([Host CUDA](installation.md#host-cuda)).
 - `kernel hook: the automatic build for kernel ... failed (...); run ...`: the build that runs when a kernel is installed failed.
@@ -315,7 +316,7 @@ Options:
 
 It refuses `--prefix`, `--destdir` (or `DESTDIR`), `--source`, `--vfs`, `--ari` and `--msix` (exit 2).
 
-It prints `geforce-sriov 0.4.0: checks before install (sysfs root /sys)`, then one `[OK]`, `[INFO]`, `[WARN]` or `[FAIL]` line per check, and `N failure(s), N warning(s)`.
+It prints `geforce-sriov 0.4.1: checks before install (sysfs root /sys)`, then one `[OK]`, `[INFO]`, `[WARN]` or `[FAIL]` line per check, and `N failure(s), N warning(s)`.
 It exits 0, or 3 when a line is a `[FAIL]`.
 
 The checks cover:
@@ -390,8 +391,8 @@ See [Cold boot](installation.md#cold-boot) and [Combining generations](devices.m
 
 ### livepatch
 
-`geforce-sriov livepatch --boot [--load-driver] [--config FILE]` loads the livepatch module and, with `--load-driver`, then loads `nvidia`.
-The livepatch boot unit runs it.
+`geforce-sriov livepatch --boot [--load-driver] [--config FILE]` loads the livepatch module.
+With `--load-driver` it then waits for udev's queue (`udevadm settle --timeout=30`), loads `nvidia`, and waits once more. The livepatch boot unit runs it without `--load-driver`. The first step of the activate unit runs it with `--load-driver`.
 It removes and rescans no card.
 It refuses when the loaded module has other parameters or when no GPU is selected. It also refuses when the activation lock is from this boot or has an unknown boot ID.
 
@@ -513,14 +514,14 @@ The boot path depends on the config:
 ```mermaid
 flowchart TD
     config{"Config exists<br/>and no skip flag?"} -->|No| skip["Skip both package units"]
-    config -->|Yes| lp["livepatch --boot --load-driver<br/>before udev"]
-    lp --> activate["activate --boot<br/>before display manager and guests"]
+    config -->|Yes| lp["livepatch --boot<br/>before udev"]
+    lp --> activate["livepatch --boot --load-driver, then activate --boot<br/>before display manager and guests"]
 ```
 
 | Unit | When it runs | What it does |
 |---|---|---|
-| `geforce-sriov-livepatch.service` | Once per boot, before `systemd-udevd`, module autoloading and NVIDIA's services | Runs `geforce-sriov livepatch --boot --load-driver`: loads the livepatch, waits until it is enabled, then loads `nvidia`. It removes and rescans nothing. Skipped when the config is missing or the kernel command line has `geforce_sriov.skip` |
-| `geforce-sriov-activate.service` | Once per boot, after `geforce-sriov-livepatch.service` and before the display manager, NVIDIA's persistence daemon and VM autostart | Runs `geforce-sriov activate --boot`: the whole activation transaction ([What activation does](technical-reference.md#what-activation-does)). Skipped in the same cases as the livepatch unit |
+| `geforce-sriov-livepatch.service` | Once per boot, before `systemd-udevd`, module autoloading and NVIDIA's services | Runs `geforce-sriov livepatch --boot`: loads the livepatch and waits until it is enabled. It removes and rescans nothing. Skipped when the config is missing or the kernel command line has `geforce_sriov.skip` |
+| `geforce-sriov-activate.service` | Once per boot, after `geforce-sriov-livepatch.service` and before the display manager, NVIDIA's persistence daemon and VM autostart | First runs `geforce-sriov livepatch --boot --load-driver`. That step waits for udev's queue for at most 30 seconds and loads `nvidia`, so a driver you gave another card is already in place. A failure of that step does not stop the unit. Then it runs `geforce-sriov activate --boot`: the whole activation transaction ([What activation does](technical-reference.md#what-activation-does)). After its last load of `nvidia` it releases each unselected GPU that NVIDIA's driver binds and cannot start ([A GPU that NVIDIA's driver cannot start](installation.md#a-gpu-that-nvidias-driver-cannot-start)). Skipped in the same cases as the livepatch unit |
 | `libvirt-guests.service.d` and `pve-guests.service.d` drop-ins | When those units start | Order guest autostart after the activate unit and run `geforce-sriov check` first. They do not require the activate unit. `check` cannot fail them, because it only logs which VFs are not ready, so a failed activation never keeps guests from starting |
 | `nvidia-vgpud.service.d/geforce-sriov.conf` (drop-in) | Whenever `nvidia-vgpud` starts | Loads the hook into `nvidia-vgpud` only, through `LD_PRELOAD`, and runs `geforce-sriov check --daemon-ready` first |
 

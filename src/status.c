@@ -131,6 +131,22 @@ static unsigned int status_hook_failures(const char *dir, int live, const struct
 	return n;
 }
 
+/*
+ * The NVIDIA GPUs the configuration does not list, with the driver each has and what that means.
+ * Printed only when the host has one; it changes no exit status. check lists selected cards only.
+ */
+static void status_unselected(const char *sysroot, const struct gs_addr *sel, unsigned int nsel)
+{
+	struct gs_unselected u[GS_UNSELECTED_MAX];
+	unsigned int n = gs_unselected_scan(sysroot, sel, nsel, u, GS_UNSELECTED_MAX);
+
+	if (n == 0)
+		return;
+	printf("\nNVIDIA GPUs that are not selected:\n");
+	for (unsigned int i = 0; i < n; i++)
+		gs_unselected_print(&u[i], 0);
+}
+
 int gs_cmd_status(const struct gs_diag_opts *o)
 {
 	const char *sysroot = o->sysroot ? o->sysroot : GS_LIVE_SYSFS;
@@ -278,6 +294,9 @@ int gs_cmd_status(const struct gs_diag_opts *o)
 	{
 		int boot_display = 0, want_display, console = 0;
 		char boot_bdf[GS_BDF_STR_SIZE] = "";
+		struct gs_kms_build kb;
+
+		gs_kms_build_read(o->build ? o->build : live ? &gs_build_live : NULL, &kb);
 
 		for (i = 0; i < n; i++) {
 			struct gs_card c;
@@ -288,14 +307,14 @@ int gs_cmd_status(const struct gs_diag_opts *o)
 				if (!boot_bdf[0])
 					gs_copy(boot_bdf, sizeof(boot_bdf), devs[i].str);
 			}
-			console |= c.present && gs_display_kms(&cfg, &c);
+			console |= c.present && gs_display_kms(&cfg, &c, (o->build || live) ? &kb : NULL);
 		}
 		/* want_display is what the build must provide; console is what activation sets up. */
-		want_display = cfg.display != GS_DISPLAY_OFF && boot_display;
+		want_display = cfg.display != GS_DISPLAY_OFF && (boot_display || console);
 		printf("display: requested=%s, effective for %s: %s\n", gs_display_mode_name(cfg.display),
 		       boot_display ? "the boot display GPU" : "the selection",
 		       console ? "on" : cfg.display == GS_DISPLAY_ON ?
-		       "off (no selected GPU is the boot display, so no console is set up)" : "off");
+		       "off (no selected GPU takes the display modules)" : "off");
 		printf("host CUDA: requested=%s%s\n", gs_sw_name(cfg.host_cuda),
 		       have_b && b.host_cuda >= 0 ? (b.host_cuda ? "; installed" : "; not in the installed build") :
 		       have_b ? "; not recorded in the build" : "");
@@ -331,7 +350,7 @@ int gs_cmd_status(const struct gs_diag_opts *o)
 				else if (cfg.host_desktop == GS_DESKTOP_ON)
 					printf("host desktop: requested=on, effective: off (NVIDIA's graphics libraries are not installed)\n");
 				else
-					printf("host desktop: requested=auto, effective: off (NVIDIA's second driver package was not given; "
+					printf("host desktop: requested=auto, effective: off (the Linux driver package was not given; "
 					       "`install --companion-file PATH` turns it on)\n");
 				if (dret && !(want_desktop && dstate == 0 && cfg.host_desktop == GS_DESKTOP_AUTO))
 					printf("host desktop libraries: %s\n", dline);
@@ -342,7 +361,7 @@ int gs_cmd_status(const struct gs_diag_opts *o)
 				if (dstate && have_b && b.driver_version[0] &&
 				    strcmp(b.client_accept[0] ? b.client_accept : b.driver_version, version) != 0) {
 					printf("host desktop: the libraries are %s and the installed driver build accepts %s; programs will be refused by "
-					       "the driver. Run `sudo ./geforce-sriov install --companion-file PATH` again with the second package\n",
+					       "the driver. Run `sudo ./geforce-sriov install --companion-file PATH` again with the Linux driver package\n",
 					       version, b.client_accept[0] ? b.client_accept : b.driver_version);
 					all_ok = 0;
 				}
@@ -452,6 +471,7 @@ int gs_cmd_status(const struct gs_diag_opts *o)
 		else
 			ready++;
 	}
+	status_unselected(sysroot, devs, n);
 	/* The rest of the host checks (what the old doctor judged after install): FAIL sets the exit code, the others print. */
 	if (gs_hostcheck(o, GS_HOSTCHECK_POST) == GS_EXIT_REFUSED)
 		all_ok = 0;

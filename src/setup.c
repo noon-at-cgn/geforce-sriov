@@ -544,7 +544,10 @@ static int display_build(const struct gs_setup_host *s, const struct gs_install_
 		cfg.bdfs[i] = a->devices[i];
 	cfg.nbdfs = a->ndevices;
 	cfg.display = a->display_set ? a->display : GS_DISPLAY_AUTO;
-	return gs_display_effective(s->h->sys, &cfg, why, len);
+	return gs_display_effective(s->h->sys, &cfg,
+				    gs_display_inputs(strcmp(s->h->sys, GS_LIVE_SYSFS) == 0 ? GS_INPUTS_DIR : NULL,
+						      a->companion_file, a->companion_source, a->nvkms_source),
+				    why, len);
 }
 
 /*
@@ -600,7 +603,7 @@ static void ask_features(const struct gs_setup_host *s, struct gs_install_opts *
 {
 	static char companion[PATH_MAX], nvkms[PATH_MAX];
 	const struct gs_confirmed_version *row = input_row(a);
-	/* A row may record no second package; its release is then the one NVIDIA pairs with the host driver. */
+	/* A row may record no Linux driver package; its release is then the one NVIDIA pairs with the host driver. */
 	const char *second = row->second ? row->second : "of the matching release";
 	char why[256], hint[320];
 	struct stat st;
@@ -610,7 +613,7 @@ static void ask_features(const struct gs_setup_host *s, struct gs_install_opts *
 		return;
 	if (!a->host_cuda_set) {
 		r = ask_default_no(s, "Build NVIDIA's CUDA module for the host too, so CUDA programs can run on the host? [y/N]",
-				   "host CUDA is optional and needs NVIDIA's second package; the default is no", NULL);
+				   "host CUDA is optional and needs the Linux driver package; the default is no", NULL);
 		if (r < 0)
 			return;
 		if (r) {
@@ -627,8 +630,8 @@ static void ask_features(const struct gs_setup_host *s, struct gs_install_opts *
 			 "the Linux guest driver package (.run) from NVIDIA's vGPU download, or NVIDIA's GeForce driver package (.run),\n"
 			 "  version %s; an extracted directory works too. Answer none to leave these modules out", second);
 		r = ask_path(s, display ? "A selected GPU is the boot display, so the modules for the host console are built.\n"
-					  "Path to NVIDIA's second package?"
-					: "Host CUDA needs NVIDIA's second package. Path to it?",
+					  "Path to the Linux driver package?"
+					: "Host CUDA needs the Linux driver package. Path to it?",
 			     hint, 1, companion);
 		if (r < 0)
 			return;
@@ -1010,7 +1013,10 @@ static int display_consent(const struct gs_setup_host *s, const struct gs_config
 		return 0;
 	/* Asked only when the display build is part of the selection. With no selected boot display GPU the
 	 * plan above finds no manager on a selected card and has already returned. */
-	if (!gs_display_effective(s->h->sys, cfg, why, sizeof(why)))
+	if (!gs_display_effective(s->h->sys, cfg,
+				  gs_display_inputs(strcmp(s->h->sys, GS_LIVE_SYSFS) == 0 ? GS_INPUTS_DIR : NULL, NULL, NULL,
+						    NULL),
+				  why, sizeof(why)))
 		return 0;
 	unit = plan.manager_unit[0] ? plan.manager_unit : "display-manager.service";
 	snprintf(question, sizeof(question), "Stop %s temporarily and bring the GPUs up now? [y/N]", unit);
@@ -1113,7 +1119,10 @@ static int installed_host(const struct gs_setup_host *s, const char *self, const
 		printf("\nStopped: check refused (exit %d). Nothing changed.\n", r);
 		return r;
 	}
-	display = gs_display_effective(h->sys, &cfg, why, sizeof(why));
+	display = gs_display_effective(h->sys, &cfg,
+				       gs_display_inputs(strcmp(h->sys, GS_LIVE_SYSFS) == 0 ? GS_INPUTS_DIR : NULL,
+							 o->companion_file, o->companion_source, o->nvkms_source),
+				       why, sizeof(why));
 	if (!display && cfg.display == GS_DISPLAY_ON)
 		printf("%s\n", why);
 	need_install = !ready || !features_recorded(&cfg, display) ||

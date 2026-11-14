@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "ada.h"
+#include "tmpdir.h"
 #include "elf_reader.h"
 #include "patch.h"
 #include <stdint.h>
@@ -1652,8 +1653,7 @@ static int run(const char *cmd, char *out, size_t outlen)
 static void cli(void)
 {
 	const char *bin = getenv("GS_PATCH_BIN");
-	char path[] = "/tmp/gs-ada-cli-XXXXXX", ppath[] = "/tmp/gs-ada-plugin-XXXXXX";
-	char opath[] = "/tmp/gs-ada-object-XXXXXX";
+	char path[256], ppath[256], opath[256];
 	char dest[sizeof(ppath) + 8], cmd[1024], out[2048];
 	unsigned char data[N];
 	int fd;
@@ -1665,6 +1665,7 @@ static void cli(void)
 		printf("test_patch_ada: CLI checks skipped: %s is not built\n", bin);
 		return;
 	}
+	gs_test_template(path, sizeof(path), "gs-ada-cli-XXXXXX");
 	fd = mkstemp(path);
 	CHECK(fd >= 0, "mkstemp failed");
 	if (fd < 0)
@@ -1692,6 +1693,7 @@ static void cli(void)
 	/* A plugin-shaped file goes through the structural path end to end. */
 	plugin_defaults();
 	build_plugin();
+	gs_test_template(ppath, sizeof(ppath), "gs-ada-plugin-XXXXXX");
 	fd = mkstemp(ppath);
 	CHECK(fd >= 0, "mkstemp plugin failed");
 	if (fd < 0)
@@ -1715,6 +1717,7 @@ static void cli(void)
 	/* An object-shaped file goes through the structural path end to end. */
 	obj_defaults();
 	build_obj();
+	gs_test_template(opath, sizeof(opath), "gs-ada-object-XXXXXX");
 	fd = mkstemp(opath);
 	CHECK(fd >= 0, "mkstemp object failed");
 	if (fd < 0)

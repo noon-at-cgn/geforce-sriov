@@ -455,7 +455,7 @@ static void modprobe_checks(struct tally *t, const char *dir)
 }
 
 /*
- * What install needs before it can build the display or host CUDA modules: NVIDIA's second package,
+ * What install needs before it can build the display or host CUDA modules: the Linux driver package,
  * and for display NVIDIA's public kernel module source. Nothing is asked for a feature the installed
  * build already has. selected: the GPUs were chosen (config or --device), so a missing input is a
  * failure; a bare scan of every GPU only notes it. bdf: the selected boot display GPU.
@@ -496,10 +496,10 @@ static void build_inputs(struct tally *t, const struct gs_diag_opts *o, int live
 		check(t, lvl, "%s is the boot display GPU, so install builds the modules for the host console, and that\n"
 		      "       build needs two more inputs:%s%s\n"
 		      "       Pass them to setup or install, or use --no-display to build without these modules", bdf,
-		      companion ? "" : "\n         --companion-file PATH (or --companion-source DIR): NVIDIA's second package",
+		      companion ? "" : "\n         --companion-file PATH (or --companion-source DIR): the Linux driver package",
 		      nvkms ? "" : "\n         --nvkms-source PATH: NVIDIA's public kernel module source");
 	else if (host_cuda && !companion)
-		check(t, lvl, "host CUDA is selected, and its build needs NVIDIA's second package: pass --companion-file PATH\n"
+		check(t, lvl, "host CUDA is selected, and its build needs the Linux driver package: pass --companion-file PATH\n"
 		      "       (or --companion-source DIR) to setup or install, or use --no-host-cuda");
 }
 
@@ -525,7 +525,7 @@ static void desktop_checks(struct tally *t, const struct gs_config *cfg, const s
 		return;
 	if (b->driver_version[0] && strcmp(b->client_accept[0] ? b->client_accept : b->driver_version, version) != 0)
 		check(t, want ? "FAIL" : "WARN", "host desktop: the libraries are %s and the installed driver build accepts %s; programs will be "
-		      "refused by the driver. Run `sudo ./geforce-sriov install --companion-file PATH` again with NVIDIA's second package",
+		      "refused by the driver. Run `sudo ./geforce-sriov install --companion-file PATH` again with the Linux driver package",
 		      version, b->client_accept[0] ? b->client_accept : b->driver_version);
 	else if (b->client_accept[0])
 		check(t, "OK", "host desktop: NVIDIA's driver accepts programs of version %s (this build)", b->client_accept);
@@ -690,19 +690,19 @@ static void boot_checks(struct tally *t, const struct gs_diag_opts *o, int live,
 		check(t, "INFO", "%s is not enabled yet; install enables it once GPUs are selected", GS_UNIT_LIVEPATCH);
 	else if (live)
 		check(t, "WARN", "%s is not enabled: the livepatch would load after NVIDIA binds the PF", GS_UNIT_LIVEPATCH);
-	/* The alias overrides stop udev from loading NVIDIA's driver; only the early unit loads it then. */
+	/* The alias overrides stop udev from loading NVIDIA's driver; only the activate unit's first step loads it then. */
 	{
 		const char *mdir = o->modprobe_dir ? o->modprobe_dir : live ? "/etc/modprobe.d" : NULL;
-		char wants[GS_PATH_MAX] = GS_UNIT_WANTS_LIVEPATCH;
+		char wants[GS_PATH_MAX] = GS_UNIT_WANTS_ACTIVATE;
 
-		if (o->unit_dir && gs_pathf(wants, sizeof(wants), "%s/sysinit.target.wants/%s", o->unit_dir, GS_UNIT_LIVEPATCH))
+		if (o->unit_dir && gs_pathf(wants, sizeof(wants), "%s/multi-user.target.wants/%s", o->unit_dir, GS_UNIT_ACTIVATE))
 			wants[0] = '\0';
 		if (mdir && (live || o->unit_dir) && wants[0] && !gs_exists(wants) &&
 		    !gs_pathf(p, sizeof(p), "%s/%s", mdir, strrchr(GS_AUTOLOAD_PATH, '/') + 1) && gs_exists(p))
-			check(t, "WARN", "%s stops udev from loading NVIDIA's driver, and %s, which loads it at boot instead, "
+			check(t, "WARN", "%s stops udev from loading NVIDIA's driver, and %s, whose first step loads it at boot instead, "
 			      "is not enabled. This host will start without NVIDIA's driver. Run `geforce-sriov install "
 			      "--device BDF` to select a GPU and enable the units, or `geforce-sriov uninstall` to remove "
-			      "the file.", p, GS_UNIT_LIVEPATCH);
+			      "the file.", p, GS_UNIT_ACTIVATE);
 	}
 	for (size_t k = 0; units && k < (o->unit_dir ? 1u : sizeof(gs_unit_dirs) / sizeof(gs_unit_dirs[0])); k++) {
 		if (gs_pathf(p, sizeof(p), "%s/nvidia-vgpud.service.d/%s", o->unit_dir ? o->unit_dir : gs_unit_dirs[k],
@@ -1029,7 +1029,7 @@ int gs_hostcheck(const struct gs_diag_opts *o, enum gs_hostcheck_mode mode)
 		switch (gs_nvidia_autoload(where, sizeof(where))) {
 		case 1:
 		case 2:
-			check(&t, "INFO", "%s loads nvidia at boot; the livepatch must load first", where);
+			check(&t, "INFO", "%s loads nvidia at boot, so it can take a card before your udev rules do; the livepatch must load first", where);
 			break;
 		default:
 			check(&t, "INFO", "no nvidia module in boot module configuration (built initramfs images are not inspected)");
@@ -1096,7 +1096,7 @@ int gs_hostcheck(const struct gs_diag_opts *o, enum gs_hostcheck_mode mode)
 		struct gs_build b;
 		char line[BUILD_LINE_MAX], manifest[GS_PATH_MAX];
 		const char *slash;
-		int boot_display = 0, want_display;
+		int boot_display = 0, want_display, needs_build = 0;
 		const char *boot_bdf = "";
 
 		/* The selection install would write: its flags over the config. */
@@ -1113,9 +1113,14 @@ int gs_hostcheck(const struct gs_diag_opts *o, enum gs_hostcheck_mode mode)
 			if (c.present && c.boot_vga == 1 && !boot_display)
 				boot_bdf = devs[i].str;
 			boot_display |= c.present && c.boot_vga == 1;
+			/* The display build follows the KMS rule: the console card, or another KMS card when its inputs are given. */
+			needs_build |= c.present && gs_display_kms(&cfg, &c, NULL) &&
+				       (gs_display_console(&cfg, &c) ||
+					gs_display_inputs(live ? GS_INPUTS_DIR : NULL, o->companion_file, o->companion_source,
+							  o->nvkms_source));
 		}
 		/* What the config asks for against what the installed build provides. */
-		want_display = cfg.display != GS_DISPLAY_OFF && boot_display;
+		want_display = cfg.display != GS_DISPLAY_OFF && needs_build;
 		if (pre && !o->skip_driver)
 			build_inputs(&t, o, live, want_display, cfg.host_cuda == GS_SW_ON, boot_bdf, cfg.nbdfs || o->ndevices);
 		if (post && gs_build_identity(o->build, live, &b)) {
@@ -1236,8 +1241,9 @@ int gs_hostcheck(const struct gs_diag_opts *o, enum gs_hostcheck_mode mode)
 				       c.device, c.subvendor, c.subdevice, c.class_code, c.driver[0] ? c.driver : "none",
 				       c.boot_vga, c.iommu_group[0] ? c.iommu_group : "none");
 				printf("  display: boot_vga=%d, requested=%s, effective=%s\n", c.boot_vga, gs_display_mode_name(cfg.display),
-				       gs_display_kms(&cfg, &c) ? "on (the boot display)" :
-				       cfg.display == GS_DISPLAY_ON ? "off (display=on puts the console on the boot display GPU only)" :
+				       gs_display_kms(&cfg, &c, NULL) ?
+				       (gs_display_console(&cfg, &c) ? "on (the boot display)" : "on") :
+				       cfg.display == GS_DISPLAY_ON ? "off (the display modules are not used for this card)" :
 				       "off");
 			}
 			if (c.entry)

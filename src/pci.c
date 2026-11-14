@@ -264,18 +264,63 @@ int gs_card_inspect(const char *sysroot, const struct gs_addr *pf, struct gs_car
 }
 
 /*
- * Whether activation puts the host console (KMS) on this card. The console follows the boot
- * display GPU only: display=auto picks a selected boot display GPU, display=off none, and
- * display=on is limited to the boot display GPU as well. Measured: KMS on a card that is not the
- * boot display breaks that card's first VF (NVOS status 0x51, "Failed to alloc guest FB memory")
- * while its other VFs keep working. An unknown boot_vga is not the boot display. Activation and
- * status all report from this one rule.
+ * The console: the firmware framebuffer handoff and the display modules the build must carry for
+ * it belong to the boot display GPU only, because only that card has a firmware console. display=off
+ * sets none. An unknown boot_vga is not the boot display.
  */
-int gs_display_kms(const struct gs_config *cfg, const struct gs_card *c)
+int gs_display_console(const struct gs_config *cfg, const struct gs_card *c)
 {
+	return cfg->display != GS_DISPLAY_OFF && c->boot_vga == 1;
+}
+
+/*
+ * KMS on a selected card, by (generation, boot role). Every selected card of a listed generation has
+ * KMS, the boot display GPU and any other, so a monitor on any of them shows the host console and
+ * desktop. An Ada card that is not the boot display also needs a build whose record says
+ * ada_placement=1 (needs_placement): with the fixed Ada VF slots its first VF could fail to start.
+ * Nothing here depends on an address or on which card a host has.
+ */
+struct kms_row {
+	unsigned int generation;
+	int boot;
+	int needs_placement;
+};
+
+static const struct kms_row kms_rows[] = {
+	{ GS_ADA,    1, 0 },
+	{ GS_AMPERE, 1, 0 },
+	{ GS_ADA,    0, 1 },
+	{ GS_AMPERE, 0, 0 },
+};
+
+/*
+ * Whether activation puts KMS on this card: display is not off, and with display=boot only the boot
+ * display GPU has it. kb is what the installed build record says (NULL: not judged). The boot display
+ * keeps its KMS whatever the record says about the display modules, because activation refuses a
+ * build without them. Any other card has KMS only when the record says the build carries them (an unknown
+ * value counts as no): without them it serves VMs only. Activation, status and the build decision all report
+ * from this one rule. A card outside the device table is judged by its boot role alone.
+ */
+int gs_display_kms(const struct gs_config *cfg, const struct gs_card *c, const struct gs_kms_build *kb)
+{
+	int boot = c->boot_vga == 1;
+
 	if (cfg->display == GS_DISPLAY_OFF)
 		return 0;
-	return c->boot_vga == 1;
+	if (cfg->display == GS_DISPLAY_BOOT || !c->entry)
+		return boot;
+	for (size_t i = 0; i < sizeof(kms_rows) / sizeof(kms_rows[0]); i++) {
+		const struct kms_row *r = &kms_rows[i];
+
+		if (r->generation != c->entry->generation || r->boot != boot)
+			continue;
+		if (r->needs_placement && kb && kb->ada_placement != 1)
+			return 0;
+		if (!boot && kb && kb->display != 1)
+			return 0;
+		return 1;
+	}
+	return boot;
 }
 
 /* Checks for `install --device` and setup's listing: the PF may legitimately be bound to nvidia. */

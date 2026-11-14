@@ -37,6 +37,24 @@ int gs_host_run(const struct gs_host *h, const char *const argv[], unsigned int 
 	return h->run ? h->run(argv) : -ENOSYS;
 }
 
+/*
+ * Wait for udev's event queue to empty (`udevadm settle`, at most GS_UDEV_SETTLE_S seconds). When it
+ * did not (a timeout, an error, or no udevadm), the line says so and the caller goes on; returns non-zero then.
+ */
+int gs_udev_settle(const struct gs_host *h)
+{
+	const char *const settle[] = { "udevadm", "settle", "--timeout=" GS_UDEV_SETTLE_S, NULL };
+	int r;
+
+	printf("udevadm settle --timeout=" GS_UDEV_SETTLE_S "\n");
+	r = gs_host_run(h, settle, GS_UDEV_SETTLE_MS);
+	if (r == -ENOENT)
+		printf("udevadm was not found, so udev's queue was not waited for; a driver_override rule of yours may not have applied yet\n");
+	else if (r)
+		printf("udev has not finished its queue after " GS_UDEV_SETTLE_S " s; a driver_override rule of yours may not have applied yet\n");
+	return r;
+}
+
 /* 1 when h->sys/module/name exists. */
 int gs_module_loaded(const struct gs_host *h, const char *name)
 {
@@ -59,7 +77,7 @@ static int node_missing(const struct gs_host *h, struct gs_dev_nodes *n, const c
 }
 
 /* The unsigned number after "key:" on a line of the text at path; -1 when there is none. */
-static long proc_field(const char *path, const char *key)
+long gs_proc_field(const char *path, const char *key)
 {
 	char *data, *line, *save = NULL;
 	size_t len, klen = strlen(key);
@@ -118,7 +136,7 @@ void gs_dev_nodes_scan(const struct gs_host *h, struct gs_dev_nodes *n)
 				continue;
 			if (gs_pathf(p, sizeof(p), "%s/driver/nvidia/gpus/%s/information", h->proc, de->d_name))
 				continue;
-			minor = proc_field(p, "Device Minor");
+			minor = gs_proc_field(p, "Device Minor");
 			if (minor < 0 || minor >= (long)GS_NVIDIA_CTL_MINOR)
 				continue;
 			snprintf(name, sizeof(name), "/dev/nvidia%ld", minor);
@@ -151,7 +169,7 @@ void gs_dev_nodes_scan(const struct gs_host *h, struct gs_dev_nodes *n)
 
 		if (gs_pathf(path, sizeof(n->caps[0]), "%s/driver/nvidia/capabilities/%s", h->proc, caps[i]))
 			continue;
-		minor = proc_field(path, "DeviceFileMinor");
+		minor = gs_proc_field(path, "DeviceFileMinor");
 		if (minor < 0)
 			continue;
 		snprintf(name, sizeof(name), "/dev/nvidia-caps/nvidia-cap%ld", minor);

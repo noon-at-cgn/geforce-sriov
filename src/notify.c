@@ -4,7 +4,8 @@
  * for the one message the CLI sends, without libsystemd. A datagram "EXTEND_TIMEOUT_USEC=<usec>"
  * to the AF_UNIX socket named by $NOTIFY_SOCKET (a path, or "@name" for an abstract socket).
  * systemd honours it for any service state that has a timeout, Type=oneshot included, provided the
- * unit has NotifyAccess=main and the sender is the main process.
+ * unit has NotifyAccess=exec (or all) and the sender is the main process or a control process
+ * (the ExecStartPre= step sends it too).
  */
 #include <stddef.h>
 #include <stdio.h>

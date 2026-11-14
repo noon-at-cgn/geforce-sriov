@@ -17,7 +17,7 @@ The full sequence has five steps:
 1. The `geforce_sriov` module is a livepatch built by DKMS. DKMS rebuilds it for each new kernel. The module exposes the hidden SR-IOV feature of the cards you list to the kernel.
    It reports 4 VFs by default ([configurable](configuration.md#configuration-file)). It also reveals ARI and MSI-X. See the [Glossary](glossary.md) for both terms.
 2. The kernel reads every PCI device before any module loads.
-   The livepatch boot unit therefore loads the module, and then `nvidia`, before udev can bind a selected card.
+   The livepatch boot unit therefore loads the module before udev can bind a selected card. `nvidia` loads later, in the first step of the activate unit.
    A card that does not yet show SR-IOV is removed and rescanned by activation, on its own bus only. This happens, for example, on the first `activate` after `install`.
    The bridge is kept awake and the card's HDMI audio function is unbound first ([What activation does](#what-activation-does)).
 3. `geforce-sriov activate` runs NVIDIA's `sriov-manage` for each selected card that has no VFs. It then checks that every VF came up bound to NVIDIA's driver.
@@ -129,12 +129,15 @@ A card that was rescanned keeps using the revealed capability until it is remove
 ## What activation does
 
 `geforce-sriov activate` brings the selected cards from a cold, NVIDIA-bound or already-enabled state to VFs that are ready for a VM.
-The boot unit `geforce-sriov-activate.service` runs `activate --boot`. It runs after `geforce-sriov-livepatch.service` has loaded the livepatch and `nvidia` before udev.
+The boot unit `geforce-sriov-activate.service` first loads `nvidia`, after udev's queue is empty. It then runs `activate --boot`. It runs after `geforce-sriov-livepatch.service` has loaded the livepatch before udev.
 The kernel's first enumeration of each selected card therefore already sees the revealed capabilities, and no removal is needed.
 A run by hand before the first power cycle loads the livepatch itself and removes and rescans each card that does not yet show SR-IOV.
 Patching and installing NVIDIA's module and installing the livepatch module happen beforehand. They are not part of activation. See [driver-patch.md](driver-patch.md) and, for Ada, the [Ada host stack](ada.md) for NVIDIA's module. See [Install details](#install-details) for the livepatch module.
 
-`install` writes the activate unit's `TimeoutStartSec` as an upper bound of activation. The bound assumes every wait, write and process runs to its own limit. For each selected card and each VF it adds those limits together. It adds the steps that run once, then 10 %, with a minimum of 900 s. The values are 3050 s for 1 card with 4 VFs, 10981 s for 8, and 38173 s for 32.
+Activation also tests each unselected GPU that NVIDIA's driver binds ([A GPU that NVIDIA's driver cannot start](installation.md#a-gpu-that-nvidias-driver-cannot-start)). It does so right after its last load of `nvidia` and before it loads `nvidia_vgpu_vfio`. A host with the console handoff unloads `nvidia` and loads it again before that, and nothing unloads `nvidia` after the test.
+The test open of a card that NVIDIA's driver cannot start leaves one object allocated in NVIDIA's driver, once per boot. It shows only if `nvidia` is unloaded later in the same boot: the unload then logs a kernel `BUG` or `WARNING` and taints the kernel. An `rmmod nvidia` by hand, or a second console handoff, does that.
+
+`install` writes the activate unit's `TimeoutStartSec` as an upper bound of activation. The bound assumes every wait, write and process runs to its own limit. For each selected card and each VF it adds those limits together. It adds the steps that run once, then 10 %, with a minimum of 900 s. The values are 3490 s for 1 card with 4 VFs, 10497 s for 8 cards, 34521 s for 32 cards, and 4216 s for 1 card with 16 VFs.
 Normal activation takes seconds per card. The value matters only in a real hang, when activation ends through its own limits first.
 Before each step that can wait, activation also extends the timeout with `EXTEND_TIMEOUT_USEC` over `$NOTIFY_SOCKET`. The extension is that step's own limit plus 30 s. Outside the unit nothing is sent.
 The selection and the VF count change through `install`, which rewrites the unit.
@@ -172,7 +175,7 @@ Removal then runs in this order:
 2. The card's own HDMI audio function is unbound.
 3. The activation lock is updated to the step, `remove-rescan:<BDF>`.
 4. A PF bound to `nvidia` is removed only after NVIDIA's `unbindLock` is granted. The driver grants it only while no program holds the GPU.
-   A boot display GPU with the display stack loaded skips the lock, because its own display modules hold it.
+   A GPU with KMS skips the lock, because its own display modules hold it.
 5. With SIGINT, SIGTERM, SIGHUP and SIGQUIT blocked, the card's other functions are removed, then the card itself. Each removal has a bounded wait.
 6. The bus must be empty.
    Activation then writes the bridge's `rescan` once and never retries it.
@@ -216,7 +219,7 @@ A card that was rescanned keeps using the revealed capability until it is remove
 | Path | What it is | License |
 |---|---|---|
 | `geforce-sriov` (`src/`) | CLI: inspection, install, activation, uninstall | MIT |
-| `kernel/geforce_sriov.c` | Livepatch module (DKMS `geforce-sriov/0.4.0`) | GPL-2.0-only OR MIT |
+| `kernel/geforce_sriov.c` | Livepatch module (DKMS `geforce-sriov/0.4.1`) | GPL-2.0-only OR MIT |
 | `hook/libgeforce_sriov.so` | `LD_PRELOAD` identity hook for `nvidia-vgpud` only | MIT |
 | `driver/geforce-sriov-patch` | Patcher for the user's own `nv-kernel.o_binary` | MIT |
 | `systemd/` | `geforce-sriov-livepatch.service`, `geforce-sriov-activate.service`, the `nvidia-vgpud` drop-in and the guest-autostart drop-in | MIT |
@@ -269,7 +272,7 @@ See [What activation does](#what-activation-does) for the step-by-step sequence.
   - The hook acts only on the builds whose layout it knows, and passes other builds through unchanged. See [hook/README.md](../hook/README.md).
   - `nvidia-vgpud.service` and `nvidia-vgpu-mgr.service` must exist. `install --dry-run` and `status` warn when either is missing.
   - Ada needs the module with the three host-object revisions and GSP off, and the Ada placement revision. See [Ada host stack](ada.md#host-stack) and [NVIDIA driver flavour](devices.md#nvidia-driver-flavour).
-- Select every card you will use in `bdfs`. Loading `nvidia` binds every NVIDIA card on the host, and geforce-sriov cannot restrict that.
+- Select every card you will use in `bdfs`. Loading `nvidia` binds every NVIDIA card on the host that no other driver holds. See [NVIDIA GPUs that are not selected](installation.md#nvidia-gpus-that-are-not-selected).
 - Each selected GPU:
   - is function 0 with a PCI bridge directly above it;
   - shares its bus with no other device;
@@ -282,7 +285,7 @@ See [What activation does](#what-activation-does) for the step-by-step sequence.
 
 ## Install details
 
-A live install copies the binaries to `--prefix` (default `/usr/local`), the hook to `$PREFIX/lib/geforce-sriov/` and the module source to `/usr/src/geforce-sriov-0.4.0/`. It then runs `dkms add/build/install` and installs the boot units.
+A live install copies the binaries to `--prefix` (default `/usr/local`), the hook to `$PREFIX/lib/geforce-sriov/` and the module source to `/usr/src/geforce-sriov-0.4.1/`. It then runs `dkms add/build/install` and installs the boot units.
 `install` writes:
 
 - in `/var/lib/geforce-sriov/`: `installed-files` with every file it recorded, `format` with the version stamp, and `selection` with the identity of each selected card;
@@ -291,7 +294,7 @@ A live install copies the binaries to `--prefix` (default `/usr/local`), the hoo
 - on a `kernel-install` host without `/etc/kernel/postinst.d`, the plugin `/etc/kernel/install.d/90-geforce-sriov.install`;
 - on a pacman host, the hook `/etc/pacman.d/hooks/90-geforce-sriov.hook`, which runs the hook script with `--retry`;
 - for those last two hosts, the hook script `geforce-sriov-kernel-hook` beside the program;
-- the modprobe files `geforce-sriov-autoload.conf` and, with host CUDA, `geforce-sriov-uvm.conf` ([Modprobe files](installation.md#modprobe-files)). Version 0.4.0 writes no `geforce-sriov-display.conf`.
+- the modprobe files `geforce-sriov-autoload.conf` and, with host CUDA, `geforce-sriov-uvm.conf` ([Modprobe files](installation.md#modprobe-files)). Version 0.4.1 writes no `geforce-sriov-display.conf`.
 
 The driver step writes `driver-build`, `inputs/` and `driver-step.log` in `/var/lib/geforce-sriov/`, and the modprobe file `geforce-sriov-nvidia.conf`. None of them exist with `--driver=skip`.
 The kernel hook creates `kernel-hook-logs/` and `kernel-hook-failed/` in `/var/lib/geforce-sriov/` when it first runs.
@@ -557,13 +560,13 @@ flowchart TD
 ```
 
 After that, `activate` checks how each Ada card's VFs fit in its memory.
-The fixed slots below exist only while the loaded `nvidia.ko` lacks the Ada placement change ([Ada VM placement](#ada-vm-placement)). With it, a VM takes a free piece of memory instead.
-VF k has the fixed framebuffer slot `[k × (P − 32), (k + 1) × (P − 32))` MiB. Here k is 0 for the first VF, in VF order, and P is the `profileSize` of the card's type in `/usr/share/nvidia/vgpu/vgpuConfig.xml`.
-A VF whose slot ends near the top of the card's memory can be refused when its VM starts, even alone on an empty card. The type write still succeeds.
+The fixed ranges below exist only while the loaded `nvidia.ko` lacks the Ada placement change ([Ada VM placement](#ada-vm-placement)). With it, a VM takes a free piece of memory instead.
+VF k has the fixed range `[k × (P − 32), (k + 1) × (P − 32))` MiB of video memory. Here k is 0 for the first VF, in VF order, and P is the `profileSize` of the card's type in `/usr/share/nvidia/vgpu/vgpuConfig.xml`.
+A VF whose range ends near the top of the card's memory can be refused when its VM starts, even alone on an empty card. The type write still succeeds.
 
-For each Ada card with a VF whose slot ends above 75% of `memory.total`, `activate` prints one line that names those VFs. The value comes from `nvidia-smi --query-gpu=pci.bus_id,memory.total --format=csv,noheader,nounits`.
+For each Ada card with a VF whose range ends above 75% of `memory.total`, `activate` prints one line that names those VFs. The value comes from `nvidia-smi --query-gpu=pci.bus_id,memory.total --format=csv,noheader,nounits`.
 75% is a threshold for the hint, not an exact limit.
-`activate` prints this line only for an Ada card whose first VF does not read `Not Applicable` in `nvidia/placement_id`. That means the loaded module lacks the Ada placement change. With the change there is no fixed slot and no line ([Ada VM placement](#ada-vm-placement)).
+`activate` prints this line only for an Ada card whose first VF does not read `Not Applicable` in `nvidia/placement_id`. That means the loaded module lacks the Ada placement change. With the change there is no fixed range and no line ([Ada VM placement](#ada-vm-placement)).
 A `placement_id` file that cannot be read does not remove the line.
 The line does not change the exit status.
 A missing or unreadable XML file gives no line. Neither does an `nvidia-smi` that is missing, fails or runs longer than 5 s. It is then killed.
@@ -671,9 +674,8 @@ A remove and rescan can move those BARs.
   Otherwise `activate` refuses and asks for a power cycle. That way every selected GPU is brought up in one run.
 - The card's firmware framebuffer is unbound. Activation checks that only this card's framebuffer was released and that nothing else refuses.
   It refuses with `<BDF>: its console is in use: …` when something else uses the console.
-- After the card is removed and rescanned, activation loads `nvidia`, `nvidia_modeset` and then `nvidia_drm`. It loads them with `modeset=1`, `fbdev=1` and `gpu_allow` naming only the boot display GPU.
-- `display=on` is limited to the boot display GPU while a card serves VFs.
-  With no selected boot display GPU, no display stack is loaded, and `activate` says so.
+- After the card is removed and rescanned, activation loads `nvidia`, `nvidia_modeset` and then `nvidia_drm`. It loads them with `modeset=1`, `fbdev=1` and `gpu_allow` naming every selected GPU that has KMS.
+- With `display=boot`, only the boot display GPU has KMS. With no selected GPU that has KMS, no display stack is loaded.
 
 ```mermaid
 flowchart TD

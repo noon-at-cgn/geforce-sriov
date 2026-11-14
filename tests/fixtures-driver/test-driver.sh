@@ -83,6 +83,8 @@ fx_init() {
 	printf 'unknown\n' >"$FX/sha-mode"
 
 	fx_stub "$FX/bin/depmod" 'exit 0'
+	# The kernel that is running, as uname says: FXDIR/running, or the real one.
+	fx_stub "$FX/bin/uname" "if [ -f \"$FX/running\" ] && [ \"\$*\" = -r ]; then cat \"$FX/running\"; else exec /usr/bin/uname \"\$@\"; fi"
 	fx_stub "$FX/bin/make" "exec sh '$here/make-stub.sh' \"\$@\""
 	# The patcher follows the documented key=value contract and records each
 	# revision under the name of its output, which is what the driver passes.
@@ -1150,7 +1152,7 @@ case_cuda_libs() {
 	check "CUDA libraries: said" contains "$out" \
 		"NVIDIA's CUDA libraries 580.159.03 are ready to be installed: libcuda.so.580.159.03 libnvidia-ptxjitcompiler.so.580.159.03 libnvidia-nvvm.so.580.159.03 libnvidia-nvvm70.so.4"
 	check "CUDA libraries: the ones the package lacks are named" contains "$out" \
-		'warning: the second package does not have libnvidia-gpucomp libcudadebugger; a CUDA program that needs it may fail'
+		'warning: the Linux driver package does not have libnvidia-gpucomp libcudadebugger; a CUDA program that needs it may fail'
 	check "CUDA libraries: the index names the version" test "$(sed -n 's/^version=//p' "$stage/index")" = 580.159.03
 	check "CUDA libraries: libcuda with its digest and the name the loader asks for" test \
 		"$(sed -n 's/^lib=libcuda\.so\.580\.159\.03 //p' "$stage/index")" = \
@@ -1182,7 +1184,7 @@ case_cuda_libs() {
 	fx_exec unknown --host-cuda --companion-source "$FX/companion" --cuda-stage "$stage"
 	check "CUDA libraries, a package without them: the run succeeds" test "$rc" -eq 0
 	check "CUDA libraries, a package without them: one warning" contains "$out" \
-		"warning: NVIDIA's CUDA libraries were not taken from the second package: it has no libcuda.so.<version>"
+		"warning: NVIDIA's CUDA libraries were not taken from the Linux driver package: it has no libcuda.so.<version>"
 	check "CUDA libraries, a package without them: nothing is staged" test ! -e "$stage" -a ! -e "$stage.gs-new"
 	# Host CUDA off: nothing is staged whatever the option says.
 	fx_cuda_libs 1 580.159.03
@@ -1221,7 +1223,7 @@ RUN
 	check "CUDA libraries, a kept package that was changed: the run succeeds" test "$rc" -eq 0
 	check "CUDA libraries, a kept package that was changed: not run" test ! -e "$FX/ran" -a ! -e "$FX/ran-from"
 	check "CUDA libraries, a kept package that was changed: one warning" contains "$out" \
-		"warning: NVIDIA's CUDA libraries were not taken from the second package: none was given, and none that an earlier install kept can be used"
+		"warning: NVIDIA's CUDA libraries were not taken from the Linux driver package: none was given, and none that an earlier install kept can be used"
 	check "CUDA libraries, a kept package that was changed: nothing is staged" test ! -e "$stage"
 }
 
@@ -1308,7 +1310,7 @@ case_desktop_libs() {
 	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms" --desktop-stage "$stage"
 	check "graphics libraries, one missing: the run succeeds" test "$rc" -eq 0
 	check "graphics libraries, one missing: one warning" contains "$out" \
-		"warning: NVIDIA's graphics libraries were not taken from the second package: the second package has no libnvidia-egl-wayland"
+		"warning: NVIDIA's graphics libraries were not taken from the Linux driver package: the Linux driver package has no libnvidia-egl-wayland"
 	check "graphics libraries, one missing: nothing is staged" test ! -e "$stage" -a ! -e "$stage.gs-new"
 	# Libraries of another version than the NVKMS core was stamped with: refused, X could not start. A stage that an earlier run left goes too.
 	rm -rf "$stage"
@@ -1566,7 +1568,7 @@ case_display() {
 	record_unset client_accept
 	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
 	check "display, record without client_accept: built again" contains "$out" \
-		'the installed nvidia.ko does not accept the programs of the second package (client_accept= is recorded, 580.159.03 is wanted); the modules are built again'
+		'the installed nvidia.ko does not accept the programs of the Linux driver package (client_accept= is recorded, 580.159.03 is wanted); the modules are built again'
 	check "display, record without client_accept: recorded again" test "$(record_field client_accept)" = 580.159.03
 	fx_exec unknown --display --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
 	check "display, the rerun: nothing is built" contains "$out" 'already prepared for'
@@ -1634,6 +1636,27 @@ case_power_loss() {
 			"$(readlink "$FX/root/usr/lib/x86_64-linux-gnu/libnvidia-vgpu.so")" = "${pcopy##*/}"
 		check "power loss $point: the published record has no journal line" test -z "$(sed -n '/^journal_/p' "$rec")"
 	done
+
+	# A build for a kernel that is not running, cut off before its record: the record lands where the first run
+	# decided, also when the host runs another kernel when the commit is finished.
+	fx_init "$FXROOT/loss-kept" elf
+	fx_elf_files display || return 0
+	state=$FX/root/var/lib/geforce-sriov
+	rec=$state/driver-build
+	printf '%s\n' 6.9.9-gs-running >"$FX/running"
+	mkdir -p "$state"
+	printf '%s\n' 'kernel=6.9.9-gs-running' >"$rec"
+	loss_run before-record
+	check "power loss, kept record: the run is cut off" test "$rc" -ne 0
+	check "power loss, kept record: the journal stays" test -f "$rec.gs-new"
+	printf '%s\n' '6.9.8-gs-other' >"$FX/running"
+	loss_run ''
+	check "power loss, kept record: the next run succeeds" test "$rc" -eq 0
+	check "power loss, kept record: it completes the installation" contains "$out" 'Completing that installation'
+	check "power loss, kept record: the published record is as the first run decided" test "$(cat "$rec")" = 'kernel=6.9.9-gs-running'
+	check "power loss, kept record: the record is kept under the kernel's name" test \
+		"$(sed -n 's/^kernel=//p' "$state/driver-builds/$kernel")" = "$kernel"
+	check "power loss, kept record: the journal is gone" test ! -e "$rec.gs-new"
 
 	# A staged module is gone as well: the commit cannot be finished, so what it replaced is put back.
 	fx_init "$FXROOT/loss-undo" elf
@@ -1859,7 +1882,7 @@ case_kernel_update() {
 	rm -rf "$(kept_dir)"
 	fx_exec unknown --display --host-cuda --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
 	check "kernel update, rerun: nothing is built" contains "$out" 'already prepared for'
-	check "kernel update, rerun: the inputs are kept" contains "$out" "kept NVIDIA's second package for a later build"
+	check "kernel update, rerun: the inputs are kept" contains "$out" "kept the Linux driver package for a later build"
 	check "kernel update, rerun: the index is back" test "$(kept_field nvkms_version)" = 580.159.03
 	# An input that is not the one the installed build was made from is not kept.
 	rm -rf "$(kept_dir)"
@@ -1964,7 +1987,7 @@ RUN
 	fx_exec unknown --retained --display --host-cuda
 	check "kernel update, kept file changed: refused" test "$rc" -eq 3
 	check "kernel update, kept file changed: says so" contains "$out" \
-		"NVIDIA's second package that an earlier install kept was changed since: $(kept_dir)/companion/second.run has SHA-256"
+		"the Linux driver package that an earlier install kept was changed since: $(kept_dir)/companion/second.run has SHA-256"
 	check "kernel update, kept file changed: names the digest that was kept" contains "$out" \
 		"and the file that was kept had $second_sha"
 	check "kernel update, kept file changed: names the next step" contains "$out" \
@@ -1987,7 +2010,7 @@ RUN
 	fx_exec unknown --retained --source "$FX/src" --display
 	check "kernel update, nothing kept: refused" test "$rc" -eq 3
 	check "kernel update, nothing kept: says so" contains "$out" \
-		"this build needs NVIDIA's second package, and no earlier install kept one"
+		"this build needs the Linux driver package, and no earlier install kept one"
 	check "kernel update, nothing kept: no record" test ! -e "$FX/root/var/lib/geforce-sriov/driver-build"
 
 	# The plain build keeps a copy of the host tree and needs nothing else.
@@ -2335,6 +2358,44 @@ case_two_kernels() {
 	cp -a "$FX/state.before-change" "$state"
 	cp -a "$FX/modules.before-change" "$FX/root/lib/modules"
 
+	# The running kernel is the first one, and the published record names the other, as a build for a
+	# kernel that was not running left it. The next run for the running kernel makes its record the
+	# published one again, builds nothing, and keeps the other kernel's under driver-builds.
+	printf '%s\n' "$first_kernel" >"$FX/running"
+	kernel=$first_kernel
+	kdir=$first_kernel
+	fx_exec unknown --retained --display --host-cuda
+	check "published names another kernel: exit 0" test "$rc" -eq 0
+	check "published names another kernel: nothing is built" contains "$out" "already prepared for $first_kernel"
+	check "published names another kernel: the running kernel's record is published" test "$(cat "$state/driver-build")" = "$first_record"
+	check "published names another kernel: the other record is kept" test "$(cat "$state/driver-builds/$next_kernel")" = "$next_record"
+	check "published names another kernel: no copy of the running kernel's is left" test ! -e "$state/driver-builds/$first_kernel"
+	check "published names another kernel: the modules are untouched" test \
+		"$(modules_of "$first_kernel")/$(modules_of "$next_kernel")" = "$first_modules/$next_modules"
+	# A build for the kernel that is not running leaves the published record alone and keeps its own under driver-builds.
+	printf '%s\n' "$first_record" >"$state/driver-build"
+	printf '%s\n' "$next_record" >"$state/driver-builds/$next_kernel"
+	kernel=$next_kernel
+	kdir=$next_kernel
+	fx_elf_files display
+	cp -a "$FX/modules.before-change/$next_kernel/updates/dkms/." "$FX/root/lib/modules/$next_kernel/updates/dkms/"
+	sed 's/^host_cuda=1$/host_cuda=0/' "$state/driver-builds/$next_kernel" >"$state/driver-builds/$next_kernel.new"
+	mv "$state/driver-builds/$next_kernel.new" "$state/driver-builds/$next_kernel"
+	fx_exec unknown --retained --display --host-cuda --companion-source "$FX/companion" --nvkms-source "$FX/nvkms"
+	check "build for a kernel that is not running: installs" test "$rc" -eq 0
+	check "build for a kernel that is not running: it is built" contains "$out" "'make'"
+	check "build for a kernel that is not running: the published record still names the running kernel" test \
+		"$(cat "$state/driver-build")" = "$first_record"
+	check "build for a kernel that is not running: its record is kept under its name" test \
+		"$(sed -n 's/^kernel=//p;s/^host_cuda=/cuda=/p' "$state/driver-builds/$next_kernel" | tr '\n' ' ')" = "$next_kernel cuda=1 "
+	check "build for a kernel that is not running: no other record is made" test \
+		"$(ls "$state/driver-builds")" = "$next_kernel"
+	rm -f "$FX/running"
+	rm -rf "$state" "$FX/root/lib/modules"
+	cp -a "$FX/state.before-change" "$state"
+	cp -a "$FX/modules.before-change" "$FX/root/lib/modules"
+	fx_first_kernel
+
 	# A host where the first kernel's record was lost, as a build for another kernel left it before
 	# records were kept per kernel. The installed module is recognised as this script's build by the
 	# build kept for the kernel, and the backup of NVIDIA's module stays.
@@ -2423,34 +2484,22 @@ case_earlier_cap_record() {
 
 FXROOT=$(mktemp -d "${TMPDIR:-/tmp}/gs-driver-fixtures.XXXXXX")
 trap 'rm -rf "$FXROOT"' EXIT HUP INT TERM
-case_plain
-case_restore_gone
-case_stock_replaced
-case_signed_reinstall
-case_signed_reinstall_elf
-case_restore_modified_and_replaced
-case_ada_confirmed
-case_placement_elf
-case_ada_refusals
-case_earlier_cap_record
-case_unknown_anchors
-case_identity_refused
-case_unknown_refused
-case_package_digest
-case_second_version
-case_interrupted_commit
-case_cuda
-case_cuda_libs
-case_desktop_libs
-case_after_display
-case_cuda_crc_and_provider
-case_plain_gate
-case_plain_other_version
-case_display
-case_power_loss
-case_restore_companion
-case_rollback
-case_kernel_update
-case_two_kernels
+# GS_CASES="plain display ..." runs only those cases (names without the case_ prefix), in that
+# order; `make check` splits the cases into shards that way, see CASE_SHARD_<n> in the Makefile.
+# Every case starts with fx_init in its own directory under FXROOT; the list is every case_<name>() in this file.
+ALL_CASES=$(sed -n 's/^case_\([a-z0-9_]*\)() {$/\1/p' "$0")
+if [ "${1:-}" = --list ]; then
+	printf '%s\n' $ALL_CASES
+	exit 0
+fi
+for c in ${GS_CASES:-$ALL_CASES}; do
+	if [ -n "${GS_CASE_TIMES:-}" ]; then
+		t0=$(date +%s)
+		"case_$c"
+		printf '%s %ss\n' "$c" "$(($(date +%s) - t0))" >&2
+	else
+		"case_$c"
+	fi
+done
 say "driver fixtures: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]

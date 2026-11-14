@@ -40,6 +40,19 @@ int gs_addr_listed(const struct gs_addr *list, unsigned int n, const char *s)
 
 const struct gs_build_src gs_build_live = { 0 };
 
+void gs_kms_build_read(const struct gs_build_src *src, struct gs_kms_build *kb)
+{
+	const char *record = src ? (src->record ? src->record : GS_DRIVER_BUILD) : NULL;
+	char v[8];
+
+	kb->ada_placement = kb->display = -1;
+	if (!record || !gs_exists(record))
+		return;
+	kb->ada_placement = gs_record_value(record, "ada_placement", v, sizeof(v)) && strcmp(v, "1") == 0;
+	if (gs_record_value(record, "display", v, sizeof(v)) && (strcmp(v, "1") == 0 || strcmp(v, "0") == 0))
+		kb->display = v[0] == '1';
+}
+
 /* 1 when the kernel command line carries pci=...noari... (the module cannot see it). */
 int gs_cmdline_noari(const char *procroot)
 {
@@ -438,7 +451,10 @@ int gs_display_lacking(const struct gs_build_src *src, const char *sys, const st
 	char why[256];
 
 	return gs_build_identity(src, gs_is_live_root(sys), &b) && b.record_read && strcmp(b.rec_kernel, b.release) == 0 &&
-	       b.display == 0 && gs_display_effective(sys, cfg, why, sizeof(why));
+	       b.display == 0 &&
+	       gs_display_effective(sys, cfg,
+				    gs_display_inputs(gs_is_live_root(sys) ? GS_INPUTS_DIR : NULL, NULL, NULL, NULL), why,
+				    sizeof(why));
 }
 
 int gs_display_forms(const struct gs_host *h, const char *selection_args, char *text, size_t len)
@@ -450,7 +466,7 @@ int gs_display_forms(const struct gs_host *h, const char *selection_args, char *
 		return 0;
 	snprintf(text, len, "  sudo geforce-sriov install%s%s --no-display\n"
 		 "      (the host console stays on the firmware framebuffer; no display modules are built)\n"
-		 "  or, in the folder geforce-sriov was built in, with NVIDIA's second package and public kernel source:\n"
+		 "  or, in the folder geforce-sriov was built in, with the Linux driver package and NVIDIA's public kernel source:\n"
 		 "  sudo ./geforce-sriov install%s%s --companion-file PATH --nvkms-source PATH\n",
 		 selection_args[0] ? " " : "", selection_args, selection_args[0] ? " " : "", selection_args);
 	return 1;

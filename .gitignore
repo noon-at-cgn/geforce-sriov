@@ -28,3 +28,7 @@ Module.symvers
 *.run
 nv-kernel.o_binary
 vgpuConfig.xml
+
+# make check logs and the summary of make check-report
+/check-out/
+/check-report.txt

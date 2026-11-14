@@ -126,7 +126,7 @@ What to download, and when you need it:
 |---|---|---|---|
 | vGPU host driver | NVIDIA vGPU host driver for Linux KVM: `NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run` from the NVIDIA vGPU software 19.5 download on the NVIDIA Licensing Portal | 580.159.01 | Always |
 | Host CUDA | NVIDIA's Linux driver package: the 580.159.03 driver as a `.run` file. Use one of two files. The first is the vGPU guest driver from the same vGPU software 19.5 download, `NVIDIA-Linux-x86_64-580.159.03-grid.run`. The second is NVIDIA's GeForce Linux driver [`NVIDIA-Linux-x86_64-580.159.03.run`](https://download.nvidia.com/XFree86/Linux-x86_64/580.159.03/NVIDIA-Linux-x86_64-580.159.03.run) from NVIDIA's public Unix driver archive | 580.159.03 | You turn host CUDA on (`--host-cuda`) |
-| Host display and desktop on the boot display GPU | The Linux driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | A GPU you select is the boot display GPU. The desktop libraries come from the Linux driver package. The public kernel module source is used only for the display modules |
+| Host display and desktop | The Linux driver package (above) and NVIDIA's public kernel module source: [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules), tag [580.159.03](https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/580.159.03.tar.gz) | 580.159.03 for both | You select the boot display GPU, or you give both inputs for another selected GPU. The desktop libraries come from the Linux driver package. The public kernel module source is used only for the display modules |
 
 Pass the Linux driver package as a `.run` file (`--companion-file PATH`) or an extracted directory (`--companion-source DIR`). Pass the public kernel module source as a tarball or a directory (`--nvkms-source PATH`).
 
@@ -160,7 +160,7 @@ To remove geforce-sriov without installing a new version, do steps 1 to 3. Detai
 ### Install
 
 You need a supported card and NVIDIA's vGPU host driver `.run` file (`NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run`) from your NVIDIA entitlement.
-For the boot display GPU or host CUDA, also get the files in the table under [What you need](#what-you-need).
+For the display build or host CUDA, also get the files in the table under [What you need](#what-you-need).
 
 ```sh
 make
@@ -174,7 +174,7 @@ sudo ./geforce-sriov setup    # second run, after it
 - The path of the vGPU host driver `.run` file, when no NVIDIA driver is installed.
 - Acceptance of NVIDIA's licence.
 - The GPUs to use, when more than one qualifies.
-- The paths of the Linux driver package and of NVIDIA's public kernel module source, if you select the boot display GPU. Both are version 580.159.03.
+- The paths of the Linux driver package and of NVIDIA's public kernel module source, if you want the host console on a selected GPU. Both are version 580.159.03.
 - Whether to build NVIDIA's CUDA module for the host too, so CUDA programs can run on the host. If you say yes, it also needs the Linux driver package. See [Host CUDA](docs/installation.md#host-cuda).
 - Consent to keep a laptop GPU powered when it is idle, if you select one. This turns off D3cold, the state in which a laptop cuts power to an idle GPU. See [Laptop support](docs/laptops.md#consent).
 
@@ -227,7 +227,7 @@ flowchart TD
 | Part | What it does |
 |---|---|
 | Kernel module `geforce_sriov` (DKMS) | Makes the kernel see the hidden SR-IOV feature of the cards you choose and presents four virtual functions per card by default. The `vfs` key in the config sets the count, and more than 4 per card is not available |
-| Boot units `geforce-sriov-livepatch.service`, `geforce-sriov-activate.service` | The first loads the `geforce_sriov` kernel module, a livepatch that replaces three PCI functions of the running kernel, and then NVIDIA's `nvidia` module. It runs before udev, the service that loads drivers for detected hardware, so nothing else binds your chosen cards first. The second runs `activate`: it creates the VFs and sets the vGPU types before your VMs autostart. Guest autostart starts after activation has finished but does not wait for it to succeed, so a guest that uses a vGPU can fail to start until the VFs are up |
+| Boot units `geforce-sriov-livepatch.service`, `geforce-sriov-activate.service` | The first loads the `geforce_sriov` kernel module, a livepatch that replaces three PCI functions of the running kernel. It runs before udev, the service that loads drivers for detected hardware, so nothing else binds your chosen cards first. The second loads NVIDIA's `nvidia` module once udev has applied your rules. Then it runs `activate`: it creates the VFs and sets the vGPU types before your VMs autostart. Guest autostart starts after activation has finished but does not wait for it to succeed, so a guest that uses a vGPU can fail to start until the VFs are up |
 | CLI `geforce-sriov` | Checks the host, installs everything including the driver patch, and brings up the VFs and vGPU types |
 | Identity hook `libgeforce_sriov.so` | Lets `nvidia-vgpud`, NVIDIA's daemon that registers the vGPU types of each GPU, accept your GeForce card as its professional counterpart so it offers vGPU types |
 | Driver patcher `geforce-sriov-patch` | Used by `install` to patch your own copies of NVIDIA's `nv-kernel.o_binary` and `libnvidia-vgpu.so`. The first is the precompiled part of the kernel module and the second is the vGPU plugin. See [Revisions](docs/driver-patch.md#revisions) for each change |

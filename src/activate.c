@@ -520,6 +520,15 @@ static void plan_note(char *reason, size_t len, const char *fmt, ...)
 	va_end(ap);
 }
 
+/* gs_display_kms() for a card, against the build record the host names. */
+static int kms_card(const struct gs_host *h, const struct gs_config *cfg, const struct gs_card *c)
+{
+	struct gs_kms_build kb;
+
+	gs_kms_build_read(h->build, &kb);
+	return gs_display_kms(cfg, c, &kb);
+}
+
 /*
  * Everything that would be interrupted by stopping, unloading or removing a display GPU:
  * the display manager unit (resolved link), the display modules' holders, the DRM and
@@ -544,7 +553,7 @@ int gs_display_plan_build(const struct gs_host *h, const struct gs_config *cfg, 
 		struct gs_card c;
 
 		gs_card_inspect(h->sys, &cfg->bdfs[i], &c);
-		if (c.present && gs_display_kms(cfg, &c))
+		if (c.present && kms_card(h, cfg, &c))
 			sel[nsel++] = cfg->bdfs[i];
 	}
 	if (nsel == 0)
@@ -673,8 +682,8 @@ int gs_display_plan_build(const struct gs_host *h, const struct gs_config *cfg, 
 /* ---- VF BAR fit and DRM allowlist ---------------------------------------- */
 
 /*
- * The RM GPU IDs of the display-selected cards for nvidia-drm's gpu_allow parameter. The list
- * holds only boot display GPUs even for display=on: see gs_display_kms(). Never empty in the
+ * The RM GPU IDs of the display-selected cards for nvidia-drm's gpu_allow parameter: every card
+ * that has KMS (gs_display_kms()). Never empty in the
  * load path; an empty gpu_allow would mean every GPU, so display_load() refuses to load with it.
  * OBSERVED mapping: 03:00.0 -> 0x300, 04:00.0 -> 0x400 in the display runs, i.e. bus << 8.
  * Recorded as an inference, printed before use.
@@ -690,7 +699,7 @@ static void display_allowlist(const struct gs_host *h, const struct gs_config *c
 		int n2;
 
 		gs_card_inspect(h->sys, &cards[i].pf, &c);
-		if (!gs_display_kms(cfg, &c))
+		if (!kms_card(h, cfg, &c))
 			continue;
 		n2 = snprintf(out + off, len - off, "%s0x%x", off ? "," : "", cards[i].pf.bus << 8);
 		if (n2 < 0 || (size_t)n2 >= len - off)
@@ -699,41 +708,6 @@ static void display_allowlist(const struct gs_host *h, const struct gs_config *c
 	}
 }
 
-/*
- * display=on is a request for KMS, and only a boot display GPU can carry it while the card
- * serves VFs (see gs_display_kms()). Name each excluded card and the effective allowlist once;
- * when the selection holds no boot display GPU at all, say that no display stack is loaded.
- */
-static void display_on_notices(const struct gs_host *h, const struct gs_config *cfg, const struct gs_vgpu_card *cards,
-			       unsigned int n)
-{
-	char allow[256];
-	int boot = 0;
-
-	if (cfg->display != GS_DISPLAY_ON)
-		return;
-	for (unsigned int i = 0; i < n; i++) {
-		struct gs_card c;
-
-		gs_card_inspect(h->sys, &cards[i].pf, &c);
-		if (c.boot_vga == 1)
-			boot = 1;
-	}
-	if (!boot) {
-		printf("display=on: no selected GPU is the boot display; no display stack is loaded\n");
-		return;
-	}
-	display_allowlist(h, cfg, cards, n, allow, sizeof(allow));
-	for (unsigned int i = 0; i < n; i++) {
-		struct gs_card c;
-
-		gs_card_inspect(h->sys, &cards[i].pf, &c);
-		if (c.boot_vga == 1)
-			continue;
-		printf("%s: display=on is limited to the boot display GPU while this card serves VFs%s%s\n",
-		       cards[i].pf.str, allow[0] ? "; gpu_allow=" : "", allow);
-	}
-}
 
 /* ---- power, bridge hold and the firmware framebuffer ---------------------- */
 
@@ -1181,7 +1155,7 @@ static int remove_card(const struct gs_host *h, struct gs_vgpu_card *k, const st
 	vendor = c.vendor;
 	device = c.device;
 	/*
-	 * The console card is the exception: activation has just loaded nvidia_drm on it, and that
+	 * A KMS card is the exception: activation has just loaded nvidia_drm on it, and that
 	 * module is a client of the GPU, so the lock would be refused because of activation's own
 	 * step. Its other users were listed and refused by the display plan in the preflight.
 	 *
@@ -1866,18 +1840,18 @@ static int display_load(const struct gs_host *h, const struct gs_config *cfg, co
 		struct gs_card c;
 
 		gs_card_inspect(h->sys, &cards[i].pf, &c);
-		any |= gs_display_kms(cfg, &c);
+		any |= kms_card(h, cfg, &c);
 	}
 	if (!any)
 		return 0;
 	/*
 	 * An empty gpu_allow means every GPU to the module, which would put KMS on a card that is
-	 * serving VFs. Never reach modprobe with it: no boot display GPU in the selection means
-	 * there is no display stack to load.
+	 * serving VFs. Never reach modprobe with it: with no card that has KMS there is
+	 * no display stack to load.
 	 */
 	display_allowlist(h, cfg, cards, n, allow, sizeof(allow));
 	if (!allow[0]) {
-		printf("display: no selected GPU is the boot display; no display stack is loaded\n");
+		printf("display: no selected GPU takes the display modules; no display stack is loaded\n");
 		return 0;
 	}
 	if (!gs_module_loaded(h, "nvidia_modeset")) {
@@ -1950,7 +1924,7 @@ static int display_load(const struct gs_host *h, const struct gs_config *cfg, co
 					struct gs_card c;
 
 					gs_card_inspect(h->sys, &cards[i].pf, &c);
-					if (gs_display_kms(cfg, &c) && strcmp(cards[i].pf.str, a.str) == 0) {
+					if (kms_card(h, cfg, &c) && strcmp(cards[i].pf.str, a.str) == 0) {
 						if (!drm_devs[0])
 							gs_copy(drm_devs, sizeof(drm_devs), de->d_name);
 						any = 1;
@@ -2183,8 +2157,8 @@ static unsigned long long card_mib(char *smi, const struct gs_addr *pf)
 	return 0;
 }
 
-/* One line per Ada card whose VFs' framebuffer slots end near the top of its memory. A hint only. A card whose VFs read
- * placement_id "Not Applicable" has no slots (the module carries the Ada placement change), so it gets no line. */
+/* One line per Ada card whose VFs' fixed ranges of video memory end near the top of its memory. A hint only. A card whose VFs read
+ * placement_id "Not Applicable" has no fixed ranges (the module carries the Ada placement change), so it gets no line. */
 static void slot_hint(const struct gs_host *h, const struct gs_activate_opts *o, const struct gs_vgpu_card *cards,
 		      unsigned int n)
 {
@@ -2224,7 +2198,7 @@ static void slot_hint(const struct gs_host *h, const struct gs_activate_opts *o,
 			printf("%s: with type %u the %s %s may not start: %s near the top of the card's %llu MiB. "
 			       "Put VMs on the lower VFs, or choose a smaller type.\n", k->pf.str, k->type,
 			       high == 1 ? "VF" : "VFs", list,
-			       high == 1 ? "its framebuffer slot ends" : "their framebuffer slots end", mem);
+			       high == 1 ? "its fixed range of video memory ends" : "their fixed ranges of video memory end", mem);
 	}
 }
 
@@ -2355,7 +2329,7 @@ static int preflight_card(const struct gs_host *h, const struct gs_config *cfg, 
 	int r;
 
 	gs_card_inspect(h->sys, &a->v.pf, &a->c);
-	a->display = gs_display_kms(cfg, &a->c);
+	a->display = kms_card(h, cfg, &a->c);
 	if (!a->c.present)
 		return snprintf(why, len, "%s is missing", a->v.pf.str), GS_EXIT_REFUSED;
 	if (!a->c.entry)
@@ -2747,7 +2721,7 @@ static enum act_next act_preflight(struct activation *a)
 		 * The firmware framebuffer is released for the display modules to take over; a build without them
 		 * would fail at nvidia_modeset after the release and leave no console, so it stops here.
 		 */
-		if (a->cards[i].display && build_display == 0) {
+		if (a->cards[i].display && gs_display_console(cfg, &a->cards[i].c) && build_display == 0) {
 			display_missing_msg(h, a->cards[i].v.pf.str, a->why, sizeof(a->why));
 			fprintf(stderr, "geforce-sriov: refused, nothing changed: %s", a->why);
 			a->rc = GS_EXIT_REFUSED;
@@ -2772,7 +2746,6 @@ static enum act_next act_preflight(struct activation *a)
 		}
 		break;
 	}
-	display_on_notices(h, cfg, a->vc, a->n);
 	/*
 	 * The livepatch must already be in place: the early boot unit loads it before udev. Loading it
 	 * now works only while NVIDIA's driver is not bound to any selected PF (owner decision 4 keeps
@@ -3104,7 +3077,7 @@ static enum act_next act_power_load(struct activation *a)
 		}
 	}
 	for (i = 0; i < a->n; i++) {
-		if (!a->cards[i].display || !a->cards[i].needs_removal)
+		if (!a->cards[i].display || !gs_display_console(cfg, &a->cards[i].c) || !a->cards[i].needs_removal)
 			continue;
 		r = handoff_fb(h, &a->cards[i].c, a->p, sizeof(a->p), a->why, sizeof(a->why));
 		if (r) {
@@ -3136,6 +3109,13 @@ static enum act_next act_power_load(struct activation *a)
 		}
 		a->changed = 1;
 	}
+	/*
+	 * An unselected GPU that nvidia just bound and cannot start is tested and released here: nvidia is
+	 * loaded for the last time in this run (the handoff above is its only unload), nvidia_vgpu_vfio is not
+	 * loaded yet, and no VF exists. The failed open leaves one object in NVIDIA's driver that is only
+	 * reported when nvidia is unloaded later, so nothing unloads nvidia after this point.
+	 */
+	gs_unselected_release(h, cfg->bdfs, cfg->nbdfs);
 	collect_vcards(a->cards, a->n, a->vc);
 	if ((r = display_load(h, cfg, a->vc, a->n, a->why, sizeof(a->why)))) {
 		/* A module load that did not finish leaves the display modules in an unknown state. */
@@ -3506,12 +3486,17 @@ int gs_activate(const struct gs_host *h, const struct gs_config *cfg, const stru
 		act_unload_enable, act_daemons, act_reprobe, act_display_finish, act_success,
 	};
 	struct activation *a = calloc(1, sizeof(*a));
+	struct gs_host hl;
 	enum act_next next = ACT_GO;
 	int rc;
 
 	if (!a)
 		return GS_EXIT_FAIL;
-	a->h = h;
+	/* The build record activation judges: the one the options name, else the host's. */
+	hl = *h;
+	if (o->build)
+		hl.build = o->build;
+	a->h = &hl;
 	a->cfg = cfg;
 	a->o = o;
 	a->ari_eff = cfg->ari;
@@ -3600,12 +3585,14 @@ static void livepatch_guard(const struct gs_host *h, const char *bdfs)
 }
 
 /*
- * The early boot step: load the livepatch before udev lets nvidia bind. No removal, no rescan,
- * no deferral. With load_driver the unit also modprobes nvidia once the livepatch is verified
- * enabled with its transition complete: the autoload alias override still keeps nvidia_drm from
- * probing a selected PF before activation, but nvidia itself is loaded here instead of by udev.
- * Idempotent when the livepatch is already loaded with the requested parameters;
- * `geforce_sriov.skip` skips it.
+ * The boot step: load the livepatch before udev lets nvidia bind. No removal, no rescan,
+ * no deferral. With load_driver (the first step of the activate unit, after udev's coldplug) it
+ * waits for udev's queue, then modprobes nvidia once the livepatch is verified enabled with its
+ * transition complete: a driver the user gave a card (bound, or a driver_override) is already in
+ * place by then, and the autoload alias override still keeps nvidia_drm from probing a selected
+ * PF before activation. Idempotent when the livepatch is already loaded with the requested
+ * parameters; `geforce_sriov.skip` skips it. The release of an unselected GPU that NVIDIA's driver
+ * cannot start is a step of activation (act_power_load), after its last load of nvidia.
  */
 int gs_cmd_livepatch(const struct gs_livepatch_opts *o)
 {
@@ -3691,15 +3678,19 @@ int gs_cmd_livepatch(const struct gs_livepatch_opts *o)
 				m.lp_transition);
 			return GS_EXIT_REFUSED;
 		}
-		if (gs_module_loaded(h, "nvidia"))
+		if (!gs_module_loaded(h, "nvidia"))
+			gs_udev_settle(h);
+		if (gs_module_loaded(h, "nvidia")) {
 			printf("nvidia is already loaded; not loading it again\n");
-		else if ((r = gs_module_load(h, 0, "nvidia", NULL, 0, why, sizeof(why)))) {
+		} else if ((r = gs_module_load(h, 0, "nvidia", NULL, 0, why, sizeof(why)))) {
 			fprintf(stderr, "geforce-sriov: nvidia: %s\n", why);
 			if (r == -ETIMEDOUT)
 				livepatch_guard(h, bdfs);
 			return r == -ETIMEDOUT ? GS_EXIT_COLD_CYCLE : GS_EXIT_FAIL;
 		} else {
-			printf("nvidia loaded after the livepatch, before udev binds a selected PF\n");
+			printf("nvidia loaded after the livepatch\n");
+			/* What the load itself raised in udev (rules on NVIDIA's module or devices) ends before activation starts. */
+			gs_udev_settle(h);
 		}
 	}
 	printf("livepatch %s loaded for %s; activation does the rest\n", GS_MODULE_NAME, bdfs);

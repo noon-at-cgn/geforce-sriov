@@ -1,0 +1,22 @@
+=== 40-resmoke-boot start (boot BOOT, kernel KERNEL, Ada=0000:03:00.0 Ampere=0000:04:00.0, dry=1, evidence DRYDIR/40-resmoke-boot-BOOT)
+CHECK this boot differs from the boot that asked for the power cycle :: [ "$(cat $E2E/LAST-REQUEST-BOOT 2>/dev/null)" != "$(bootid)" ]
++ geforce-sriov --version > DRYDIR/40-resmoke-boot-BOOT/version.txt   (expect rc 0)
+CHECK version prints /geforce-sriov 0.4.0/ :: grep -Eq -- 'geforce-sriov 0.4.0' DRYDIR/40-resmoke-boot-BOOT/version.txt
+CHECK livepatch and activate units active (exited), lightdm active :: systemctl is-active --quiet geforce-sriov-livepatch && systemctl is-active --quiet geforce-sriov-activate && systemctl is-active --quiet lightdm
++ geforce-sriov check > DRYDIR/40-resmoke-boot-BOOT/check.txt   (expect rc 0)
++ geforce-sriov status > DRYDIR/40-resmoke-boot-BOOT/status.txt   (expect rc 0)
+CHECK status prints /host programs. video memory: placed from the top of the card down/ :: grep -Eq -- 'host programs. video memory: placed from the top of the card down' DRYDIR/40-resmoke-boot-BOOT/status.txt
+CHECK status does not print /framebuffer slots/ :: ! grep -Eq -- 'framebuffer slots' DRYDIR/40-resmoke-boot-BOOT/status.txt
+CHECK record: confirmation=confirmed-inputs, driver_version_confirmed=1 (top + display chain recorded; rc2 writes confirmed-inputs, not the bare word) :: [ "$(rec confirmation)" = confirmed-inputs ] && [ "$(rec driver_version_confirmed)" = 1 ]
+CHECK status prints /build: confirmation=confirmed-inputs$/ :: grep -Eq -- 'build: confirmation=confirmed-inputs$' DRYDIR/40-resmoke-boot-BOOT/status.txt
+CHECK 4 VFs per card; Ada VFs type 942, Ampere VFs type 525 :: for i in 4 5 6 7; do [ "$(cat /sys/bus/pci/devices/${ADA%.0}.$i/nvidia/current_vgpu_type)" = 942 ] && [ "$(cat /sys/bus/pci/devices/${AMP%.0}.$i/nvidia/current_vgpu_type)" = 525 ] || exit 1; done; [ "$(ls -d /sys/bus/pci/devices/$ADA/virtfn* | wc -l)" = 4 ] && [ "$(ls -d /sys/bus/pci/devices/$AMP/virtfn* | wc -l)" = 4 ]
+CHECK VM134 (Ada first VF) and VM144 (Ampere first VF) start and run guest CUDA :: { up 134 >/dev/null && up 144 >/dev/null && cuda 134 && cuda 144; }
++ sh -c qm status 134; qm status 144; nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv > DRYDIR/40-resmoke-boot-BOOT/vmcheck.txt   (expect rc -)
+CHECK desktop on NVIDIA: lightdm active, X draws with NVIDIA's driver :: systemctl is-active --quiet lightdm && grep -q "draws with NVIDIA" <(geforce-sriov status)
+CHECK all test VMs stopped, none of the legacy VMs started :: vms_stopped
++ geforce-sriov status > DRYDIR/40-resmoke-boot-BOOT/final-status.txt   (expect rc 0)
++ snap rc2-booted
+dry
+CHECK journalctl -k -b: no stop condition (Wi-Fi mac80211 WARNING excluded) :: journalctl -k -b --no-pager | grep -E "$STOP_RE" | grep -vE "r8169|mac80211|ieee80211|iwl_mld" | wc -l | grep -q "^0$"
+CHECK stopcheck since TIME
+=== 40-resmoke-boot: 0 failure(s)

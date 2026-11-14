@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 /*
- * CLI and lifecycle tests for geforce-sriov 0.4.0.
+ * CLI and lifecycle tests for geforce-sriov 0.4.1.
  *
  * Fixture sysfs trees are built in a temporary directory; only read-only commands and DESTDIR
  * staging run against them. The activation flow is exercised in-process against a simulated
@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #include "gs_lifecycle.h"
+#include "tmpdir.h"
 
 static int failures, checks, skips;
 static char tmp[256];
@@ -618,7 +619,8 @@ static void add_iomem_fw(const char *root, const struct fx_topo *k, int bootfb)
  * |   nvidia_uvm needs nvidia; nvidia_vgpu_vfio needs none of NVIDIA's modules   |          |
  * |   (`modinfo -F depends` of the 580.159.01 build on the project's host)       |          |
  * | Unloading nvidia unbinds its devices and removes /proc/driver/nvidia;        | KNOWN    |
- * |   loading it binds every NVIDIA display PF that has no driver                |          |
+ * |   loading it binds every NVIDIA display PF that has no driver and whose      |          |
+ * |   driver_override is empty or names nvidia (pci_match_device)                |          |
  * | NVIDIA's unbindLock is denied while a client holds the GPU; which client is  | ASSUMED  |
  * |   named by each fixture (sim.lock_holder)                                    |          |
  * | Whether a program has nvidia open when activation starts. Both are possible  | ASSUMED  |
@@ -630,8 +632,8 @@ static void add_iomem_fw(const char *root, const struct fx_topo *k, int bootfb)
  * | sriov-manage -e creates the VFs and binds them at once                       | ASSUMED  |
  * | Everything is synchronous: nothing appears later than the call that causes it| ASSUMED  |
  *
- * Not modelled: why KMS on a GPU that is not the boot display breaks its first VF start. That is
- * measured, its mechanism is unknown, and no fixture claims to reproduce it.
+ * Not modelled: why a first VF can fail to start on a non-boot Ada card with KMS (NVOS status 0x51). Its
+ * mechanism is unknown, and no fixture claims to reproduce it; display=boot is the way back.
  */
 
 static struct {
@@ -646,8 +648,12 @@ static struct {
 	const char *run_fail;      /* a command containing this text returns 1 */
 	const char *run_noisy;     /* a command containing this text takes effect and then returns 1 */
 	int lock_denied;           /* NVIDIA's unbindLock reads 0 after writing 1 */
+	int settle_fail;           /* `udevadm settle` exits 1 */
 	int prereq_missing;        /* the host says sriov-manage is not installed */
 	int no_nvidia_modprobe;    /* nvidia-modprobe is not installed */
+	int gpu_info;              /* a loaded nvidia lists each GPU's /proc information with Device Minor = its bus number */
+	const char *open_fail;     /* an open of a node whose path ends in this fails with open_err */
+	int open_err;              /* -errno, or -ETIMEDOUT */
 	/*
 	 * Who holds the GPU, so that unbindLock is denied: "mgr" while nvidia-vgpu-mgr is active, or
 	 * the name of a module (nvidia_drm, nvidia_uvm) while that module is loaded. NULL: nobody.
@@ -1165,7 +1171,13 @@ static int sim_write_impl(const char *path, const char *value)
 	}
 	if (strncmp(r, "bus/pci/drivers/", 16) == 0 && ends_with(r, "/unbind")) {
 		gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/driver", sim.root, value);
-		return unlink(p) ? -errno : 0;
+		if (unlink(p))
+			return -errno;
+		/* The driver's own entry for a GPU goes when the GPU is unbound (when the simulator made it). */
+		gs_pathf(p, sizeof(p), "%s/driver/nvidia/gpus/%s/information", sim.proc, value);
+		if (sim.gpu_info)
+			unlink(p);
+		return 0;
 	}
 	if (strncmp(r, "bus/pci/devices/", 16) == 0 && ends_with(r, "/driver/unbind")) {
 		gs_pathf(p, sizeof(p), "%s/bus/pci/devices/%s/driver", sim.root, value);
@@ -1347,6 +1359,19 @@ static void sim_nvidia_claim(const char *dir, const char *bdf)
 	gs_pathf(q, sizeof(q), "%s/driver", dir);
 	if (!ours || gs_exists(p) || lstat(q, &(struct stat){ 0 }) == 0)
 		return;
+	/* A driver_override names the only driver the PCI core offers the device to. */
+	{
+		char *ov;
+		int other;
+
+		gs_pathf(p, sizeof(p), "%s/driver_override", dir);
+		ov = slurp(p);
+		other = ov && ov[0] && ov[0] != '\n' && strncmp(ov, "(null)", 6) != 0 && strncmp(ov, "nvidia\n", 7) != 0 &&
+			strcmp(ov, "nvidia") != 0;
+		free(ov);
+		if (other)
+			return;
+	}
 	gs_pathf(p, sizeof(p), "%s/bus/pci/drivers/nvidia", sim.root);
 	gs_mkdir_p(p, 0755);
 	if (symlink(p, q))
@@ -1354,6 +1379,10 @@ static void sim_nvidia_claim(const char *dir, const char *bdf)
 	gs_pathf(p, sizeof(p), "%s/driver/nvidia/gpus/%s/unbindLock", sim.proc, bdf);
 	if (!gs_exists(p))
 		writef(p, "0\n");
+	if (sim.gpu_info) {
+		gs_pathf(p, sizeof(p), "%s/driver/nvidia/gpus/%s/information", sim.proc, bdf);
+		writef(p, "Model: \t\t NVIDIA test GPU\nBus Location: \t %s\nDevice Minor: \t %lu\n", bdf, strtoul(bdf + 5, NULL, 16));
+	}
 }
 
 /*
@@ -1623,6 +1652,8 @@ static int sim_run_impl(const char *const argv[])
 	}
 	if (sim.run_fail && strstr(line, sim.run_fail))
 		return 1;
+	if (strcmp(argv[0], "udevadm") == 0 && n > 1 && strcmp(argv[1], "settle") == 0)
+		return sim.settle_fail == 2 ? -ENOENT : sim.settle_fail ? 1 : 0;
 	if (ends_with(argv[0], "sriov-manage") && argv[1] && strcmp(argv[1], "-e") == 0) {
 		char *block;
 
@@ -1773,6 +1804,19 @@ static int sim_run_deadline(const struct gs_host *h, const char *const argv[], u
 	return sim_run(argv);
 }
 
+/* An open of a node: it must exist; open_fail names a node whose open the driver refuses. */
+static int sim_open_node(const struct gs_host *h, const char *path, unsigned int ms)
+{
+	(void)h;
+	(void)ms;
+	sim_log("O %s\n", path + strlen(sim.root));
+	if (access(path, F_OK))
+		return -ENOENT;
+	if (sim.open_fail && ends_with(path, sim.open_fail))
+		return sim.open_err;
+	return 0;
+}
+
 /* The simulated host's programs are the simulator's own; a test can still report one as missing. */
 static int sim_prereq(const struct gs_config *cfg, char *why, size_t len)
 {
@@ -1795,6 +1839,7 @@ static struct gs_host sim_host(void)
 	h.capture = sim_capture;
 	h.write_attr_deadline = sim_write_deadline;
 	h.run_deadline = sim_run_deadline;
+	h.open_node = sim_open_node;
 	h.root = sim.root;
 	h.enable_prereq = sim_prereq;
 	return h;
@@ -1921,6 +1966,18 @@ static void test_config(void)
 	CHECK(gs_config_parse("display=auto", strlen("display=auto"), &c, err, sizeof(err)) == 0 &&
 	      c.display == GS_DISPLAY_AUTO, "last line needs no newline");
 	CHECK(gs_config_parse("", 0, &c, err, sizeof(err)) == 0 && c.present && c.nbdfs == 0, "empty file selects nothing");
+	{
+		struct gs_config bc, bback;
+		char btext[2048];
+		int blen;
+
+		CHECK(gs_config_parse("bdfs=0000:03:00.0\ndisplay=boot\n", strlen("bdfs=0000:03:00.0\ndisplay=boot\n"), &bc, err,
+				      sizeof(err)) == 0 && bc.display == GS_DISPLAY_BOOT, "display=boot parses: %s", err);
+		blen = gs_config_render(&bc, btext, sizeof(btext));
+		CHECK(blen > 0 && contains(btext, "\ndisplay=boot\n") &&
+		      gs_config_parse(btext, (size_t)blen, &bback, err, sizeof(err)) == 0 && bback.display == GS_DISPLAY_BOOT,
+		      "display=boot is written and reads back: %s", btext);
+	}
 
 	CHECK(gs_parse_vfs("4", &c.vfs) == 0 && c.vfs == 4, "vfs 4");
 	CHECK(gs_parse_vfs("0", &c.vfs) != 0 && gs_parse_vfs("01", &c.vfs) != 0 && gs_parse_vfs("17", &c.vfs) != 0 &&
@@ -1937,7 +1994,7 @@ static void test_config(void)
 		gs_pathf(path, sizeof(path), "%s/config-bad", tmp);
 		writef(path, "display=bogus\n");
 		CHECK(gs_config_load(path, &c, err, sizeof(err)) != 0 && contains(err, path) &&
-		      contains(err, "display must be auto, on or off"), "invalid config names the file: %s", err);
+		      contains(err, "display must be auto, on, boot or off"), "invalid config names the file: %s", err);
 	}
 }
 
@@ -2896,7 +2953,7 @@ static void test_livepatch_load_driver(void)
 	lp_opts.boot = 1;
 	lp_opts.load_driver = 1;
 	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK &&
-	      contains(out, "nvidia loaded after the livepatch, before udev binds a selected PF"),
+	      contains(out, "nvidia loaded after the livepatch\n") && !contains(out, "before udev"),
 	      "livepatch then driver: %s", out);
 	log = sim_text("sim.log");
 	CHECK(pos_of(log, "R modprobe geforce_sriov") >= 0 && pos_of(log, "R modprobe nvidia") > 0 &&
@@ -2968,10 +3025,621 @@ static void test_livepatch_load_driver(void)
 
 		gs_pathf(p, sizeof(p), "%s/systemd/geforce-sriov-livepatch.service.in", srcdir);
 		unit = slurp(p);
-		CHECK(unit && count_of(unit, "ExecStart=@BINDIR@/geforce-sriov livepatch --boot --load-driver") == 1 &&
-		      !contains(unit, "livepatch --boot\n"),
-		      "the early unit loads the driver after the livepatch: %s", unit ? unit : "(missing)");
+		CHECK(unit && count_of(unit, "ExecStart=@BINDIR@/geforce-sriov livepatch --boot\n") == 1 &&
+		      !contains(unit, "--load-driver"),
+		      "the early unit loads the livepatch only: %s", unit ? unit : "(missing)");
 		free(unit);
+	}
+}
+
+/* ---- NVIDIA GPUs that are not selected: nvidia loads after udev's rules, status lists them ---- */
+
+static const struct fx_fn gpu_other04[] = {
+	{ "0000:04:00.0", "2d04", "030000", NULL },
+	{ "0000:04:00.1", "22bc", "040300", NULL },
+	{ NULL, NULL, NULL, NULL }
+};
+static const struct fx_fn gpu_other04_vfio[] = {
+	{ "0000:04:00.0", "2d04", "030000", "vfio-pci" },
+	{ NULL, NULL, NULL, NULL }
+};
+static const struct fx_fn gpu_other04_nvidia[] = {
+	{ "0000:04:00.0", "2d04", "030000", "nvidia" },
+	{ NULL, NULL, NULL, NULL }
+};
+static const struct fx_fn gpu_3070_05[] = {
+	{ "0000:05:00.0", "2484", "030000", "nvidia" },
+	{ NULL, NULL, NULL, NULL }
+};
+static const struct fx_fn gpu_ampere_vfio[] = {
+	{ "0000:03:00.0", "2206", "030000", "vfio-pci" },
+	{ NULL, NULL, NULL, NULL }
+};
+
+static void set_override(const char *root, const struct fx_topo *k, const char *bdf, const char *value)
+{
+	char p[GS_PATH_MAX];
+
+	gs_pathf(p, sizeof(p), "%s/devices/%s/%s/driver_override", root, k->bridge_path, bdf);
+	writef(p, "%s\n", value);
+}
+
+/* A boot step host: the selected Ampere card at 03:00.0 and an unselected card at 04:00.0, nvidia not loaded. */
+static void unsel_host(const char *name, const struct fx_fn *other, const char *override, char *root, size_t len)
+{
+	fixture(name, &topo_default, gpu_ampere, 0, NULL, root, len);
+	make_card(root, &topo_display, other, 0, NULL);
+	if (override)
+		set_override(root, &topo_display, "0000:04:00.0", override);
+	sim_writef("livepatch.conf", "bdfs=0000:03:00.0\nvfs=4\n");
+	sim_writef("kernel/livepatch/geforce_sriov/enabled", "1\n");
+	sim_writef("kernel/livepatch/geforce_sriov/transition", "0\n");
+	memset(&lp_opts, 0, sizeof(lp_opts));
+	lp_opts.boot = 1;
+	lp_opts.load_driver = 1;
+}
+
+/*
+ * An activation host: the selected Ampere card at 03:00.0 and an unselected card at 04:00.0. nvidia is not loaded,
+ * so activation loads it and the cards bind to it as they do at a boot.
+ */
+static void unsel_act(const char *name, const struct fx_fn *other, const char *override, char *root, size_t len)
+{
+	act_host(name, &topo_default, gpu_ampere, 0, NULL, root, len);
+	make_card(root, &topo_display, other, 0, NULL);
+	if (override)
+		set_override(root, &topo_display, "0000:04:00.0", override);
+	sim_remove("module/nvidia");
+	sim.gpu_info = 1;
+}
+
+static struct gs_diag_opts unsel_status_opts;
+static int unsel_status_host(void)
+{
+	return gs_cmd_status(&unsel_status_opts);
+}
+
+static int unsel_status(const char *root, char **out)
+{
+	char cfg[GS_PATH_MAX];
+
+	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
+	writef(cfg, "bdfs=0000:03:00.0\n");
+	memset(&unsel_status_opts, 0, sizeof(unsel_status_opts));
+	unsel_status_opts.sysroot = root;
+	unsel_status_opts.config_path = cfg;
+	return run_host(unsel_status_host, out);
+}
+
+static void test_unselected(void)
+{
+	char root[GS_PATH_MAX], p[GS_PATH_MAX], *out, *log, *unit;
+	static const struct fx_topo topo_05 = { "pci0000:00/0000:00:04.0", "0000:05:00.0" };
+	int rc, rc_without;
+
+	/* Units: the early unit loads the livepatch only; the activate unit loads the driver first, before the display manager. */
+	gs_pathf(p, sizeof(p), "%s/systemd/geforce-sriov-livepatch.service.in", srcdir);
+	unit = slurp(p);
+	CHECK(unit && count_of(unit, "ExecStart=") == 1 && count_of(unit, "ExecStart=@BINDIR@/geforce-sriov livepatch --boot\n") == 1 &&
+	      !contains(unit, "load-driver") && contains(unit, "Before=systemd-udevd.service"),
+	      "early unit: livepatch only, still before udev: %s", unit ? unit : "(missing)");
+	free(unit);
+	gs_pathf(p, sizeof(p), "%s/systemd/geforce-sriov-activate.service.in", srcdir);
+	unit = slurp(p);
+	CHECK(unit && count_of(unit, "ExecStartPre=-@BINDIR@/geforce-sriov livepatch --boot --load-driver\n") == 1 &&
+	      count_of(unit, "ExecStartPre=") == 1 && count_of(unit, "\nNotifyAccess=exec\n") == 1 &&
+	      pos_of(unit, "ExecStartPre=") > 0 && pos_of(unit, "ExecStartPre=") < pos_of(unit, "\nExecStart=@BINDIR@") &&
+	      contains(unit, "\nBefore=display-manager.service ") && pos_of(unit, "\n[Unit]") < pos_of(unit, "\nBefore=display-manager.service") &&
+	      pos_of(unit, "\nBefore=display-manager.service") < pos_of(unit, "\n[Service]"),
+	      "activate unit: pre-step before ExecStart, same unit as Before=display-manager: %s", unit ? unit : "(missing)");
+	free(unit);
+
+	/* Order: udevadm settle, then modprobe nvidia; the selected card is bound; no unselected card is touched. */
+	unsel_host("unsel-order", gpu_other04, NULL, root, sizeof(root));
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK && contains(out, "udevadm settle --timeout=30\n") &&
+	      contains(out, "nvidia loaded after the livepatch\n") && !contains(out, "udev has not finished"),
+	      "settle then load: %s", out);
+	log = sim_text("sim.log");
+	CHECK(pos_of(log, "R udevadm settle --timeout=30") >= 0 &&
+	      pos_of(log, "R modprobe nvidia") > pos_of(log, "R udevadm settle --timeout=30") &&
+	      pos_of(log, "R modprobe nvidia") > pos_of(log, "R modprobe geforce_sriov"), "the order in the log: %s", log);
+	free(log);
+	/* A second wait follows the load; the boot step says nothing about the unselected card and opens none. */
+	CHECK(count_of(out, "udevadm settle --timeout=30\n") == 2 &&
+	      pos_of(out, "nvidia loaded after the livepatch\n") < pos_of_last(out, "udevadm settle --timeout=30\n") &&
+	      !contains(out, "0000:04:00.0 (10de:2d04)") && !contains(out, "NVIDIA GPU not selected"),
+	      "settle after the load, no unselected card test: %s", out);
+	free(out);
+	/* No driver rule and none of the user's: nvidia takes the card, as in 0.4.0. */
+	CHECK(sim_exists("bus/pci/devices/0000:04:00.0/driver"), "an unselected card without a rule is bound by nvidia");
+
+	/* udev not idle after 30 s: the load goes on and the line says what may be missing. */
+	unsel_host("unsel-settle-fail", gpu_other04, NULL, root, sizeof(root));
+	sim.settle_fail = 1;
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK &&
+	      contains(out, "udev has not finished its queue after 30 s; a driver_override rule of yours may not have applied yet\n") &&
+	      contains(out, "nvidia loaded after the livepatch\n"), "settle failure continues: %s", out);
+	log = sim_text("sim.log");
+	CHECK(pos_of(log, "R modprobe nvidia") > pos_of(log, "R udevadm settle"), "still loaded after the wait: %s", log);
+	free(log);
+	free(out);
+	sim.settle_fail = 0;
+	/* No udevadm: the line names that, not a wait that did not happen. */
+	unsel_host("unsel-no-udevadm", gpu_other04, NULL, root, sizeof(root));
+	sim.settle_fail = 2;
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK &&
+	      contains(out, "udevadm was not found, so udev's queue was not waited for; a driver_override rule of yours may not have applied yet\n") &&
+	      !contains(out, "udev has not finished") && contains(out, "nvidia loaded after the livepatch\n"),
+	      "udevadm missing: %s", out);
+	free(out);
+	sim.settle_fail = 0;
+
+	/* driver_override=vfio-pci, no driver: nvidia does not bind it; the selected card is bound. */
+	unsel_host("unsel-override", gpu_other04, "vfio-pci", root, sizeof(root));
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK, "override: %s", out);
+	CHECK(!sim_exists("bus/pci/devices/0000:04:00.0/driver") && sim_exists("bus/pci/devices/0000:03:00.0/driver") &&
+	      !sim_exists("proc/driver/nvidia/gpus/0000:04:00.0/unbindLock"),
+	      "the overridden card is not offered to nvidia, the selected one is bound");
+	free(out);
+	/* driver_override=nvidia: the user asked for nvidia. */
+	unsel_host("unsel-override-nvidia", gpu_other04, "nvidia", root, sizeof(root));
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK && sim_exists("bus/pci/devices/0000:04:00.0/driver"),
+	      "override=nvidia is bound: %s", out);
+	free(out);
+
+	/* L2: a card NVIDIA's driver cannot start is released; every other case is left alone. */
+	{
+		static const struct fx_fn gpu_3070_04[] = {
+			{ "0000:04:00.0", "2484", "030000", NULL },
+			{ NULL, NULL, NULL, NULL }
+		};
+		static const struct fx_fn gpu_other04_vf[] = {
+			{ "0000:05:00.2", "2206", "030200", "nvidia" },
+			{ NULL, NULL, NULL, NULL }
+		};
+		static const struct fx_fn gpu_3d04[] = {
+			{ "0000:04:00.0", "2d04", "030200", NULL },
+			{ NULL, NULL, NULL, NULL }
+		};
+		static const struct fx_fn gpu_other05[] = {
+			{ "0000:05:00.0", "2d04", "030000", NULL },
+			{ NULL, NULL, NULL, NULL }
+		};
+		static const struct fx_topo topo_05_l2 = { "pci0000:00/0000:00:04.0", "0000:05:00.0" };
+		char *ov, node[GS_PATH_MAX];
+
+		/* Refused (open gives EIO): override, unbind, stale node removed, one line, exit 0. */
+		unsel_act("unsel-l2-refused", gpu_other04, "", root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      count_of(out, "0000:04:00.0 (10de:2d04): ") == 1 &&
+		      contains(out, "0000:04:00.0 (10de:2d04): NVIDIA's driver cannot start this GPU (open /dev/nvidia4: Input/output error). Released: no driver binds it now (driver_override=geforce-sriov-released)\n"),
+		      "refused card is released: %s", out);
+		ov = sim_text("bus/pci/devices/0000:04:00.0/driver_override");
+		CHECK(ov && contains(ov, GS_UNSELECTED_RELEASED), "the override is set: %s", ov ? ov : "(none)");
+		free(ov);
+		gs_pathf(node, sizeof(node), "%s/dev/nvidia4", root);
+		CHECK(!sim_exists("bus/pci/devices/0000:04:00.0/driver") && !sim_exists("dev/nvidia4"),
+		      "unbound, stale node gone");
+		log = sim_text("sim.log");
+		CHECK(count_of(log, "O /dev/nvidia4\n") == 1 && contains(log, "R nvidia-modprobe -c 4\n") &&
+		      pos_of(log, "gpus/0000:04:00.0/unbindLock 1") > pos_of(log, "O /dev/nvidia4\n") &&
+		      pos_of(log, "W bus/pci/devices/0000:04:00.0/driver_override geforce-sriov-released") >
+		      pos_of(log, "gpus/0000:04:00.0/unbindLock 1") &&
+		      pos_of(log, "W bus/pci/drivers/nvidia/unbind 0000:04:00.0") >
+		      pos_of(log, "W bus/pci/devices/0000:04:00.0/driver_override geforce-sriov-released"),
+		      "order of the release: %s", log);
+		CHECK(pos_of(log, "R modprobe nvidia\n") >= 0 && pos_of(log, "O /dev/nvidia4\n") > pos_of(log, "R modprobe nvidia\n") &&
+		      pos_of(log, "R modprobe nvidia_vgpu_vfio\n") > pos_of(log, "O /dev/nvidia4\n") && !contains(log, "R rmmod nvidia\n"),
+		      "modprobe nvidia < the test open < modprobe nvidia_vgpu_vfio, no rmmod nvidia: %s", log);
+		free(log);
+		free(out);
+		/*
+		 * A second activation in the same boot has nothing to do (every VF is configured), so it opens no node
+		 * and the released card stays without a driver.
+		 */
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "there is nothing to do") &&
+		      !contains(out, "NVIDIA's driver cannot start this GPU"), "second activation: %s", out);
+		log = sim_text("sim.log");
+		CHECK(count_of(log, "O /dev/nvidia4\n") == 1 && count_of(log, "driver_override geforce-sriov-released") == 1 &&
+		      !sim_exists("bus/pci/devices/0000:04:00.0/driver"),
+		      "the released card is not opened again and stays driverless: %s", log);
+		free(log);
+		free(out);
+
+		/* A card the driver starts stays bound; nothing is written for it. */
+		unsel_act("unsel-l2-works", gpu_other04, "", root, sizeof(root));
+		sim.gpu_info = 1;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): NVIDIA's driver started this GPU (open /dev/nvidia4 worked); left on nvidia\n"),
+		      "working card: %s", out);
+		log = sim_text("sim.log");
+		CHECK(sim_exists("bus/pci/devices/0000:04:00.0/driver") && !contains(log, "0000:04:00.0/driver_override") &&
+		      !contains(log, "gpus/0000:04:00.0/unbindLock") && !contains(log, "drivers/nvidia/unbind 0000:04:00.0"),
+		      "working card untouched: %s", log);
+		CHECK(sim_exists("dev/nvidia4"), "a working unselected card keeps /dev/nvidia4 that the test made");
+		free(log);
+		free(out);
+
+		/*
+		 * An activation that stops after the test (nvidia_vgpu_vfio does not load) leaves its lock and the card's
+		 * marker. Once the lock is cleared and activation runs again in the same boot, the card is not opened again;
+		 * and when the marker is there and the run reaches the step, the step skips the card.
+		 */
+		unsel_act("unsel-l2-rerun", gpu_other04, "", root, sizeof(root));
+		sim.run_fail = "modprobe nvidia_vgpu_vfio";
+		CHECK(run_host(activate_host, &out) != GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): NVIDIA's driver started this GPU (open /dev/nvidia4 worked); left on nvidia\n"),
+		      "the first run stops after the test: %s", out);
+		free(out);
+		sim.run_fail = NULL;
+		sim_remove("state/" GS_ATTEMPT_NAME);
+		sim_remove("run/" GS_ACTIVATING_NAME);
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK && sim_exists("run/unselected-tested-0000:04:00.0"),
+		      "the second run finishes, the marker stays: %s", out);
+		log = sim_text("sim.log");
+		CHECK(count_of(log, "O /dev/nvidia4\n") == 1 && sim_exists("bus/pci/devices/0000:04:00.0/driver"),
+		      "one open of the card in the boot: %s", log);
+		free(log);
+		free(out);
+
+		/* A card whose marker is there is skipped, even though the driver would refuse it. */
+		unsel_act("unsel-l2-marked", gpu_other04, "", root, sizeof(root));
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		sim_writef("run/unselected-tested-0000:04:00.0", "\n");
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): not tested again: it was tested earlier in this boot; left as it is\n") &&
+		      sim_exists("bus/pci/devices/0000:04:00.0/driver"), "a marked card is not tested: %s", out);
+		log = sim_text("sim.log");
+		CHECK(!contains(log, "O /dev/nvidia4") && !contains(log, "0000:04:00.0/driver_override"),
+		      "a marked card is not opened or written: %s", log ? log : "");
+		free(log);
+		free(out);
+
+		/* The boot display GPU is not tested at all, even when the driver would refuse it. */
+		unsel_act("unsel-l2-bootvga", gpu_other04, "", root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		gs_pathf(node, sizeof(node), "%s/devices/%s/0000:04:00.0/boot_vga", root, topo_display.bridge_path);
+		writef(node, "1\n");
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "NVIDIA GPU not selected, 0000:04:00.0 (10de:2d04): not tested; it is the boot display GPU. Left on nvidia\n"),
+		      "boot display card: %s", out);
+		log = sim_text("sim.log");
+		CHECK(sim_exists("bus/pci/devices/0000:04:00.0/driver") && !contains(log, "O /dev/nvidia4") &&
+		      !contains(log, "R nvidia-modprobe -c 4\n") && !contains(log, "0000:04:00.0/driver_override"),
+		      "boot display card untouched: %s", log ? log : "");
+		free(log);
+		free(out);
+
+		/* The user's override (nvidia) and the user's driver (vfio-pci): never opened, never written. */
+		unsel_act("unsel-l2-useroverride", gpu_other04, "nvidia", root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK && sim_exists("bus/pci/devices/0000:04:00.0/driver"),
+		      "user override: %s", out);
+		log = sim_text("sim.log");
+		CHECK(!contains(log, "O /dev/nvidia4") && !contains(log, "drivers/nvidia/unbind 0000:04:00.0") &&
+		      !contains(log, "0000:04:00.0/driver_override"), "user override untouched: %s", log ? log : "");
+		free(log);
+		free(out);
+		unsel_act("unsel-l2-uservfio", gpu_other04_vfio, NULL, root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK, "user driver: %s", out);
+		log = sim_text("sim.log");
+		CHECK(!contains(log, "O /dev/nvidia4") && !contains(log, "drivers/nvidia/unbind 0000:04:00.0") &&
+		      !contains(log, "0000:04:00.0/driver_override"), "user driver untouched: %s", log ? log : "");
+		free(log);
+		free(out);
+
+		/* A card in the device table: bound by nvidia and left alone, never opened. */
+		unsel_act("unsel-l2-table", gpu_3070_04, "", root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "NVIDIA GPU not selected, 0000:04:00.0: 10de:2484 GeForce RTX 3070 driver nvidia; Bound by NVIDIA's driver and not activated."),
+		      "table card: %s", out);
+		log = sim_text("sim.log");
+		CHECK(sim_exists("bus/pci/devices/0000:04:00.0/driver") && !contains(log, "O /dev/nvidia4") &&
+		      !contains(log, "drivers/nvidia/unbind 0000:04:00.0") && !contains(log, "0000:04:00.0/driver_override"),
+		      "table card untouched: %s", log ? log : "");
+		free(log);
+		free(out);
+
+		/* unbindLock refused: left bound, one line, the lock written back to 0, no override. */
+		unsel_act("unsel-l2-lock", gpu_other04, "", root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		sim.lock_denied = 1;
+		/* The selected card's unbindLock is denied as well, so the activation stops there, after the step. */
+		CHECK(run_host(activate_host, &out) != GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): NVIDIA's driver cannot start this GPU (open /dev/nvidia4: Input/output error), but it did not grant unbindLock, so a program holds the GPU; left on nvidia\n"),
+		      "lock refused: %s", out);
+		log = sim_text("sim.log");
+		CHECK(sim_exists("bus/pci/devices/0000:04:00.0/driver") && sim_exists("dev/nvidia4") &&
+		      contains(log, "gpus/0000:04:00.0/unbindLock 1") && contains(log, "gpus/0000:04:00.0/unbindLock 0") &&
+		      !contains(log, "0000:04:00.0/driver_override") && !contains(log, "drivers/nvidia/unbind 0000:04:00.0"),
+		      "lock refused: nothing changed: %s", log ? log : "");
+		free(log);
+		free(out);
+
+		/* The open does not finish: left bound, one line, nothing written. */
+		unsel_act("unsel-l2-timeout", gpu_other04, "", root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -ETIMEDOUT;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): cannot test: open /dev/nvidia4 did not finish within 30 s; left on nvidia\n"),
+		      "open timeout: %s", out);
+		log = sim_text("sim.log");
+		CHECK(sim_exists("bus/pci/devices/0000:04:00.0/driver") && !contains(log, "gpus/0000:04:00.0/unbindLock") &&
+		      !contains(log, "0000:04:00.0/driver_override") && !contains(log, "drivers/nvidia/unbind 0000:04:00.0"),
+		      "open timeout: nothing written: %s", log ? log : "");
+		free(log);
+		free(out);
+
+		/* Another error from the open: not the driver's refusal, so no release. */
+		unsel_act("unsel-l2-eacces", gpu_other04, "", root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EACCES;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): cannot test: open /dev/nvidia4: Permission denied; left on nvidia\n") &&
+		      sim_exists("bus/pci/devices/0000:04:00.0/driver"), "other open error: %s", out);
+		free(out);
+
+		/* No nvidia-modprobe: the node cannot be made, so the card cannot be tested. */
+		unsel_act("unsel-l2-nomodprobe", gpu_other04, "", root, sizeof(root));
+		sim.gpu_info = 1;
+		sim.no_nvidia_modprobe = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): cannot test: nvidia-modprobe -c 4 did not make /dev/nvidia4; left on nvidia\n") &&
+		      sim_exists("bus/pci/devices/0000:04:00.0/driver"), "no nvidia-modprobe: %s", out);
+		free(out);
+
+		/* VFs on the host: no card is tested, because an unbind puts their power management back to auto. */
+		unsel_act("unsel-l2-vfs", gpu_other04, "", root, sizeof(root));
+		make_card(root, &topo_05_l2, gpu_other04_vf, 0, NULL);
+		gs_pathf(node, sizeof(node), "%s/devices/%s/0000:05:00.2/physfn", root, topo_05_l2.bridge_path);
+		writef(node, "\n");
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		/* Activation itself refuses before any test: another GPU has a VF. */
+		CHECK(run_host(activate_host, &out) != GS_EXIT_OK &&
+		      contains(out, "VF 0000:05:00.2 of physfn: that GPU is not selected"), "VFs exist: %s", out);
+		log = sim_text("sim.log");
+		CHECK(!contains(log, "O /dev/nvidia4") && !contains(log, "drivers/nvidia/unbind 0000:04:00.0"), "VFs exist: nothing opened: %s", log ? log : "");
+		free(log);
+		free(out);
+
+		/* nvidia_vgpu_vfio loaded: a late unbind is not asked for, so no card is tested. */
+		unsel_act("unsel-l2-vgpuvfio", gpu_other04, "", root, sizeof(root));
+		sim_writef("module/nvidia_vgpu_vfio/refcnt", "0\n");
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): not tested: nvidia_vgpu_vfio is loaded; left on nvidia\n") &&
+		      sim_exists("bus/pci/devices/0000:04:00.0/driver"), "vgpu module loaded: %s", out);
+		log = sim_text("sim.log");
+		CHECK(!contains(log, "O /dev/nvidia4") && !contains(log, "drivers/nvidia/unbind 0000:04:00.0"), "vgpu module loaded: nothing opened: %s", log ? log : "");
+		free(log);
+		free(out);
+
+		/* A 3D-class card has no boot_vga file: it is not the boot display, so it is tested and released. */
+		unsel_act("unsel-l2-3d", gpu_3d04, "", root, sizeof(root));
+		sim_remove("bus/pci/devices/0000:04:00.0/boot_vga");
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): NVIDIA's driver cannot start this GPU (open /dev/nvidia4: Input/output error). Released:") &&
+		      !sim_exists("bus/pci/devices/0000:04:00.0/driver"), "3D-class card without boot_vga: %s", out);
+		free(out);
+
+		/* An unbindLock write that does not finish: the step tests no further card, with one line for it. */
+		unsel_act("unsel-l2-stuck", gpu_other04, "", root, sizeof(root));
+		make_card(root, &topo_05_l2, gpu_other05, 0, NULL);
+		set_override(root, &topo_05_l2, "0000:05:00.0", "");
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia4";
+		sim.open_err = -EIO;
+		sim.write_timeout = "/unbindLock";
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:04:00.0 (10de:2d04): NVIDIA's driver cannot start this GPU (open /dev/nvidia4: Input/output error), but asking it for unbindLock did not finish within 10 s; left as it is\n") &&
+		      contains(out, "0000:05:00.0 (10de:2d04): not tested: a write to NVIDIA's driver for an earlier card did not finish; left on nvidia\n"),
+		      "a stuck write stops the step: %s", out);
+		log = sim_text("sim.log");
+		CHECK(!contains(log, "O /dev/nvidia5"), "no open of the second card: %s", log ? log : "");
+		free(log);
+		free(out);
+	}
+
+	/* A card bound to vfio-pci stays there. */
+	unsel_host("unsel-vfio", gpu_other04_vfio, NULL, root, sizeof(root));
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK, "vfio-pci bound: %s", out);
+	{
+		char target[GS_PATH_MAX];
+		ssize_t n;
+
+		gs_pathf(p, sizeof(p), "%s/bus/pci/devices/0000:04:00.0/driver", root);
+		n = readlink(p, target, sizeof(target) - 1);
+		CHECK(n > 0 && (target[n] = '\0', ends_with(target, "/vfio-pci")), "the card stays on vfio-pci");
+	}
+	free(out);
+
+	/* nvidia already loaded (an early unit of an older install, or modules-load): not loaded again, no wait. */
+	act_host("unsel-loaded", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	sim_writef("livepatch.conf", "bdfs=0000:03:00.0\nvfs=4\n");
+	memset(&lp_opts, 0, sizeof(lp_opts));
+	lp_opts.boot = 1;
+	lp_opts.load_driver = 1;
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK && contains(out, "nvidia is already loaded; not loading it again"),
+	      "loaded: %s", out);
+	log = sim_text("sim.log");
+	CHECK(!contains(log, "R modprobe nvidia") && !contains(log, "udevadm"), "no second load: %s", log ? log : "");
+	free(log);
+	free(out);
+
+	/* A selected card that vfio-pci took (same ID as a passthrough card): activation's refusal names the driver. */
+	act_host("unsel-samepair", &topo_default, gpu_ampere_vfio, 0, NULL, root, sizeof(root));
+	CHECK(run_host(activate_host, &out) != GS_EXIT_OK &&
+	      contains(out, "0000:03:00.0: still bound to vfio-pci after ") &&
+	      contains(out, "0000:03:00.0 is bound to vfio-pci, not nvidia"), "selected card on vfio-pci: %s", out);
+	free(out);
+
+	/* Console order: the pre-step loads nvidia first; phase C then unloads it, hands the framebuffer over, loads it again. */
+	act_host("unsel-console", &topo_display, gpu_display, 1, NULL, root, sizeof(root));
+	sim_remove("module/nvidia_drm");
+	sim_remove("module/nvidia_modeset");
+	sim_remove("module/nvidia");
+	sim_writef("livepatch.conf", "bdfs=0000:04:00.0\nvfs=4\n");
+	memset(&lp_opts, 0, sizeof(lp_opts));
+	lp_opts.boot = 1;
+	lp_opts.load_driver = 1;
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK && contains(out, "nvidia loaded after the livepatch"),
+	      "pre-step on the display host: %s", out);
+	free(out);
+	sim_core_unused();
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "firmware framebuffer simple-framebuffer.0 released"),
+	      "activation after the pre-step: %s", out);
+	log = sim_text("sim.log");
+	CHECK(pos_of(log, "R modprobe nvidia\n") >= 0 && pos_of(log, "R rmmod nvidia\n") > pos_of(log, "R modprobe nvidia\n") &&
+	      pos_of(log, "simple-framebuffer.0/driver/unbind") > pos_of(log, "R rmmod nvidia\n") &&
+	      pos_of(log, "nvidia_drm modeset=1") > pos_of(log, "simple-framebuffer.0/driver/unbind"),
+	      "pre-step load, unload, handoff, display load: %s", log);
+	{
+		const char *l = log, *second = NULL, *first = strstr(l, "R modprobe nvidia\n");
+
+		if (first)
+			second = strstr(first + 1, "R modprobe nvidia\n");
+		CHECK(second && second - log > pos_of(log, "simple-framebuffer.0/driver/unbind") &&
+		      second - log < pos_of(log, "nvidia_drm modeset=1"), "the second nvidia load is after the handoff, before nvidia_drm: %s", log);
+	}
+	free(log);
+	free(out);
+
+	/*
+	 * With the console handoff: nvidia is unloaded for it and loaded again, and the unselected card that the reload
+	 * bound is tested after that load, before nvidia_vgpu_vfio, with no unload of nvidia after it.
+	 */
+	{
+		static const struct fx_fn gpu_other05h[] = {
+			{ "0000:05:00.0", "2d04", "030000", NULL },
+			{ NULL, NULL, NULL, NULL }
+		};
+		static const struct fx_topo topo_05h = { "pci0000:00/0000:00:04.0", "0000:05:00.0" };
+		long ld, rm, op, vf;
+
+		act_host("unsel-l2-console", &topo_display, gpu_display, 1, NULL, root, sizeof(root));
+		make_card(root, &topo_05h, gpu_other05h, 0, NULL);
+		set_override(root, &topo_05h, "0000:05:00.0", "");
+		sim_core_unused();
+		sim.gpu_info = 1;
+		sim.open_fail = "/dev/nvidia5";
+		sim.open_err = -EIO;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
+		      contains(out, "0000:05:00.0 (10de:2d04): NVIDIA's driver cannot start this GPU (open /dev/nvidia5: Input/output error). Released:"),
+		      "handoff host: the refused card is released: %s", out);
+		log = sim_text("sim.log");
+		rm = pos_of(log, "R rmmod nvidia\n");
+		ld = pos_of(log, "R modprobe nvidia\n");
+		op = pos_of(log, "O /dev/nvidia5\n");
+		vf = pos_of(log, "R modprobe nvidia_vgpu_vfio\n");
+		CHECK(rm >= 0 && ld > rm && op > ld && vf > op && count_of(log, "O /dev/nvidia5\n") == 1 &&
+		      pos_of(log, "R rmmod nvidia\n") == pos_of_last(log, "R rmmod nvidia\n"),
+		      "rmmod nvidia < modprobe nvidia < the test open < modprobe nvidia_vgpu_vfio, no rmmod after it: %s", log);
+		free(log);
+		free(out);
+	}
+
+	/* status: each meaning, and the boot display mark. */
+	fixture("unsel-status", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	rc_without = unsel_status(root, &out);
+	CHECK(!contains(out, "NVIDIA GPUs that are not selected"), "no unselected card, no section: %s", out);
+	free(out);
+	make_card(root, &topo_display, gpu_other04, 1, NULL);
+	make_card(root, &topo_05, gpu_3070_05, 0, NULL);
+	rc = unsel_status(root, &out);
+	CHECK(rc == rc_without, "the section does not change the exit status (%d, %d)", rc, rc_without);
+	CHECK(contains(out, "\nNVIDIA GPUs that are not selected:\n0000:04:00.0: 10de:2d04 (not in device table) driver none, boot display\n"
+			    "  No driver is bound. geforce-sriov does not touch it.\n") &&
+	      contains(out, "0000:05:00.0: 10de:2484 GeForce RTX 3070 driver nvidia\n"
+			    "  Bound by NVIDIA's driver and not activated. `sudo geforce-sriov install --device 0000:05:00.0` selects it.\n") &&
+	      pos_of(out, "NVIDIA GPUs that are not selected") > pos_of(out, "0000:03:00.0: 10de:2206"),
+	      "none and nvidia: %s", out);
+	free(out);
+	set_override(root, &topo_display, "0000:04:00.0", "vfio-pci");
+	unsel_status(root, &out);
+	CHECK(contains(out, "0000:04:00.0: 10de:2d04 (not in device table) driver none, driver_override=vfio-pci, boot display\n"
+			    "  No driver is bound, and driver_override=vfio-pci lets only a driver of that name bind it. geforce-sriov does not touch it.\n"),
+	      "override and no driver: %s", out);
+	free(out);
+	fixture("unsel-status2", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	make_card(root, &topo_display, gpu_other04_vfio, 0, NULL);
+	set_override(root, &topo_display, "0000:04:00.0", "vfio-pci");
+	unsel_status(root, &out);
+	CHECK(contains(out, "0000:04:00.0: 10de:2d04 (not in device table) driver vfio-pci, driver_override=vfio-pci\n"
+			    "  Kept by vfio-pci (your configuration). geforce-sriov does not touch it.\n"), "vfio-pci: %s", out);
+	free(out);
+	/* A released card: status says who released it and how to undo it. */
+	fixture("unsel-status-released", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	make_card(root, &topo_display, gpu_other04, 0, NULL);
+	set_override(root, &topo_display, "0000:04:00.0", GS_UNSELECTED_RELEASED);
+	unsel_status(root, &out);
+	CHECK(contains(out, "0000:04:00.0: 10de:2d04 (not in device table) driver none, driver_override=geforce-sriov-released\n"
+			    "  NVIDIA's driver could not start this GPU, so geforce-sriov released it. No driver binds it.\n"
+			    "  To ask NVIDIA's driver to bind it again until the next boot, run: `echo > /sys/bus/pci/devices/0000:04:00.0/driver_override && echo 0000:04:00.0 > /sys/bus/pci/drivers_probe`\n"
+			    "  A card that driver still cannot start stays without a driver. With VFs on the host, run `geforce-sriov check` afterwards. If it says NOT READY, stop the VMs and run `geforce-sriov activate`.\n"
+			    "  To keep it on NVIDIA's driver at every boot, write `nvidia` to its driver_override with a udev rule.\n"),
+	      "released card in status: %s", out);
+	free(out);
+	/* sysfs prints (null) for an unset driver_override: that is no override, for nvidia's bind and for status. */
+	unsel_host("unsel-null", gpu_other04, "(null)", root, sizeof(root));
+	CHECK(run_host(livepatch_host, &out) == GS_EXIT_OK && sim_exists("bus/pci/devices/0000:04:00.0/driver"),
+	      "(null) is bound by nvidia: %s", out);
+	free(out);
+	unsel_status(root, &out);
+	CHECK(contains(out, "0000:04:00.0: 10de:2d04 (not in device table) driver nvidia\n"
+			    "  Bound by NVIDIA's driver and not activated.\n") && !contains(out, "driver_override=") &&
+	      !contains(out, "0000:04:00.1"), "(null) is no override, and the audio function is not listed: %s", out);
+	free(out);
+	/* The audio function of an unselected card never appears. */
+	unsel_host("unsel-audio", gpu_other04, NULL, root, sizeof(root));
+	unsel_status(root, &out);
+	CHECK(contains(out, "0000:04:00.0: 10de:2d04") && !contains(out, "0000:04:00.1"), "audio function not listed: %s", out);
+	free(out);
+	fixture("unsel-status3", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	make_card(root, &topo_display, gpu_other04_nvidia, 0, NULL);
+	unsel_status(root, &out);
+	CHECK(contains(out, "0000:04:00.0: 10de:2d04 (not in device table) driver nvidia\n"
+			    "  Bound by NVIDIA's driver and not activated.\n"), "nvidia, not in the table: %s", out);
+	free(out);
+
+	/* check lists selected cards only: identical with and without an unselected card. */
+	{
+		char *without;
+		int rc_check;
+
+		ready_host("unsel-check", "525", root, sizeof(root));
+		rc_check = run_host(check_host, &without);
+		make_card(root, &topo_display, gpu_other04, 0, NULL);
+		rc = run_host(check_host, &out);
+		CHECK(rc == rc_check && strcmp(out, without) == 0, "check unchanged:\n%s\n--\n%s", without, out);
+		free(without);
+		free(out);
 	}
 }
 
@@ -3084,7 +3752,7 @@ static void test_notify(void)
 	/* The unit: a modest base timeout and the permission to extend it from the main process. */
 	gs_pathf(path, sizeof(path), "%s/systemd/geforce-sriov-activate.service.in", srcdir);
 	unit = slurp(path);
-	CHECK(unit && count_of(unit, "\nType=oneshot\n") == 1 && count_of(unit, "\nNotifyAccess=main\n") == 1 &&
+	CHECK(unit && count_of(unit, "\nType=oneshot\n") == 1 && count_of(unit, "\nNotifyAccess=exec\n") == 1 &&
 	      count_of(unit, "\nTimeoutStartSec=@START_TIMEOUT@\n") == 1 && count_of(unit, "TimeoutStartSec=") == 1 &&
 	      !contains(unit, "TimeoutSec="), "the activation unit extends its own timeout: %s", unit ? unit : "(missing)");
 	free(unit);
@@ -3180,8 +3848,11 @@ static void test_start_timeout(void)
 		{ "RELEASE_WAIT_MS", RELEASE_WAIT_MS, 5000 }, { "GS_BOOT_BIND_WAIT_MS", GS_BOOT_BIND_WAIT_MS, 30000 },
 		{ "GS_MODULE_DEADLINE_MS", GS_MODULE_DEADLINE_MS, 60000 }, { "GS_CAPTURE_TIMEOUT_MS", GS_CAPTURE_TIMEOUT_MS, 5000 },
 		{ "GS_SLOT_FNS", GS_SLOT_FNS, 8 }, { "GS_ACT_CARD_WRITES", GS_ACT_CARD_WRITES, 43 },
-		{ "GS_ACT_MODULE_RUNS", GS_ACT_MODULE_RUNS, 27 }, { "GS_ACTIVATE_CARD_MS", GS_ACTIVATE_CARD_MS, 690000 },
-		{ "GS_ACTIVATE_VF_MS", GS_ACTIVATE_VF_MS, 55000 }, { "GS_ACTIVATE_BASE_MS", GS_ACTIVATE_BASE_MS, 1682000 },
+		{ "GS_ACT_MODULE_RUNS", GS_ACT_MODULE_RUNS, 29 }, { "GS_ACTIVATE_CARD_MS", GS_ACTIVATE_CARD_MS, 690000 },
+		{ "GS_ACTIVATE_VF_MS", GS_ACTIVATE_VF_MS, 55000 }, { "GS_ACTIVATE_PRESTEP_MS", GS_ACTIVATE_PRESTEP_MS, 460000 },
+		{ "GS_UDEV_SETTLE_MS", GS_UDEV_SETTLE_MS, 35000 }, { "GS_ACTIVATE_BASE_MS", GS_ACTIVATE_BASE_MS, 2262000 },
+		{ "GS_UNSELECTED_OPEN_MS", GS_UNSELECTED_OPEN_MS, 30000 }, { "GS_UNSELECTED_BUDGET_MS", GS_UNSELECTED_BUDGET_MS, 120000 },
+		{ "GS_UNSELECTED_CARD_MS", GS_UNSELECTED_CARD_MS, 140000 },
 	};
 	/* How often src/activate.c calls what the sum counts: a new waiting call needs a new term. */
 	static const struct { const char *token; int expect; } sites[] = {
@@ -3190,7 +3861,7 @@ static void test_start_timeout(void)
 		{ "ensure_livepatch(", 3 }, { "gs_sleep_ms(", 13 }, { "h->capture(", 1 },
 	};
 	static const struct { unsigned int cards, vfs, seconds; } rows[] = {
-		{ 0, 4, 1851 }, { 1, 4, 2852 }, { 8, 4, 9859 }, { 32, 4, 33883 }, { 1, 16, 3578 },
+		{ 0, 4, 2489 }, { 1, 4, 3490 }, { 8, 4, 10497 }, { 32, 4, 34521 }, { 1, 16, 4216 },
 	};
 	char path[GS_PATH_MAX], *src;
 
@@ -3768,7 +4439,7 @@ static void test_activate_display(void)
 	free(out);
 }
 
-/* Two cards on two bridges: per-bus rescan, one enable each, display limited to the boot GPU. */
+/* Two cards on two bridges: per-bus rescan, one enable each, display=boot limits KMS to the boot GPU. */
 static void test_activate_mixed(void)
 {
 	char root[GS_PATH_MAX], *out, *log;
@@ -3787,6 +4458,7 @@ static void test_activate_mixed(void)
 	act_cfg.nbdfs = 2;
 	gs_addr_parse("0000:03:00.0", &act_cfg.bdfs[0]);
 	gs_addr_parse("0000:04:00.0", &act_cfg.bdfs[1]);
+	act_cfg.display = GS_DISPLAY_BOOT;
 	CHECK(run_host(activate_host, &out) == GS_EXIT_OK, "two cards: %s", out);
 	log = sim_text("sim.log");
 	CHECK(contains(log, "devices/pci0000:00/0000:00:02.0/pci_bus/0000:03/rescan") &&
@@ -3811,10 +4483,13 @@ static void test_activate_mixed(void)
 }
 
 /*
- * display=on keeps the console on the boot display GPU: a non-boot card is left out of the KMS
- * allowlist with one notice, and a selection without any boot display GPU loads no display
- * stack at all rather than an empty allowlist (which would mean every GPU).
+ * display=on puts KMS on every selected card, the boot display GPU and any other. With display=boot a selection
+ * without any boot display GPU loads no display stack at all rather than an empty allowlist (which would mean
+ * every GPU).
  */
+static struct gs_build_src kms_src;
+static void build_for(struct gs_build_src *src, const char *dir, int display);
+
 static void test_activate_display_on(void)
 {
 	char root[GS_PATH_MAX], *out, *log;
@@ -3834,35 +4509,33 @@ static void test_activate_display_on(void)
 	gs_addr_parse("0000:03:00.0", &act_cfg.bdfs[0]);
 	gs_addr_parse("0000:04:00.0", &act_cfg.bdfs[1]);
 	act_cfg.display = GS_DISPLAY_ON;
+	/* A card that is not the boot display has KMS only when the build record says the display modules are in. */
+	build_for(&kms_src, root, 1);
+	writef(kms_src.record, "kernel=6.8.0\nmodule_build_id=deadbeef01020304\ndisplay=1\nhost_cuda=0\n");
+	act_opts.build = &kms_src;
 
-	/* The dry run names the same allowlist and the clamp, and writes nothing. */
+	/* The dry run names the allowlist with both cards, and writes nothing. */
 	act_opts.dry_run = 1;
 	CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
-	      contains(out, "0000:03:00.0: display=on is limited to the boot display GPU while this card serves VFs; "
-			    "gpu_allow=0x400") &&
-	      contains(out, "gpu_allow=0x400") && !contains(out, "gpu_allow=0x300") &&
+	      contains(out, "gpu_allow=0x300,0x400") && !contains(out, "is limited") &&
 	      !contains(out, "gpu_allow=<display GPU IDs>"), "display=on dry run: %s", out);
 	log = sim_text("sim.log");
 	CHECK(!contains(log, "W ") && !sim_exists("state/" GS_ATTEMPT_NAME), "display=on dry run writes nothing: %s", log);
 	free(log);
 	free(out);
 
-	/* The run loads nvidia_drm with the boot GPU only and prints the same notice. */
+	/* The run loads nvidia_drm with both cards in gpu_allow and prints no limit notice. */
 	act_opts.dry_run = 0;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
-	      contains(out, "0000:03:00.0: display=on is limited to the boot display GPU while this card serves VFs; "
-			    "gpu_allow=0x400"),
-	      "display=on two cards: %s", out);
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && !contains(out, "is limited"), "display=on two cards: %s", out);
 	log = sim_text("sim.log");
-	CHECK(contains(log, "R modprobe --ignore-install nvidia_drm modeset=1 fbdev=1 gpu_allow=0x400") &&
-	      !contains(log, "gpu_allow=0x300") && !contains(log, "0x300,0x400"),
-	      "display=on names only the boot display GPU in gpu_allow: %s", log);
+	CHECK(contains(log, "R modprobe --ignore-install nvidia_drm modeset=1 fbdev=1 gpu_allow=0x300,0x400"),
+	      "display=on names every selected card in gpu_allow: %s", log);
 	CHECK(count_of(log, "R modprobe --ignore-install nvidia_drm") == 2,
 	      "the display stack loads around the VF enable: %s", log);
 	free(log);
 	free(out);
 
-	/* No selected card boots the display (0 and unknown): no stack, and the plain path still runs. */
+	/* display=boot and no selected card boots the display (0 and unknown): no stack, and the plain path still runs. */
 	act_host("act-on-noboot", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
 	make_card(root, &topo_display, gpu_display, 0, NULL);
 	set_bridge_windows(root, &topo_display, 18, 1440);
@@ -3871,10 +4544,9 @@ static void test_activate_display_on(void)
 	act_cfg.nbdfs = 2;
 	gs_addr_parse("0000:03:00.0", &act_cfg.bdfs[0]);
 	gs_addr_parse("0000:04:00.0", &act_cfg.bdfs[1]);
-	act_cfg.display = GS_DISPLAY_ON;
-	CHECK(run_host(activate_host, &out) == GS_EXIT_OK &&
-	      contains(out, "display=on: no selected GPU is the boot display; no display stack is loaded") &&
-	      contains(out, "activation finished"), "display=on without a boot display: %s", out);
+	act_cfg.display = GS_DISPLAY_BOOT;
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished"),
+	      "display=boot without a boot display: %s", out);
 	log = sim_text("sim.log");
 	CHECK(!contains(log, "nvidia_drm") && !contains(log, "nvidia_modeset") &&
 	      !sim_exists("module/nvidia_drm") && !sim_exists("module/nvidia_modeset"),
@@ -4196,7 +4868,7 @@ static void test_slot_hint(void)
 		writef(xml, "<vgpuTypes><vgpuType id=\"942\" name=\"RTX6000-Ada-2Q\"><profileSize>0x80000000</profileSize></vgpuType></vgpuTypes>\n");
 		act_opts.vgpu_config = xml;
 		CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished") &&
-		      contains(out, "0000:03:00.0: with type 942 the VF 0000:03:00.7 may not start: its framebuffer slot ends near the top of the card's 10000 MiB. "
+		      contains(out, "0000:03:00.0: with type 942 the VF 0000:03:00.7 may not start: its fixed range of video memory ends near the top of the card's 10000 MiB. "
 				    "Put VMs on the lower VFs, or choose a smaller type.\n") == fixed,
 		      "slot hint with %s: %s", fixed ? "fixed slots" : "the Ada placement change", out);
 		free(out);
@@ -7290,10 +7962,11 @@ static void test_stale_cap_files(void)
 	static const char *const names[] = { "gs-guest-fb.h", "guest-fb.patch" };
 	char stage[GS_PATH_MAX], p[GS_PATH_MAX], man[GS_PATH_MAX], sha[65], *out, *text;
 
-	for (int edited = 0; edited < 2; edited++) {
+	for (int mode = 0; mode < 3; mode++) {
+		int edited = mode == 1, deleted = mode == 2;
 		FILE *f;
 
-		snprintf(stage, sizeof(stage), "%s/stage-stale-cap-%d", tmp, edited);
+		snprintf(stage, sizeof(stage), "%s/stage-stale-cap-%d", tmp, mode);
 		stage_install(&out, stage);
 		free(out);
 		gs_pathf(man, sizeof(man), "%s" GS_MANIFEST, stage);
@@ -7314,6 +7987,8 @@ static void test_stale_cap_files(void)
 		gs_pathf(p, sizeof(p), "%s/usr/bin/driver-patches/guest-fb/guest-fb.patch", stage);
 		if (edited)
 			writef(p, "edited by hand\n");
+		if (deleted && unlink(p))
+			die(p);
 		stage_install(&out, stage);
 		text = slurp(man);
 		gs_pathf(p, sizeof(p), "%s/usr/bin/driver-patches/guest-fb/gs-guest-fb.h", stage);
@@ -7324,6 +7999,9 @@ static void test_stale_cap_files(void)
 		      contains(text, "/usr/bin/driver-patches/guest-fb\n") == edited,
 		      "stale cap source %d: the manifest keeps only what is still there: %s", edited, text ? text : "");
 		free(text);
+		if (deleted)
+			CHECK(!contains(out, "guest-fb.patch") && !contains(out, "failed"),
+			      "stale cap source, copy deleted by the user: only the manifest line goes, with no complaint: %s", out);
 		free(out);
 	}
 }
@@ -7504,7 +8182,7 @@ static void test_vm_autostart(void)
 
 /* ---- manifest removal rules ------------------------------------------- */
 
-/* install --dry-run and status name the display state activation produces: display=on is limited to the boot display GPU. */
+/* install --dry-run and status name the display state activation produces: display=on puts KMS on a card that is not the boot display. */
 static void test_display_report(void)
 {
 	char root[GS_PATH_MAX], cfg[GS_PATH_MAX], *out;
@@ -7514,12 +8192,12 @@ static void test_display_report(void)
 	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
 	writef(cfg, "bdfs=0000:03:00.0\ndisplay=on\n");
 	run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, NULL);
-	CHECK(contains(out, "display: boot_vga=0, requested=on, effective=off (display=on puts the console on the boot "
-			    "display GPU only)") && !contains(out, "on (forced)"), "install --dry-run, display=on on a non-boot card: %s", out);
+	CHECK(contains(out, "display: boot_vga=0, requested=on, effective=on\n") && !contains(out, "on (forced)"),
+	      "install --dry-run, display=on on a non-boot card: %s", out);
 	free(out);
 	run_cli(&out, NULL, status);
-	CHECK(contains(out, "display: requested=on, effective for the selection: off (no selected GPU is the boot "
-			    "display, so no console is set up)"), "status, display=on without a boot display: %s", out);
+	CHECK(contains(out, "display: requested=on, effective for the selection: on"),
+	      "status, display=on on a non-boot card: %s", out);
 	free(out);
 
 	/* The boot display GPU keeps its line. */
@@ -7531,7 +8209,7 @@ static void test_display_report(void)
 	      "install --dry-run, display=on on the boot display: %s", out);
 	/* The display build's inputs are named before install runs, and no longer once they are given. */
 	CHECK(contains(out, "[FAIL] 0000:03:00.0 is the boot display GPU, so install builds the modules for the host console") &&
-	      contains(out, "--companion-file PATH (or --companion-source DIR): NVIDIA's second package") &&
+	      contains(out, "--companion-file PATH (or --companion-source DIR): the Linux driver package") &&
 	      contains(out, "--nvkms-source PATH: NVIDIA's public kernel module source"), "the checks name the display inputs: %s", out);
 	free(out);
 	{
@@ -7555,7 +8233,7 @@ static void test_display_report(void)
 		      "--no-display needs no input: %s", out);
 		free(out);
 		run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &cuda);
-		CHECK(contains(out, "[FAIL] host CUDA is selected, and its build needs NVIDIA's second package"),
+		CHECK(contains(out, "[FAIL] host CUDA is selected, and its build needs the Linux driver package"),
 		      "host CUDA names its input: %s", out);
 		free(out);
 		run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &skip);
@@ -7569,6 +8247,355 @@ static void test_display_report(void)
 	CHECK(contains(out, "display: requested=on, effective for the boot display GPU: on"),
 	      "status, display=on with the boot display: %s", out);
 	free(out);
+}
+
+/* ---- the KMS table of gs_display_kms() ------------------------------------------------------------ */
+
+static const struct fx_fn gpu_ada_display[] = {
+	{ "0000:04:00.0", "2783", "030000", "nvidia" },
+	{ "0000:04:00.1", "22bc", "040300", "snd_hda_intel" },
+	{ NULL, NULL, NULL, NULL }
+};
+
+static struct gs_build_src kms_src;
+
+/* A card for the pure rule: a table entry of the device id, and the boot role. */
+static void kms_card_of(struct gs_card *c, unsigned int device, int boot_vga)
+{
+	memset(c, 0, sizeof(*c));
+	c->present = 1;
+	c->device = device;
+	c->entry = device ? gs_device_lookup(device) : NULL;
+	c->boot_vga = boot_vga;
+}
+static void build_for(struct gs_build_src *src, const char *dir, int display);
+
+
+/* 1 when the log shows unbindLock taken for bdf before that card's removal: the lock of the removal, not of the re-probe. */
+static int kms_removal_lock(const char *log, const char *bdf)
+{
+	char lock[96], rm[96];
+	long l, r;
+
+	snprintf(lock, sizeof(lock), "gpus/%s/unbindLock 1", bdf);
+	snprintf(rm, sizeof(rm), "devices/%s/remove 1", bdf);
+	l = pos_of(log, lock);
+	r = pos_of(log, rm);
+	return l >= 0 && r >= 0 && l < r;
+}
+
+/*
+ * Two selected cards, 0000:03:00.0 (fns03, not the boot display) and the Ampere boot display 0000:04:00.0,
+ * activated with display=mode (lab 1) or display=boot (lab 0) and, when extra is not NULL, a build record with
+ * display=display_rec and the extra lines. Returns the exit status; the output and the simulator log go to out and log.
+ */
+static int kms_two(const char *name, const struct fx_fn *fns03, enum gs_display_mode mode, int lab, const char *extra,
+		   int display_rec, char **out, char **log)
+{
+	char root[GS_PATH_MAX], nm[96];
+	static const struct fx_topo t4 = { "pci0000:00/0000:00:03.0", "0000:04:00.0" };
+	int rc;
+
+	snprintf(nm, sizeof(nm), "%s-%d", name, lab);
+	act_host(nm, &topo_default, fns03, 0, NULL, root, sizeof(root));
+	make_card(root, &topo_display, gpu_display, 1, NULL);
+	set_bridge_windows(root, &topo_display, 18, 1440);
+	sim_module("nvidia_modeset");
+	sim_module("nvidia_drm");
+	sim_writef("module/geforce_sriov/parameters/bdfs", "0000:03:00.0,0000:04:00.0\n");
+	add_firmware_fb(root, &t4, "simple-framebuffer.0", "simple-framebuffer");
+	add_iomem_fw(root, &t4, 1);
+	gs_copy(sim.display_pf, sizeof(sim.display_pf), "0000:04:00.0");
+	act_cfg.nbdfs = 2;
+	gs_addr_parse("0000:03:00.0", &act_cfg.bdfs[0]);
+	gs_addr_parse("0000:04:00.0", &act_cfg.bdfs[1]);
+	act_cfg.display = lab ? mode : GS_DISPLAY_BOOT;
+	if (extra || lab) {
+		build_for(&kms_src, root, display_rec);
+		writef(kms_src.record, "kernel=6.8.0\nmodule_build_id=deadbeef01020304\ndisplay=%d\nhost_cuda=0\n%s", display_rec,
+		       extra ? extra : "");
+		act_opts.build = &kms_src;
+	}
+	rc = run_host(activate_host, out);
+	*log = sim_text("sim.log");
+	return rc;
+}
+
+/* Which GPUs get KMS is one table, by generation and boot role; the console follows the boot display alone. */
+static void test_kms_table(void)
+{
+	struct gs_config on, off, boot_only;
+	struct gs_card c;
+	struct gs_kms_build ok = { 1, 1 }, noplace = { 0, 1 }, nodisp = { 1, 0 }, unknown = { -1, -1 };
+	char root[GS_PATH_MAX], cfg[GS_PATH_MAX], *out, *log;
+
+	config_of(&on, "");
+	config_of(&off, "display=off\n");
+	config_of(&boot_only, "display=boot\n");
+	CHECK(on.display == GS_DISPLAY_AUTO && off.display == GS_DISPLAY_OFF && boot_only.display == GS_DISPLAY_BOOT,
+	      "the configs for the rule");
+
+	/* Shipped table: every selected card has KMS. An Ada card that is not the boot display needs the Ada placement build. */
+	for (int lab = 1; lab < 2; lab++) {
+		for (unsigned int g = 0; g < 2; g++) {
+			unsigned int dev = g ? 0x2783 : 0x2206;
+
+			kms_card_of(&c, dev, 1);
+			CHECK(gs_display_kms(&on, &c, NULL) == 1 && gs_display_kms(&on, &c, &ok) == 1 &&
+			      gs_display_kms(&on, &c, &noplace) == 1 && gs_display_kms(&on, &c, &nodisp) == 1 &&
+			      gs_display_kms(&off, &c, NULL) == 0 && gs_display_console(&on, &c) == 1 &&
+			      gs_display_console(&off, &c) == 0, "boot display %04x, lab %d: KMS on whatever the record says", dev, lab);
+			for (int boot = 0; boot > -2; boot--) {
+				int want = 1;
+
+				kms_card_of(&c, dev, boot);
+				CHECK(gs_display_console(&on, &c) == 0, "%04x boot_vga %d: no console", dev, boot);
+				CHECK(gs_display_kms(&on, &c, NULL) == want && gs_display_kms(&off, &c, NULL) == 0 &&
+				      gs_display_kms(&boot_only, &c, NULL) == 0 && gs_display_kms(&boot_only, &c, &ok) == 0,
+				      "%04x boot_vga %d, lab %d: KMS %d, none with display=boot", dev, boot, lab, want);
+				CHECK(gs_display_kms(&on, &c, &ok) == want, "%04x non-boot, lab %d, record complete", dev, lab);
+				CHECK(gs_display_kms(&on, &c, &nodisp) == 0, "%04x non-boot: a build without display modules has none", dev);
+				CHECK(gs_display_kms(&on, &c, &unknown) == 0, "%04x non-boot: an unknown build record gives no KMS", dev);
+				/* Only the Ada pair is held to the placement change. */
+				CHECK(gs_display_kms(&on, &c, &noplace) == (g ? 0 : want),
+				      "%04x non-boot, lab %d, no Ada placement in the build: %d", dev, lab, gs_display_kms(&on, &c, &noplace));
+			}
+		}
+		/* A card outside the device table is judged by its boot role alone. */
+		kms_card_of(&c, 0, 1);
+		CHECK(gs_display_kms(&on, &c, NULL) == 1, "unlisted boot card");
+		kms_card_of(&c, 0, 0);
+		CHECK(gs_display_kms(&on, &c, NULL) == 0, "unlisted non-boot card");
+	}
+	kms_card_of(&c, 0x2206, 1);
+	CHECK(gs_display_kms(&boot_only, &c, NULL) == 1 && gs_display_console(&boot_only, &c) == 1, "display=boot: the boot display keeps KMS");
+
+	/* Two cards, boot_vga 1 and 0. lab 0: display=boot, KMS on the boot card only. lab 1: both cards in gpu_allow. */
+	for (int lab = 0; lab < 2; lab++) {
+		CHECK(kms_two("kms-two", gpu_ampere, GS_DISPLAY_AUTO, lab, NULL, 1, &out, &log) == GS_EXIT_OK &&
+		      contains(out, "activation finished"), "two cards, lab %d: %s", lab, out);
+		CHECK(contains(log, lab ? "gpu_allow=0x300,0x400" : "gpu_allow=0x400") && (lab || !contains(log, "0x300")),
+		      "the allowlist, lab %d: %s", lab, log);
+		CHECK(count_of(out, "firmware framebuffer simple-framebuffer.0 released") == 1,
+		      "the firmware framebuffer is released once, for the boot card, lab %d: %s", lab, out);
+		CHECK(count_of(log, "R modprobe --ignore-install nvidia_drm modeset=1 fbdev=1 gpu_allow=") == 2 &&
+		      count_of(log, lab ? "nvidia_drm modeset=1 fbdev=1 gpu_allow=0x300,0x400" :
+					  "nvidia_drm modeset=1 fbdev=1 gpu_allow=0x400") == 2,
+		      "the display stack comes back after the re-probe with the same allowlist, lab %d: %s", lab, log);
+		/* The non-boot card takes unbindLock when it has no KMS; with KMS nvidia_drm is its client and the lock is skipped. */
+		CHECK(kms_removal_lock(log, "0000:03:00.0") == !lab && kms_removal_lock(log, "0000:04:00.0") == 0,
+		      "unbindLock of the non-boot card, lab %d: %s", lab, log);
+		CHECK(contains(out, "is limited") == 0, "display=auto prints no limit notice, lab %d", lab);
+		free(log);
+		free(out);
+	}
+	/* display=on prints no limit notice either. */
+	for (int lab = 0; lab < 2; lab++) {
+		CHECK(kms_two("kms-two-on", gpu_ampere, GS_DISPLAY_ON, lab, NULL, 1, &out, &log) == GS_EXIT_OK &&
+		      !contains(out, "is limited"), "display=on, lab %d: %s", lab, out);
+		free(log);
+		free(out);
+	}
+
+	/* An Ada card that is not the boot display needs a build with the Ada placement. */
+	CHECK(kms_two("kms-ada-nb", gpu_ada, GS_DISPLAY_AUTO, 1, "ada_placement=1\n", 1, &out, &log) == GS_EXIT_OK &&
+	      contains(log, "gpu_allow=0x300,0x400") && count_of(out, "simple-framebuffer.0 released") == 1, "Ada non-boot, placement build: %s", out);
+	CHECK(kms_removal_lock(log, "0000:03:00.0") == 0, "Ada non-boot KMS card: no unbindLock: %s", log);
+	free(log);
+	free(out);
+	CHECK(kms_two("kms-ada-nb0", gpu_ada, GS_DISPLAY_AUTO, 1, "ada_placement=0\n", 1, &out, &log) == GS_EXIT_OK &&
+	      contains(log, "gpu_allow=0x400") && !contains(log, "0x300"), "Ada non-boot, fixed-slot build: %s", out);
+	CHECK(kms_removal_lock(log, "0000:03:00.0") == 1, "Ada non-boot without KMS takes the lock: %s", log);
+	free(log);
+	free(out);
+	CHECK(kms_two("kms-ada-nbold", gpu_ada, GS_DISPLAY_AUTO, 1, "", 1, &out, &log) == GS_EXIT_OK &&
+	      contains(log, "gpu_allow=0x400") && !contains(log, "0x300"), "Ada non-boot, record from before the key: %s", out);
+	free(log);
+	free(out);
+	/* An Ada boot display keeps KMS whatever the record says: that is what 0.4.0 does. */
+	act_host("kms-ada-boot", &topo_display, gpu_ada_display, 1, NULL, root, sizeof(root));
+	build_for(&kms_src, root, 1);
+	writef(kms_src.record, "kernel=6.8.0\nmodule_build_id=deadbeef01020304\ndisplay=1\nhost_cuda=0\nada_placement=0\n");
+	act_opts.build = &kms_src;
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "firmware framebuffer simple-framebuffer.0 released"),
+	      "Ada boot display, fixed-slot record: %s", out);
+	log = sim_text("sim.log");
+	CHECK(contains(log, "gpu_allow=0x400"), "Ada boot display keeps KMS: %s", log);
+	free(log);
+	free(out);
+
+	/* Only a non-boot card selected, and a build without display modules: no refusal, no display load, no release. */
+	for (int lab = 0; lab < 2; lab++) {
+		act_host(lab ? "kms-nb-only-1" : "kms-nb-only-0", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+		build_for(&kms_src, root, 0);
+		act_opts.build = &kms_src;
+		act_cfg.display = lab ? GS_DISPLAY_AUTO : GS_DISPLAY_BOOT;
+		CHECK(run_host(activate_host, &out) == GS_EXIT_OK && contains(out, "activation finished") &&
+		      !contains(out, "refused") && !contains(out, "simple-framebuffer.0 released"),
+		      "non-boot card only, no display modules, lab %d: %s", lab, out);
+		log = sim_text("sim.log");
+		CHECK(!contains(log, "nvidia_drm") && !contains(log, "nvidia_modeset") && !contains(log, "unbind simple") &&
+		      kms_removal_lock(log, "0000:03:00.0") == 1,
+		      "no display load, and the lock is taken, lab %d: %s", lab, log);
+		free(log);
+		free(out);
+	}
+	/* Entry on and the build has the modules: the non-boot card alone gets KMS, and no console is released. */
+	act_host("kms-nb-only-on", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	act_cfg.display = GS_DISPLAY_AUTO;
+	sim_module("nvidia_modeset");
+	sim_module("nvidia_drm");
+	build_for(&kms_src, root, 1);
+	act_opts.build = &kms_src;
+	gs_copy(sim.display_pf, sizeof(sim.display_pf), "0000:03:00.0");
+	CHECK(run_host(activate_host, &out) == GS_EXIT_OK && !contains(out, "simple-framebuffer.0 released"),
+	      "non-boot card only, display modules built, entry on: %s", out);
+	log = sim_text("sim.log");
+	CHECK(contains(log, "nvidia_drm modeset=1 fbdev=1 gpu_allow=0x300") && !contains(log, "0x300,") &&
+	      kms_removal_lock(log, "0000:03:00.0") == 0, "KMS on the lone non-boot card: %s", log);
+	free(log);
+	free(out);
+
+	/* A wrong live allowlist with VFs present is refused, not reloaded. */
+	CHECK(kms_two("kms-wrong-allow", gpu_ampere, GS_DISPLAY_AUTO, 1, NULL, 1, &out, &log) == GS_EXIT_OK,
+	      "the run that makes the VFs: %s", out);
+	free(log);
+	free(out);
+	sim_writef("module/nvidia_drm/parameters/gpu_allow", "0x400\n");
+	act_opts.boot = 0;
+	CHECK(run_host(activate_host, &out) != GS_EXIT_OK &&
+	      contains(out, "gpu_allow=0x400, not modeset=1 fbdev=1 gpu_allow=0x300,0x400"),
+	      "a wrong live allowlist with VFs: %s", out);
+	log = sim_text("sim.log");
+	CHECK(count_of(log, "R rmmod nvidia_drm") == 2 && count_of(log, "R modprobe --ignore-install nvidia_drm") == 2,
+	      "nvidia_drm is not unloaded or reloaded under the VFs: %s", log);
+	free(log);
+	free(out);
+
+	/* The build decision and the reports follow the rule. */
+	{
+		struct gs_config e;
+		char why[256];
+		const char *txt[2] = { "bdfs=0000:03:00.0\n", "bdfs=0000:03:00.0\ndisplay=on\n" };
+		const char *boot_txt = "bdfs=0000:03:00.0\ndisplay=boot\n";
+
+		fixture("kms-eff-boot", &topo_default, gpu_ampere, 1, NULL, root, sizeof(root));
+		config_of(&e, "bdfs=0000:03:00.0\n");
+		CHECK(gs_display_effective(root, &e, 0, why, sizeof(why)) == 1 && contains(why, "automatic for selected boot-display GPU"),
+		      "boot card, no inputs: %s", why);
+		config_of(&e, "bdfs=0000:03:00.0\ndisplay=off\n");
+		CHECK(gs_display_effective(root, &e, 1, why, sizeof(why)) == 0 && contains(why, "not enabled"), "display=off: %s", why);
+		fixture("kms-eff-nb", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+		for (int lab = 0; lab < 2; lab++)
+			for (int m = 0; m < 2; m++)
+				for (int inputs = 0; inputs < 2; inputs++) {
+					int want = lab && inputs;
+
+					config_of(&e, lab ? txt[m] : boot_txt);
+					CHECK(gs_display_effective(root, &e, inputs, why, sizeof(why)) == want,
+					      "non-boot only, lab %d, display=%s, inputs %d: %s", lab, m ? "on" : "auto", inputs, why);
+				}
+		/* Inputs count as given only when both the guest package and the module source are. */
+		CHECK(gs_display_inputs(NULL, "a", NULL, "b") == 1 && gs_display_inputs(NULL, NULL, "a", "b") == 1 &&
+		      gs_display_inputs(NULL, "a", NULL, NULL) == 0 && gs_display_inputs(NULL, NULL, NULL, "b") == 0 &&
+		      gs_display_inputs(NULL, NULL, NULL, NULL) == 0, "inputs given");
+	}
+	/* install --dry-run and status say the same. */
+	fixture("kms-report", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
+	writef(cfg, "bdfs=0000:03:00.0\ndisplay=boot\n");
+	run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, NULL);
+	CHECK(contains(out, "display: boot_vga=0, requested=boot, effective=off\n"), "dry run, display=boot: %s", out);
+	free(out);
+	memset(&hook_status_opts, 0, sizeof(hook_status_opts));
+	hook_status_opts.sysroot = root;
+	hook_status_opts.config_path = cfg;
+	run_host(hook_status_host, &out);
+	CHECK(contains(out, "display: requested=boot, effective for the selection: off\n"), "status, display=boot: %s", out);
+	free(out);
+	writef(cfg, "bdfs=0000:03:00.0\ndisplay=on\n");
+	run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, NULL);
+	CHECK(contains(out, "display: boot_vga=0, requested=on, effective=on\n"), "dry run, display=on: %s", out);
+	free(out);
+	run_host(hook_status_host, &out);
+	CHECK(contains(out, "display: requested=on, effective for the selection: on"), "status, display=on: %s", out);
+	free(out);
+}
+
+/*
+ * The build and report lines for every cell of display (auto, on, off) x the card's boot role x the build inputs
+ * (given or not) x the table entry (off, on): setup's summary, install --dry-run's card line and status.
+ */
+static void test_kms_reports(void)
+{
+	static const char *const mode[] = { "auto", "on", "off" };
+	static const enum gs_display_mode mode_v[] = { GS_DISPLAY_AUTO, GS_DISPLAY_ON, GS_DISPLAY_OFF };
+
+	for (int boot = 0; boot < 2; boot++) {
+		char nocfg[GS_PATH_MAX];
+		char root[GS_PATH_MAX], cfg[GS_PATH_MAX];
+
+		fixture(boot ? "kms-rep-boot" : "kms-rep-nb", &topo_default, gpu_ampere, boot, NULL, root, sizeof(root));
+		gs_pathf(cfg, sizeof(cfg), "%s/config", root);
+		gs_pathf(setup_log, sizeof(setup_log), "%s/setup.log", root);
+		setup_write_config = NULL;
+		for (int m = 0; m < 3; m++)
+			for (int inputs = 0; inputs < 2; inputs++)
+				for (int lab = 0; lab < 2; lab++) {
+					int kms = m != 2 && (boot || lab);
+					int build = m != 2 && (boot || (lab && inputs));
+					char want[256], *out;
+					struct gs_diag_opts extra = { 0 };
+					struct gs_install_opts o;
+
+					const char *cm = lab || m == 2 ? mode[m] : "boot"; /* lab 0: display=boot instead of auto and on */
+
+					writef(cfg, "bdfs=0000:03:00.0\ndisplay=%s\n", cm);
+
+					/* install --dry-run: the card's line follows the KMS rule alone. */
+					if (inputs)
+						extra.companion_file = cfg, extra.nvkms_source = root;
+					run_hostcheck(&out, GS_HOSTCHECK_PRE, root, cfg, &extra);
+					snprintf(want, sizeof(want), "display: boot_vga=%d, requested=%s, effective=%s\n", boot, cm,
+						 kms ? (boot ? "on (the boot display)" : "on") : "off");
+					CHECK(contains(out, want), "dry run, boot %d, display=%s, inputs %d, lab %d: %s", boot, mode[m], inputs,
+					      lab, out);
+					free(out);
+
+					/* status. */
+					memset(&hook_status_opts, 0, sizeof(hook_status_opts));
+					hook_status_opts.sysroot = root;
+					hook_status_opts.config_path = cfg;
+					run_host(hook_status_host, &out);
+					snprintf(want, sizeof(want), "display: requested=%s, effective for %s: %s\n", cm,
+						 boot ? "the boot display GPU" : "the selection", kms ? "on" : "off");
+					CHECK(contains(out, want), "status, boot %d, display=%s, lab %d: %s", boot, mode[m], lab, out);
+					free(out);
+
+					/* setup on a host with a config: the build decision names why display=on builds nothing. */
+					setup_opts(&o, NULL);
+					gs_addr_parse("0000:03:00.0", &o.devices[0]);
+					if (inputs)
+						o.companion_file = cfg, o.nvkms_source = root;
+					run_setup(root, NULL, &o, 1, cfg, NULL, &out);
+					CHECK(contains(out, "Display: display=on is set, but the display modules are not built.") ==
+					      (m == 1 && lab && !build), "setup with a config, boot %d, display=%s, inputs %d, lab %d: %s", boot,
+					      mode[m], inputs, lab, out);
+					free(out);
+
+					/* setup on a first install: the summary says whether install builds the display modules. */
+					if (lab) {
+						gs_pathf(nocfg, sizeof(nocfg), "%s/no-config", root);
+						o.display_set = 1;
+						o.display = mode_v[m];
+						run_setup(root, "none\n", &o, 1, nocfg, NULL, &out);
+						snprintf(want, sizeof(want), "  display:      %s\n", build ? "enabled" : "not enabled");
+						CHECK(contains(out, want), "setup summary, boot %d, display=%s, inputs %d, lab %d: %s", boot,
+						      mode[m], inputs, lab, out);
+						free(out);
+					}
+				}
+	}
 }
 
 /*
@@ -7632,7 +8659,7 @@ static void test_autoload_scope(void)
 
 		CHECK(run_cli(&out, NULL, both) == GS_EXIT_OK &&
 		      contains(out, "/usr/src/nvidia-580.159.01 --display --host-cuda ") &&
-		      contains(out, "Host desktop: enabled (host_desktop=auto); NVIDIA's graphics libraries come from NVIDIA's second driver package.\n"),
+		      contains(out, "Host desktop: enabled (host_desktop=auto); NVIDIA's graphics libraries come from the Linux driver package.\n"),
 		      "the staged hint names both features, and the host desktop is on with the display build: %s", out);
 		free(out);
 	}
@@ -7671,6 +8698,43 @@ static void test_autoload_scope(void)
 	text = slurp(p);
 	CHECK(text && !contains(text, GS_AUTOLOAD_PATH), "the manifest no longer lists it: %s", text ? text : "");
 	free(text);
+}
+
+/* The alias file keeps udev from loading nvidia; the warning follows the unit whose first step loads it. */
+static void test_unselected_units(void)
+{
+	char root[GS_PATH_MAX], cfg[GS_PATH_MAX], units[GS_PATH_MAX], mod[GS_PATH_MAX], p[GS_PATH_MAX], *out;
+	struct gs_diag_opts extra = { 0 };
+
+	fixture("unsel-units", &topo_default, gpu_ampere, 0, NULL, root, sizeof(root));
+	gs_pathf(cfg, sizeof(cfg), "%s/config", root);
+	writef(cfg, "bdfs=0000:03:00.0\n");
+	gs_pathf(units, sizeof(units), "%s/units", root);
+	gs_pathf(mod, sizeof(mod), "%s/modprobe.d", root);
+	gs_pathf(p, sizeof(p), "%s/multi-user.target.wants", units);
+	gs_mkdir_p(p, 0755);
+	gs_mkdir_p(mod, 0755);
+	gs_pathf(p, sizeof(p), "%s/geforce-sriov-autoload.conf", mod);
+	writef(p, "alias pci:v000010DEd*sv*sd*bc03sc00i00* off\n");
+	extra.unit_dir = units;
+	extra.modprobe_dir = mod;
+	run_hostcheck(&out, GS_HOSTCHECK_POST, root, cfg, &extra);
+	CHECK(contains(out, "geforce-sriov-activate.service, whose first step loads it at boot instead, is not enabled"),
+	      "activate unit not enabled: warned: %s", out);
+	free(out);
+	/* The early unit's link alone does not stand in for it. */
+	gs_pathf(p, sizeof(p), "%s/sysinit.target.wants", units);
+	gs_mkdir_p(p, 0755);
+	gs_pathf(p, sizeof(p), "%s/sysinit.target.wants/" GS_UNIT_LIVEPATCH, units);
+	link_to("../" GS_UNIT_LIVEPATCH, p);
+	run_hostcheck(&out, GS_HOSTCHECK_POST, root, cfg, &extra);
+	CHECK(contains(out, "whose first step loads it at boot instead, is not enabled"), "livepatch link alone: still warned: %s", out);
+	free(out);
+	gs_pathf(p, sizeof(p), "%s/multi-user.target.wants/" GS_UNIT_ACTIVATE, units);
+	link_to("../" GS_UNIT_ACTIVATE, p);
+	run_hostcheck(&out, GS_HOSTCHECK_POST, root, cfg, &extra);
+	CHECK(!contains(out, "stops udev from loading NVIDIA's driver"), "activate unit enabled: no warning: %s", out);
+	free(out);
 }
 
 static void test_manifest_remove(void)
@@ -8385,7 +9449,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "set GS_CLI and GS_SRC (make test does)\n");
 		return 2;
 	}
-	snprintf(tmp, sizeof(tmp), "/tmp/gs-lifecycle-test.XXXXXX");
+	gs_test_template(tmp, sizeof(tmp), "gs-lifecycle-test.XXXXXX");
 	if (!mkdtemp(tmp))
 		die("mkdtemp");
 
@@ -8407,6 +9471,7 @@ int main(int argc, char **argv)
 	RUN(test_daemon_ready);
 	RUN(test_livepatch_guard);
 	RUN(test_livepatch_load_driver);
+	RUN(test_unselected);
 	RUN(test_activate_rescan);
 	RUN(test_notify);
 	RUN(test_hook_report_cleared);
@@ -8421,6 +9486,8 @@ int main(int argc, char **argv)
 	RUN(test_activate_display);
 	RUN(test_activate_mixed);
 	RUN(test_activate_display_on);
+	RUN(test_kms_table);
+	RUN(test_kms_reports);
 	RUN(test_activate_d3cold_consent);
 	RUN(test_activate_handoff_vfs);
 	RUN(test_activate_stops);
@@ -8459,6 +9526,7 @@ int main(int argc, char **argv)
 	RUN(test_autoload_scope);
 	RUN(test_display_report);
 	RUN(test_hostcheck_modes);
+	RUN(test_unselected_units);
 	RUN(test_manifest_remove);
 
 	printf("test_lifecycle: %d checks, %d failures, %d skipped\n", checks, failures, skips);

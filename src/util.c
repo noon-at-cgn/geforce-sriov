@@ -675,6 +675,39 @@ static int run_deadline_cb(const struct gs_host *h, const char *const argv[], un
 	return -ECHILD;
 }
 
+/*
+ * One open of a device node in a child, so that an open stuck in the kernel cannot hold the caller. The
+ * child's exit status carries errno of a failed open (0: it opened). A child that does not end in time is
+ * killed and not waited for beyond reap_bounded's grace.
+ */
+static int open_node_cb(const struct gs_host *h, const char *path, unsigned int ms)
+{
+	long deadline = mono_ms() + (long)(ms ? ms : 1);
+	int st, r;
+	pid_t pid;
+
+	(void)h;
+	fflush(NULL);
+	pid = fork();
+	if (pid < 0)
+		return -errno;
+	if (pid == 0) {
+		int fd = open(path, O_RDWR | O_CLOEXEC | O_NOCTTY);
+
+		if (fd < 0)
+			_exit(errno > 0 && errno < 256 ? errno : ECHILD);
+		close(fd);
+		_exit(0);
+	}
+	r = reap_bounded(pid, &st, deadline, 0);
+	if (r == 0)
+		return -ETIMEDOUT;
+	/* The child ended and its status is lost, or it did not exit: not a verdict on the open. */
+	if (r < 0 || !WIFEXITED(st))
+		return -ECHILD;
+	return WEXITSTATUS(st) ? -WEXITSTATUS(st) : 0;
+}
+
 const struct gs_host gs_host_live = {
 	.sys = GS_LIVE_SYSFS,
 	.proc = GS_LIVE_PROC,
@@ -685,6 +718,7 @@ const struct gs_host gs_host_live = {
 	.capture = gs_run_capture,
 	.write_attr_deadline = write_attr_deadline_cb,
 	.run_deadline = run_deadline_cb,
+	.open_node = open_node_cb,
 	.root = "",
 	.build = &gs_build_live,
 	.enable_prereq = gs_enable_prereq,

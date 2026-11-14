@@ -402,8 +402,8 @@ static int put_selection(struct ctx *x, const char *src, const char *const *subs
 	 * udev resolves nvidia_drm from its PCI class alias and inserts it as soon as a selected GPU
 	 * appears. A display module that holds the GPU makes NVIDIA's driver deny unbindLock, and the
 	 * VF enable then fails. Mapping the three aliases away keeps udev from loading anything for
-	 * them; nvidia, nvidia_drm and nvidia_vgpu_vfio all carry them. The early unit loads nvidia
-	 * (--load-driver) and activation loads the other two, so the file is written only while a GPU
+	 * them; nvidia, nvidia_drm and nvidia_vgpu_vfio all carry them. The activate unit's first step
+	 * loads nvidia (--load-driver) and activation loads the other two, so the file is written only while a GPU
 	 * is selected, which is when those units are enabled. Without a selection nothing would load
 	 * NVIDIA's driver at boot, so an unchanged copy from an earlier install is removed.
 	 */
@@ -719,8 +719,15 @@ static int ada_placement_differs(const char *record, int want)
 	return have != want;
 }
 
+int gs_display_inputs(const char *dir, const char *companion_file, const char *companion_source,
+		      const char *nvkms_source)
+{
+	return (companion_file || companion_source || (dir && gs_kept_input(dir, "companion"))) &&
+	       (nvkms_source || (dir && gs_kept_input(dir, "nvkms")));
+}
+
 /* 1 when the effective build needs display, with the line that says why; 0 otherwise. */
-int gs_display_effective(const char *sys, const struct gs_config *cfg, char *why, size_t len)
+int gs_display_effective(const char *sys, const struct gs_config *cfg, int inputs, char *why, size_t len)
 {
 	if (cfg->display == GS_DISPLAY_OFF) {
 		gs_copy(why, len, "Display: not enabled.");
@@ -731,11 +738,13 @@ int gs_display_effective(const char *sys, const struct gs_config *cfg, char *why
 
 		if (sys)
 			gs_card_inspect(sys, &cfg->bdfs[i], &c);
-		if (sys && c.present && c.boot_vga == 1) {
+		if (sys && c.present && gs_display_kms(cfg, &c, NULL) && (gs_display_console(cfg, &c) || inputs)) {
 			if (cfg->display == GS_DISPLAY_ON)
 				gs_copy(why, len, "Display: explicitly enabled.");
-			else
+			else if (gs_display_console(cfg, &c))
 				snprintf(why, len, "Display: automatic for selected boot-display GPU %s.", cfg->bdfs[i].str);
+			else
+				snprintf(why, len, "Display: automatic for selected GPU %s.", cfg->bdfs[i].str);
 			return 1;
 		}
 	}
@@ -745,8 +754,8 @@ int gs_display_effective(const char *sys, const struct gs_config *cfg, char *why
 		return 1;
 	}
 	if (cfg->display == GS_DISPLAY_ON) {
-		gs_copy(why, len, "Display: display=on is set, but no selected GPU is the boot display. The host console is only "
-			"ever put on the boot display GPU, so the display modules are not built.");
+		gs_copy(why, len, "Display: display=on is set, but the display modules are not built. A GPU that is not the boot display needs "
+			"the Linux driver package and NVIDIA's public kernel module source.");
 		return 0;
 	}
 	gs_copy(why, len, "Display: not enabled.");
@@ -1113,7 +1122,10 @@ int gs_cmd_install(const struct gs_install_opts *o)
 	if (o->vfs)
 		printf("vfs=%u takes effect when the livepatch module geforce_sriov loads at the next boot: power the machine off and on%s\n", o->vfs,
 		       live ? "" : ". Staging checks no card: run `geforce-sriov install --dry-run` on the target host");
-	display = gs_display_effective(live ? GS_LIVE_SYSFS : NULL, &cfg, display_why, sizeof(display_why));
+	display = gs_display_effective(live ? GS_LIVE_SYSFS : NULL, &cfg,
+					gs_display_inputs(live ? GS_INPUTS_DIR : NULL, o->companion_file, o->companion_source,
+							  o->nvkms_source),
+					display_why, sizeof(display_why));
 	printf("%s\n", display_why);
 	printf("Host CUDA: %s.\n", cfg.host_cuda == GS_SW_ON ? "enabled" : "disabled");
 	/* The graphics libraries are for the console and the desktop of the display build; without it there is nothing for them to draw on. */
@@ -1121,7 +1133,7 @@ int gs_cmd_install(const struct gs_install_opts *o)
 	if (cfg.host_desktop == GS_DESKTOP_OFF)
 		printf("Host desktop: disabled (host_desktop=off).\n");
 	else if (want_desktop)
-		printf("Host desktop: enabled (host_desktop=%s); NVIDIA's graphics libraries come from NVIDIA's second driver package.\n",
+		printf("Host desktop: enabled (host_desktop=%s); NVIDIA's graphics libraries come from the Linux driver package.\n",
 		       cfg.host_desktop == GS_DESKTOP_ON ? "on" : "auto");
 	else
 		printf("Host desktop: not installed (host_desktop=%s): it needs the display build, and the display build is off here.\n",
@@ -1129,8 +1141,8 @@ int gs_cmd_install(const struct gs_install_opts *o)
 	if (o->skip_driver && feature_change)
 		printf("--driver=skip: the config records the feature selection, but NVIDIA's files are not rebuilt for it\n");
 	if (!live && cfg.display == GS_DISPLAY_AUTO)
-		printf("staging: display=auto is judged on the target host; install there builds the display modules only\n"
-		       "when a selected GPU is its boot display\n");
+		printf("staging: display=auto is judged on the target host; install there builds the display modules when a\n"
+		       "selected GPU takes them\n");
 	if (d3cold_dropped)
 		printf("--device without --disable-d3cold: the D3cold consent (d3cold=off) is removed from the config\n");
 
@@ -1202,8 +1214,17 @@ int gs_cmd_install(const struct gs_install_opts *o)
 				int kept = 0;
 
 				gs_pathf(q, sizeof(q), "%s/driver-patches/guest-fb/%s", bindir, stale[k]);
-				if (gs_manifest_find(&x->m, 'f', q) && (r = migrate_file(x, q, &kept, NULL)))
+				e = gs_manifest_find(&x->m, 'f', q);
+				if (!e || gs_pathf(full, sizeof(full), "%s%s", destdir, q))
+					continue;
+				if (!gs_exists(full)) {
+					/* Deleted by the user: only the manifest line is left. */
+					gs_manifest_drop(&x->m, e);
+				} else if (gs_manifest_owns(full, e->sha) != OWN_YES) {
+					fprintf(stderr, "geforce-sriov: kept %s: it was edited. Nothing reads it, and uninstall leaves it alone.\n", full);
+				} else if ((r = migrate_file(x, q, &kept, NULL))) {
 					goto fail;
+				}
 			}
 			gs_pathf(q, sizeof(q), "%s/driver-patches/guest-fb", bindir);
 			e = gs_manifest_find(&x->m, 'd', q);
@@ -1242,10 +1263,11 @@ int gs_cmd_install(const struct gs_install_opts *o)
 		gs_pathf(p, sizeof(p), "%s/include/gs_devices.h", src);
 		TRY(gs_install_copy(x, p, DKMS_SRC "/include/gs_devices.h", 0644), "gs_devices.h");
 
-		gs_pathf(p, sizeof(p), "%s/systemd/geforce-sriov-livepatch.service.in", src);
-		TRY(put_template(x, p, UNIT_DIR "/" GS_UNIT_LIVEPATCH, subst, 0644), GS_UNIT_LIVEPATCH);
+		/* The activate unit first: a stop between the two writes then leaves a host that still loads nvidia (the old early unit, or the new first step). */
 		gs_pathf(p, sizeof(p), "%s/systemd/geforce-sriov-activate.service.in", src);
 		TRY(put_template(x, p, UNIT_DIR "/" GS_UNIT_ACTIVATE, subst, 0644), GS_UNIT_ACTIVATE);
+		gs_pathf(p, sizeof(p), "%s/systemd/geforce-sriov-livepatch.service.in", src);
+		TRY(put_template(x, p, UNIT_DIR "/" GS_UNIT_LIVEPATCH, subst, 0644), GS_UNIT_LIVEPATCH);
 		/* Order a VM autostart unit this host has after activation; unrelated hypervisors are not touched. */
 		for (size_t u = 0; gs_vm_autostart_units[u]; u++) {
 			char target[GS_PATH_MAX];
@@ -1369,13 +1391,13 @@ int gs_cmd_install(const struct gs_install_opts *o)
 
 		/*
 		 * NVIDIA's CUDA libraries are asked of the driver step when host CUDA is on and they are not
-		 * all in place, or when a second package is named, which may be another version.
+		 * all in place, or when a Linux driver package is named, which may be another version.
 		 */
 		cuda_stage = cfg.host_cuda == GS_SW_ON &&
 			     (o->companion_file || o->companion_source ||
 			      gs_nvlibs_state(&gs_nvset_cuda, manifest, have_dir, sizeof(have_dir), have_version, sizeof(have_version), why, sizeof(why)) != 1 ||
 			     strcmp(have_dir, cudadir) != 0);
-		/* The same for NVIDIA's graphics libraries, which also need a second package of the version the NVKMS core was stamped with. */
+		/* The same for NVIDIA's graphics libraries, which also need a Linux driver package of the version the NVKMS core was stamped with. */
 		desktop_stage = want_desktop &&
 				(o->companion_file || o->companion_source ||
 				 gs_nvlibs_state(&gs_nvset_desktop, manifest, have_dir, sizeof(have_dir), have_version, sizeof(have_version), why, sizeof(why)) != 1 ||
@@ -1443,7 +1465,7 @@ int gs_cmd_install(const struct gs_install_opts *o)
 			x->written = 1;
 	}
 	/*
-	 * Host CUDA: NVIDIA's CUDA libraries, which the driver step took from the second package, or
+	 * Host CUDA: NVIDIA's CUDA libraries, which the driver step took from the Linux driver package, or
 	 * their removal. They change nothing that a boot picks up, so they do not count as a change
 	 * that asks for a power cycle; they are in the manifest all the same.
 	 */
@@ -1732,7 +1754,10 @@ int gs_install_select(const struct gs_install_opts *o, const struct gs_select_en
 		if (v > 0)
 			printf("%s: warning: %s\n", c.pf.str, err);
 	}
-	need = gs_display_effective(env->sys, &cfg, dwhy, sizeof(dwhy));
+	need = gs_display_effective(env->sys, &cfg,
+				    gs_display_inputs(gs_is_live_root(env->sys) ? GS_INPUTS_DIR : NULL, o->companion_file,
+						      o->companion_source, o->nvkms_source),
+				    dwhy, sizeof(dwhy));
 	printf("%s\n", dwhy);
 
 	memset(&h, 0, sizeof(h));
@@ -1761,7 +1786,7 @@ int gs_install_select(const struct gs_install_opts *o, const struct gs_select_en
 			gs_selection_command(cfg.bdfs, cfg.nbdfs, cfg.d3cold_off, NULL, args, sizeof(args));
 			if (gs_display_forms(&h, args + strlen("sudo geforce-sriov install "), forms, sizeof(forms))) {
 				fprintf(stderr, "geforce-sriov: refused, nothing changed: this selection has the boot display GPU, and the\n"
-					"installed build has no display modules. Building them needs NVIDIA's second package and public kernel\n"
+					"installed build has no display modules. Building them needs the Linux driver package and NVIDIA's public kernel\n"
 					"source, and no earlier install kept them. Run one of:\n%s", forms);
 				free(x);
 				return GS_EXIT_REFUSED;
@@ -1937,7 +1962,8 @@ int gs_cmd_rebuild(const char *release)
 				gs_find_program("dkms", why, sizeof(why)) == 0 && gs_exists("/var/lib/dkms/" GS_DKMS_NAME "/" GS_VERSION),
 				release, named)))
 		return r;
-	display = gs_display_effective(GS_LIVE_SYSFS, &cfg, display_why, sizeof(display_why));
+	display = gs_display_effective(GS_LIVE_SYSFS, &cfg, gs_display_inputs(GS_INPUTS_DIR, NULL, NULL, NULL), display_why,
+				       sizeof(display_why));
 	printf("%s\n", display_why);
 	printf("Host CUDA: %s.\n", cfg.host_cuda == GS_SW_ON ? "enabled" : "disabled");
 	ada = gs_fb_ada_selected(GS_LIVE_SYSFS, cfg.bdfs, cfg.nbdfs);

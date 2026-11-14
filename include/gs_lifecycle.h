@@ -32,6 +32,8 @@
 #define GS_UNIT_WANTS_LIVEPATCH GS_UNIT_DIR "/sysinit.target.wants/" GS_UNIT_LIVEPATCH
 /* The one activation transaction, ordered before the display manager and the VM autostarts. */
 #define GS_UNIT_ACTIVATE "geforce-sriov-activate.service"
+/* The link `systemctl enable` creates for it (WantedBy=multi-user.target); its first step loads nvidia. */
+#define GS_UNIT_WANTS_ACTIVATE GS_UNIT_DIR "/multi-user.target.wants/" GS_UNIT_ACTIVATE
 /* The package's drop-in for a supported VM autostart unit. */
 #define GS_VM_DROPIN_NAME "geforce-sriov.conf"
 /* The name of the package's drop-in in nvidia-vgpud.service.d, which preloads the identity hook. */
@@ -43,8 +45,8 @@
 /* Package-owned options so any autoload of nvidia_drm starts with KMS, fbdev and the allowlist. */
 #define GS_DRM_OPTION_PATH "/etc/modprobe.d/geforce-sriov-display.conf"
 /* Package-owned alias overrides: udev binds nvidia_drm to the PCI class alias and ignores
- * blacklist/install rules, so the alias itself is mapped away; the early unit loads nvidia
- * (--load-driver) and activation loads nvidia_drm. */
+ * blacklist/install rules, so the alias itself is mapped away; the activate unit's first step
+ * loads nvidia (livepatch --boot --load-driver, after udev's coldplug) and activation loads nvidia_drm. */
 #define GS_AUTOLOAD_PATH "/etc/modprobe.d/geforce-sriov-autoload.conf"
 #define GS_CONFIG_ENV "GEFORCE_SRIOV_CONFIG"
 #define GS_CONFIG_MAX_BYTES 65536
@@ -103,7 +105,8 @@ int gs_addr_parse(const char *s, struct gs_addr *out);
 #define GS_SW_OFF 0
 #define GS_SW_ON 1
 
-enum gs_display_mode { GS_DISPLAY_AUTO, GS_DISPLAY_ON, GS_DISPLAY_OFF };
+/* auto and on: KMS on every selected card the build allows; boot: KMS on the boot display GPU only; off: no display modules. */
+enum gs_display_mode { GS_DISPLAY_AUTO, GS_DISPLAY_ON, GS_DISPLAY_OFF, GS_DISPLAY_BOOT };
 /* host_desktop=: NVIDIA's graphics libraries for the host desktop. auto (what an absent key means) is on when the display build is. */
 enum gs_host_desktop { GS_DESKTOP_AUTO, GS_DESKTOP_ON, GS_DESKTOP_OFF };
 /*
@@ -196,10 +199,43 @@ struct gs_card {
 	unsigned int nvfs_on_bus;
 };
 
+/* An NVIDIA GPU function the configuration does not list (src/unselected.c). */
+struct gs_unselected {
+	struct gs_addr pf;
+	unsigned int device;
+	const struct gs_device *entry; /* table entry, or NULL */
+	char driver[64];               /* "" when unbound */
+	char override[64];             /* driver_override, "" when unset */
+	int boot_vga;                  /* -1 unknown */
+};
+#define GS_UNSELECTED_MAX 32
+/*
+ * Every NVIDIA physical function of class 0300, 0302 or 0680 (the classes NVIDIA's driver matches)
+ * whose address is not in sel, in address order, at most max. Reads sysroot only; returns how many.
+ */
+unsigned int gs_unselected_scan(const char *sysroot, const struct gs_addr *sel, unsigned int nsel,
+				struct gs_unselected *out, unsigned int max);
+/* One entry as status prints it (two lines), or as one journal line. */
+void gs_unselected_print(const struct gs_unselected *u, int one_line);
+/* The GPU's /proc node field "key: N" of the text at path (e.g. "Device Minor"); -1 when there is none. */
+long gs_proc_field(const char *path, const char *key);
 /* Reads sysroot (e.g. "/sys") only. Returns 0; card->present tells whether the PF exists. */
 int gs_card_inspect(const char *sysroot, const struct gs_addr *pf, struct gs_card *card);
-/* 1 when activation puts the host console (KMS) on this card: display is not off and it is the boot display GPU. */
-int gs_display_kms(const struct gs_config *cfg, const struct gs_card *c);
+/*
+ * What the installed build record says that the KMS rule needs: ada_placement and display are 1 or 0
+ * as recorded, -1 when no record is read. A NULL gs_kms_build means nothing is judged.
+ */
+struct gs_kms_build {
+	int ada_placement;
+	int display;
+};
+struct gs_build_src;
+/* The record src names (NULL src: the live record is not read: all -1). */
+void gs_kms_build_read(const struct gs_build_src *src, struct gs_kms_build *kb);
+/* 1 when activation hands the firmware console of this card to the display modules: display is not off and it is the boot display GPU. */
+int gs_display_console(const struct gs_config *cfg, const struct gs_card *c);
+/* 1 when activation puts KMS on this card: see the table in pci.c. kb may be NULL. */
+int gs_display_kms(const struct gs_config *cfg, const struct gs_card *c, const struct gs_kms_build *kb);
 /*
  * The configured VF count against one listed card: -1 with why when vfs is set above what the card
  * offers (its hardware TotalVFs, gs_vf_ceiling()); 1 with why when the card would be given more than
@@ -273,7 +309,7 @@ struct gs_build {
 enum gs_version_package { GS_VERSION_HOST, GS_VERSION_COMPANION };
 int gs_version_confirmed(enum gs_version_package package, const char *version);
 /*
- * One confirmed host driver version and what belongs to it: the version of the second package,
+ * One confirmed host driver version and what belongs to it: the version of the Linux driver package,
  * the guest drivers to use on each generation, and the recorded digests the CLI judges files by.
  * The rows are the blocks of scripts/gs-driver-versions.tbl, the one place that says which
  * versions are confirmed and holds their data; the build makes src/gs_versions.inc from it, and
@@ -282,7 +318,7 @@ int gs_version_confirmed(enum gs_version_package package, const char *version);
  */
 struct gs_confirmed_version {
 	const char *host;           /* NVIDIA's vGPU host driver */
-	const char *second;         /* the second package for display and host CUDA builds */
+	const char *second;         /* the Linux driver package for display and host CUDA builds */
 	const char *public;         /* NVIDIA's public kernel module source for display builds */
 	const char *guest_ampere;   /* guest drivers for an Ampere card, as printed */
 	const char *guest_ada;      /* the same for an Ada card */
@@ -425,8 +461,23 @@ struct gs_host {
 	int (*capture)(const char *const argv[], char *out, size_t len);
 	int (*write_attr_deadline)(const struct gs_host *, const char *, const char *, unsigned int);
 	int (*run_deadline)(const struct gs_host *, const char *const [], unsigned int);
+	/* Open path (read and write) once, as a program would, and close it: 0, -errno, or -ETIMEDOUT after ms. NULL: -ENOSYS. */
+	int (*open_node)(const struct gs_host *, const char *path, unsigned int ms);
 };
 extern const struct gs_host gs_host_live;
+/*
+ * Activation's work on the unselected GPUs, one journal line for each. A GPU that NVIDIA's driver bound
+ * and cannot start is released: its node is opened once, and when that fails with EIO the card gets
+ * driver_override GS_UNSELECTED_RELEASED and is unbound. Only a GPU outside the device table, bound to
+ * nvidia, without a driver_override, that is not the boot display GPU, is tested. Nothing else is touched,
+ * and the step never changes the exit status.
+ */
+#define GS_UNSELECTED_RELEASED "geforce-sriov-released"
+#define GS_UNSELECTED_OPEN_MS 30000u
+/* The step stops testing after this long; one card's tests run at most GS_UNSELECTED_CARD_MS more. */
+#define GS_UNSELECTED_BUDGET_MS 120000u
+#define GS_UNSELECTED_CARD_MS (GS_MODULE_DEADLINE_MS + GS_UNSELECTED_OPEN_MS + 5 * SYSFS_DEADLINE_MS)
+void gs_unselected_release(const struct gs_host *h, const struct gs_addr *sel, unsigned int nsel);
 /* The live host's build record and module: every field NULL, so each takes its default. */
 extern const struct gs_build_src gs_build_live;
 /* gs_host_live's enable_prereq: sriov-manage is a root-owned executable, and lspci and setpci exist for it. */
@@ -632,7 +683,7 @@ int gs_nvidia_package_version(const char *name, char *out, size_t len);
 #define GS_PACKAGE_COPY_NAME ".package"
 /*
  * What the driver step keeps after a successful run so that the same build can be made again for
- * another kernel: a copy of the second package and of the public source, and index, which names
+ * another kernel: a copy of the Linux driver package and of the public source, and index, which names
  * them and NVIDIA's kernel tree (key=value lines). uninstall removes the directory.
  */
 #define GS_INPUTS_NAME "inputs"
@@ -692,7 +743,7 @@ int gs_dkms_step(int (*run)(const char *const argv[]), int registered, const cha
  * `dkms install -k release` (run). GS_EXIT_OK, or GS_EXIT_FAIL when that install failed; named is
  * the kernel the user named, for the command the message repeats.
  */
-/* ---- NVIDIA's libraries from the second package: host CUDA and host desktop (src/nvlibs.c) ---- */
+/* ---- NVIDIA's libraries from the Linux driver package: host CUDA and host desktop (src/nvlibs.c) ---- */
 
 /* How the commands that install them are run: NULL members on a staged install, fixtures in the tests. */
 struct gs_nvlibs_io {
@@ -866,7 +917,7 @@ int gs_selection_verify(const struct gs_host *h, const struct gs_config *cfg, co
 /* 1 with line set when some selected address has no recorded identity yet (status says it once). */
 int gs_selection_unrecorded(const char *state_dir, const struct gs_config *cfg, char *line, size_t len);
 /*
- * When the inputs for the display modules (NVIDIA's second package and public kernel source) were not
+ * When the inputs for the display modules (the Linux driver package and public kernel source) were not
  * kept, the two forms of the command that give a selection a display build: 1 with text set (selection_args
  * are the --device options to repeat, or ""). 0 when they were kept, which makes the plain command enough.
  */
@@ -880,6 +931,10 @@ const char *gs_plugin_link(void);
 
 /* ---- NVIDIA's kernel modules (src/modules.c) --------------------------------- */
 
+int gs_udev_settle(const struct gs_host *h);
+/* The boot step waits for udev's event queue this long (seconds, text and milliseconds) before nvidia loads. */
+#define GS_UDEV_SETTLE_S "30"
+#define GS_UDEV_SETTLE_MS 35000u
 /* How long one modprobe or rmmod may take. */
 #define GS_MODULE_DEADLINE_MS 60000u
 #define GS_NVIDIA_DISPLAY_MODULES 2
@@ -989,21 +1044,30 @@ void gs_notify_extend(unsigned int ms);
  *   one sriov-manage run of GS_MODULE_DEADLINE_MS
  * Per VF: two writes (type, power), the VF_ACTIVE wait and two VF_TYPES waits.
  * Once per run: GS_ACT_MODULE_RUNS modprobe, rmmod, systemctl and nvidia-modprobe runs of
- *   GS_MODULE_DEADLINE_MS, the livepatch and display-manager waits, the manager wait with its last
+ *   GS_MODULE_DEADLINE_MS (device_nodes() runs up to 2 nvidia-modprobe commands and is called twice on a path: before
+ *   the host CUDA load and at the end), the livepatch and display-manager waits, the manager wait with its last
  *   `is-active` call (GS_CAPTURE_TIMEOUT_MS), the settle pause and one nvidia-smi capture.
+ * The unit's first step (`livepatch --boot --load-driver`, GS_ACTIVATE_PRESTEP_MS) is counted too: two udev waits, the
+ *   livepatch wait, two module loads (the livepatch and nvidia), and the release of unselected GPUs, which activation runs
+ *   after its last load of nvidia: GS_UNSELECTED_BUDGET_MS plus the longest test of one card, GS_UNSELECTED_CARD_MS
+ *   (nvidia-modprobe, one open, 5 writes).
+ *   systemd arms the full start timeout for each
+ *   command, so the term keeps the value an upper bound of the whole start however the commands are counted.
  * tests/test_lifecycle.c (test_start_timeout) fails when a limit or a call count here no longer
  * matches src/activate.c.
  */
 #define GS_ACT_CARD_WRITES (1 + 2 + 3 + 1 + 2 + 2 * (GS_SLOT_FNS - 1) + GS_SLOT_FNS + 1 + 1 + 1 + 3 + 6)
-#define GS_ACT_MODULE_RUNS 27
+#define GS_ACT_MODULE_RUNS 29
 #define GS_ACTIVATE_CARD_MS \
 	(GS_ACT_CARD_WRITES * SYSFS_DEADLINE_MS + BRIDGE_WAKE_MS + PF_WAKE_MS + RELEASE_WAIT_MS + \
 	 REMOVE_WAIT_MS * (GS_SLOT_FNS + 1) + RETURN_WAIT_MS + SRIOV_ATTR_WAIT_MS + FN_RETURN_WAIT_MS * GS_SLOT_FNS + \
 	 PF_REBIND_WAIT_MS * 2 + VF_BIND_WAIT_MS + GS_BOOT_BIND_WAIT_MS + GS_MODULE_DEADLINE_MS)
 #define GS_ACTIVATE_VF_MS (2 * SYSFS_DEADLINE_MS + VF_ACTIVE_WAIT_MS + 2 * VF_TYPES_WAIT_MS)
+#define GS_ACTIVATE_PRESTEP_MS \
+	(2 * GS_UDEV_SETTLE_MS + LIVEPATCH_WAIT_MS + 2 * GS_MODULE_DEADLINE_MS + GS_UNSELECTED_BUDGET_MS + GS_UNSELECTED_CARD_MS)
 #define GS_ACTIVATE_BASE_MS \
 	(GS_ACT_MODULE_RUNS * GS_MODULE_DEADLINE_MS + LIVEPATCH_WAIT_MS + DM_ACTIVE_WAIT_MS + MGR_ACTIVE_WAIT_MS + \
-	 GS_CAPTURE_TIMEOUT_MS + MGR_SETTLE_MS + GS_CAPTURE_TIMEOUT_MS)
+	 GS_CAPTURE_TIMEOUT_MS + MGR_SETTLE_MS + GS_CAPTURE_TIMEOUT_MS + GS_ACTIVATE_PRESTEP_MS)
 /* 10 % margin on the sum, and the floor of the previous releases' order of magnitude. */
 #define GS_ACTIVATE_START_MIN_S 900u
 unsigned int gs_activate_start_timeout_s(unsigned int ncards, unsigned int nvfs);
@@ -1029,8 +1093,8 @@ int gs_display_plan_build(const struct gs_host *, const struct gs_config *, stru
 int gs_daemon_ready(const struct gs_host *, const struct gs_config *, const struct gs_activate_opts *);
 int gs_resource_fit_assess(const struct gs_host *, const struct gs_card *, unsigned int, struct gs_resource_fit *);
 
-/* The early boot unit: load the livepatch, and with --load-driver nvidia right after it; removal,
- * rescan and deferral belong to activate. */
+/* The boot step: load the livepatch; with --load-driver (the activate unit's first step) wait for udev and
+ * load nvidia; removal, rescan and deferral belong to activate. */
 struct gs_livepatch_opts {
 	int boot;                   /* --boot: the early boot unit's mode (the command's only mode) */
 	int load_driver;            /* --load-driver: after the livepatch is verified, modprobe nvidia */
@@ -1069,11 +1133,18 @@ void gs_format_release(const char *state_dir, int rc);
 int gs_install_version_named(const struct gs_install_opts *o, char *out, size_t len);
 /*
  * 1 when the build needs the display modules, with in why the line that says why. They are built
- * only for a selected boot display GPU, with display=auto and with display=on alike, because the
- * host console is never put on another card. sys NULL (a staged tree) reads no card: display=on
- * then stands, and the target host judges it. 0 otherwise. why takes 256 bytes.
+ * for a selected boot display GPU (the console), and for another selected card that has KMS
+ * (gs_display_kms()) only when inputs is 1, that is when the Linux guest driver package and the
+ * module source are given or kept. sys NULL (a staged tree) reads no card: display=on then
+ * stands, and the target host judges it. 0 otherwise. why takes 256 bytes.
  */
-int gs_display_effective(const char *sys, const struct gs_config *cfg, char *why, size_t len);
+int gs_display_effective(const char *sys, const struct gs_config *cfg, int inputs, char *why, size_t len);
+/*
+ * 1 when both inputs of the display build are given or kept: the guest driver package (companion_file or
+ * companion_source) and the module source (nvkms_source). dir is the index of kept inputs; NULL: none is kept.
+ */
+int gs_display_inputs(const char *dir, const char *companion_file, const char *companion_source,
+		      const char *nvkms_source);
 /* 1 when the selected package or tree names NVIDIA's open flavour, which this build cannot use. */
 int gs_nvidia_open_flavour(const struct gs_install_opts *o);
 

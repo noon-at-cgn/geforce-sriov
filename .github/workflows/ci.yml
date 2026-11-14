@@ -49,8 +49,8 @@ jobs:
           "$RUNNER_TEMP/stage/usr/bin/geforce-sriov" install >"$RUNNER_TEMP/again" 2>&1 || true
           grep -q 'After a kernel update, run `sudo geforce-sriov rebuild`' "$RUNNER_TEMP/again"
           ! grep -q 'run make first' "$RUNNER_TEMP/again"
-          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.4.0/dkms.conf"
-          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.4.0/include/gs_devices.h"
+          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.4.1/dkms.conf"
+          test -f "$RUNNER_TEMP/stage/usr/src/geforce-sriov-0.4.1/include/gs_devices.h"
           grep -qx 'bdfs=0000:01:00.0' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           grep -qx 'identity=on' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"
           grep -qx 'identity_force_host=on' "$RUNNER_TEMP/stage/etc/geforce-sriov/config"

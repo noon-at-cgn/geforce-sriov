@@ -388,7 +388,7 @@ Two optional builds add modules and need NVIDIA files beyond the host driver. Se
 
 | Build | Switch | Modules added | Needs |
 |---|---|---|---|
-| Display | `display=auto` or `display=on` with a boot display GPU selected, or `--display` with one. A boot display GPU is the card that shows the BIOS/UEFI screen at power-on | `nvidia-modeset`, `nvidia-drm` | the Linux driver package and NVIDIA's public kernel module source |
+| Display | `display=auto` or `display=on` with a selected GPU that takes the display modules, or `--display`. The boot display GPU always does. It is the card that shows the BIOS/UEFI screen at power-on | `nvidia-modeset`, `nvidia-drm` | the Linux driver package and NVIDIA's public kernel module source |
 | Host CUDA | `--host-cuda` (off by default) | `nvidia-uvm` | the Linux driver package |
 
 Both builds need the Linux driver package.

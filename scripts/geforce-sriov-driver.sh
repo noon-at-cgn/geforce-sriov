@@ -27,16 +27,16 @@ companion_file=
 companion_source=
 nvkms_source=
 source_given=0
-# --cuda-stage DIR: with --host-cuda, NVIDIA's CUDA libraries are copied from the second package
+# --cuda-stage DIR: with --host-cuda, NVIDIA's CUDA libraries are copied from the Linux driver package
 # into DIR, for the CLI to install. Without it they are not looked for.
 cuda_stage=
-# --desktop-stage DIR: with --display, NVIDIA's graphics libraries are copied from the second package
+# --desktop-stage DIR: with --display, NVIDIA's graphics libraries are copied from the Linux driver package
 # into DIR, for the CLI to install (host desktop). Without it they are not looked for.
 desktop_stage=
-# The version of the second package's programs that nvidia.ko accepts besides its own (client_accept):
-# set by a display build whose second package is not of the host's version, and recorded.
+# The version of the Linux driver package's programs that nvidia.ko accepts besides its own (client_accept):
+# set by a display build whose Linux driver package is not of the host's version, and recorded.
 client_accept=
-# The second package's version when the patch above did not match this source: recorded, so that the build is not repeated for it.
+# The Linux driver package's version when the patch above did not match this source: recorded, so that the build is not repeated for it.
 client_accept_unmatched=
 while [ "$#" -gt 0 ]; do
     case $1 in
@@ -99,7 +99,7 @@ backup=$state/stock/$kernel/nvidia.ko
 # The journal of a commit: the record it will publish, plus what is needed to finish or undo it.
 journal=$published.gs-new
 # What a successful run keeps so that the same build can be made again for another kernel: a copy
-# of the second package and of the public source, and the index that names them and the host tree.
+# of the Linux driver package and of the public source, and the index that names them and the host tree.
 inputs=$state/inputs
 inputs_index=$inputs/index
 given_companion_file=$companion_file
@@ -279,14 +279,22 @@ commit_files() {
     done
     run depmod -a "$j_kernel"
     fault before-record
-    # Only now is the record published: every file it names is in place. A published record of
-    # another kernel is first kept under that kernel's name; the copy of this kernel's, if there is
-    # one, is older than what is published now.
-    archive_published "$j_kernel"
-    sed '/^journal_/d' "$journal" >"$published.gs-tmp" && sync "$published.gs-tmp" && mv -f "$published.gs-tmp" "$published" ||
-        fail "could not write $published"
+    # Only now is the record published: every file it names is in place. A build for a kernel that is
+    # not running leaves the published record alone when that names the running kernel: it is kept
+    # under that kernel's own name. Otherwise a published record of another kernel is first kept under
+    # that kernel's name; the copy of this kernel's, if there is one, is older than what is published now.
+    landed=$published
+    if [ "$(jv journal_land)" = kept ]; then
+        landed=$records/$j_kernel
+        mkdir -p "$records" || fail "could not create $records"
+    else
+        archive_published "$j_kernel"
+    fi
+    sed '/^journal_/d' "$journal" >"$landed.gs-tmp" && sync "$landed.gs-tmp" && mv -f "$landed.gs-tmp" "$landed" ||
+        fail "could not write $landed"
     archived=
-    rm -f "$records/$j_kernel"
+    [ "$landed" != "$published" ] || rm -f "$records/$j_kernel"
+    sync_dir "${landed%/*}"
     [ ! -d "$records" ] || rmdir "$records" 2>/dev/null || :
     sync_dir "$state"
     rm -f "$journal" "$state/plugin-copy.gs-new"
@@ -363,7 +371,7 @@ rollback_commit() {
 # ---- NVIDIA's CUDA libraries, for host CUDA ----------------------------------
 #
 # A CUDA program on the host needs NVIDIA's CUDA library, libcuda. NVIDIA's vGPU host package has
-# none; the second package, which nvidia-uvm is built from, has it. With --host-cuda and
+# none; the Linux driver package, which nvidia-uvm is built from, has it. With --host-cuda and
 # --cuda-stage DIR the libraries are copied into DIR, with an index of their digests and of the
 # names the loader knows them by, and the CLI installs them from there. The set is what NVIDIA's
 # installer installs for CUDA (the CUDA_LIB lines of the package's .manifest, and the library they
@@ -374,7 +382,7 @@ rollback_commit() {
 # which nvidia-smi uses and which checks the driver's version) must not get a second copy.
 # Nothing here is a reason to refuse a build: a set that cannot be taken is one warning.
 cuda_names='libcuda libnvidia-ptxjitcompiler libnvidia-nvvm libnvidia-nvvm70 libnvidia-gpucomp libcudadebugger'
-# stage_cuda DIR: DIR is the second package as extracted, or its kernel directory. $cuda_why says why not.
+# stage_cuda DIR: DIR is the Linux driver package as extracted, or its kernel directory. $cuda_why says why not.
 stage_cuda() {
     cuda_why=
     c_src=
@@ -424,7 +432,7 @@ stage_cuda() {
             sed -n 's/.*(NEEDED).*\[\(lib\(nvidia-\|cuda\)[A-Za-z0-9_.+-]*\)\]$/\1/p'); do
             case " $c_sonames " in
                 *" $c_need "*) ;;
-                *) printf 'geforce-sriov-driver: warning: %s links against %s, which is not one of the CUDA libraries taken from the second package; a CUDA program may fail to start\n' "$c_file" "$c_need" >&2 ;;
+                *) printf 'geforce-sriov-driver: warning: %s links against %s, which is not one of the CUDA libraries taken from the Linux driver package; a CUDA program may fail to start\n' "$c_file" "$c_need" >&2 ;;
             esac
         done
     done
@@ -432,12 +440,12 @@ stage_cuda() {
         { rm -rf "$cuda_stage.gs-new"; cuda_why="$cuda_stage could not be written"; return 1; }
     printf "geforce-sriov-driver: NVIDIA's CUDA libraries %s are ready to be installed:%s\n" "$c_version" "$c_list"
     [ -z "$c_absent" ] ||
-        printf 'geforce-sriov-driver: warning: the second package does not have%s; a CUDA program that needs it may fail\n' "$c_absent" >&2
+        printf 'geforce-sriov-driver: warning: the Linux driver package does not have%s; a CUDA program that needs it may fail\n' "$c_absent" >&2
 }
 cuda_not_staged() {
-    printf "geforce-sriov-driver: warning: NVIDIA's CUDA libraries were not taken from the second package: %s\n" "$cuda_why" >&2
+    printf "geforce-sriov-driver: warning: NVIDIA's CUDA libraries were not taken from the Linux driver package: %s\n" "$cuda_why" >&2
 }
-# After a build: the second package is extracted, or was given as a directory.
+# After a build: the Linux driver package is extracted, or was given as a directory.
 stage_cuda_built() {
     [ -n "$cuda_stage" ] && [ "$host_cuda" -eq 1 ] || return 0
     stage_cuda "$1" || cuda_not_staged
@@ -446,7 +454,7 @@ stage_cuda_built() {
 # ---- NVIDIA's graphics libraries, for the host desktop -----------------------
 #
 # With --display and --desktop-stage DIR the graphics libraries of a consumer driver are copied from
-# the second package into DIR, with an index (version=, lib=, xmod=, etc=, gbm=; read by src/nvlibs.c),
+# the Linux driver package into DIR, with an index (version=, lib=, xmod=, etc=, gbm=; read by src/nvlibs.c),
 # and the CLI installs them from there into geforce-sriov's own directories. The set is what NVIDIA's
 # installer installs for GLX, EGL, Vulkan and GBM, without its copies of libglvnd (the distribution
 # has them): the libraries and the two X modules, the JSON files that name them, NVIDIA's application
@@ -462,7 +470,7 @@ desk_take() {
     cp -- "$d_src/$1" "$d_new/$1" && chmod "$2" "$d_new/$1" && d_sha=$(sha "$d_new/$1") ||
         { rm -rf "$d_new"; desktop_why="$1 could not be copied to $desktop_stage"; return 1; }
 }
-# stage_desktop DIR VERSION: DIR is the second package as extracted, or its kernel directory; VERSION is
+# stage_desktop DIR VERSION: DIR is the Linux driver package as extracted, or its kernel directory; VERSION is
 # the version the NVKMS core is stamped with. $desktop_why says why not.
 stage_desktop() {
     desktop_why=
@@ -500,7 +508,7 @@ stage_desktop() {
                 done ;;
         esac
         { [ -n "$d_file" ] && [ -f "$d_src/$d_file" ] && [ ! -L "$d_src/$d_file" ]; } ||
-            { rm -rf "$d_new"; desktop_why="the second package has no $d_name"; return 1; }
+            { rm -rf "$d_new"; desktop_why="the Linux driver package has no $d_name"; return 1; }
         desk_take "$d_file" 0755 || return 1
         d_soname=$(readelf -d -- "$d_new/$d_file" 2>/dev/null | sed -n 's/.*(SONAME).*\[\(lib[A-Za-z0-9_.+-]*\)\]$/\1/p' | sed -n '1p')
         [ -n "$d_soname" ] || d_soname=$d_file
@@ -517,7 +525,7 @@ stage_desktop() {
     # The small files, and NVIDIA's application profiles, which carry the version in their name.
     for d_item in $desktop_etc "profile:nvidia-application-profiles-$d_version-rc" "profile:nvidia-application-profiles-$d_version-key-documentation"; do
         d_name=${d_item#*:}
-        { [ -f "$d_src/$d_name" ] && [ ! -L "$d_src/$d_name" ]; } || { rm -rf "$d_new"; desktop_why="the second package has no $d_name"; return 1; }
+        { [ -f "$d_src/$d_name" ] && [ ! -L "$d_src/$d_name" ]; } || { rm -rf "$d_new"; desktop_why="the Linux driver package has no $d_name"; return 1; }
         desk_take "$d_name" 0644 || return 1
         printf 'etc=%s %s %s\n' "${d_item%%:*}" "$d_name" "$d_sha" >>"$d_new/index"
     done
@@ -528,7 +536,7 @@ stage_desktop() {
             sed -n 's/.*(NEEDED).*\[\(lib\(nvidia-\|GLX_nvidia\|EGL_nvidia\)[A-Za-z0-9_.+-]*\)\]$/\1/p'); do
             case " $d_sonames " in
                 *" $d_need "*) ;;
-                *) printf 'geforce-sriov-driver: warning: %s links against %s, which is not one of the graphics libraries taken from the second package; a program that draws may fail to start\n' "$d_file" "$d_need" >&2 ;;
+                *) printf 'geforce-sriov-driver: warning: %s links against %s, which is not one of the graphics libraries taken from the Linux driver package; a program that draws may fail to start\n' "$d_file" "$d_need" >&2 ;;
             esac
         done
     done
@@ -537,16 +545,16 @@ stage_desktop() {
     printf "geforce-sriov-driver: NVIDIA's graphics libraries %s are ready to be installed:%s\n" "$d_version" "$d_list"
 }
 desktop_not_staged() {
-    printf "geforce-sriov-driver: warning: NVIDIA's graphics libraries were not taken from the second package: %s\n" "$desktop_why" >&2
+    printf "geforce-sriov-driver: warning: NVIDIA's graphics libraries were not taken from the Linux driver package: %s\n" "$desktop_why" >&2
     # A stage left by an earlier run is of another package: the CLI must not install it.
     [ -z "$desktop_stage" ] || rm -rf "$desktop_stage" "$desktop_stage.gs-new"
 }
-# After a build: the second package is extracted, or was given as a directory.
+# After a build: the Linux driver package is extracted, or was given as a directory.
 stage_desktop_built() {
     [ -n "$desktop_stage" ] && [ "$display" -eq 1 ] || return 0
     stage_desktop "$1" "$public_version" || desktop_not_staged
 }
-# What the second package is asked for: its CUDA libraries (--host-cuda --cuda-stage) and its graphics
+# What the Linux driver package is asked for: its CUDA libraries (--host-cuda --cuda-stage) and its graphics
 # libraries (--display --desktop-stage). libs_not_taken REASON says why neither could be taken.
 libs_wanted() {
     { [ -n "$cuda_stage" ] && [ "$host_cuda" -eq 1 ]; } || { [ -n "$desktop_stage" ] && [ "$display" -eq 1 ]; }
@@ -569,7 +577,7 @@ stage_wanted() {
         stage_desktop "$1" "$desktop_nvkms" || desktop_not_staged
     fi
 }
-# For a build that is installed already, which reads no input: the second package that was given, or
+# For a build that is installed already, which reads no input: the Linux driver package that was given, or
 # the one an earlier install kept, is opened for the libraries alone. The NVKMS core of the installed
 # build was stamped with the public source's version, which its record has.
 stage_libs_prepared() {
@@ -579,7 +587,7 @@ stage_libs_prepared() {
     c_tree=$companion_source
     if [ -z "$c_file$c_tree" ]; then
         # The same checks as for a build; what would refuse a build is only the reason here.
-        c_kept=$(use_kept companion "NVIDIA's second package" '--companion-file PATH (or --companion-source DIR)' >/dev/null 2>&1 &&
+        c_kept=$(use_kept companion "the Linux driver package" '--companion-file PATH (or --companion-source DIR)' >/dev/null 2>&1 &&
             printf '%s:%s' "$kept_kind" "$kept_path") ||
             { libs_not_taken 'none was given, and none that an earlier install kept can be used; pass --companion-file PATH (or --companion-source DIR)'; return 0; }
         case $c_kept in
@@ -733,7 +741,7 @@ find_patch_dir() {
 # told where the inputs are. A place cannot be trusted for that: whoever owns a directory above it
 # can put another tree there afterwards. So a copy of every input is kept under $inputs, owned by
 # root, not writable by anyone else, and with no symbolic link that leads out of it: the host tree,
-# the second package and the public source. A kept file is used again only while it still has the
+# the Linux driver package and the public source. A kept file is used again only while it still has the
 # digest the index holds; a kept tree is identified by the version it declares. A run with
 # --retained takes every input it is not given from there. What is kept after a build is the copy
 # the build was made from.
@@ -793,12 +801,12 @@ if [ "$retained" -eq 1 ] && [ "$restore" -eq 0 ] && [ "$source_given" -eq 0 ] &&
                 "$kept_src" "$src" ;;
     esac
 fi
-# The kept second package and public source, for a run with --retained that was not given them.
+# The kept Linux driver package and public source, for a run with --retained that was not given them.
 # Called only once a build is certain: a run that finds its build installed needs no input.
 use_kept_inputs() {
     [ "$retained" -eq 1 ] || return 0
     if { [ "$display" -eq 1 ] || [ "$host_cuda" -eq 1 ]; } && [ -z "$companion_file" ] && [ -z "$companion_source" ]; then
-        use_kept companion "NVIDIA's second package" '--companion-file PATH (or --companion-source DIR)'
+        use_kept companion "the Linux driver package" '--companion-file PATH (or --companion-source DIR)'
         if [ "$kept_kind" = file ]; then companion_file=$kept_path; else companion_source=$kept_path; fi
         kept_companion=1
     fi
@@ -945,7 +953,7 @@ keep_inputs() {
             [ "$(sha "${taken_companion:-$k_second}")" != "$(gs_record_get "$record" second_sha256)" ]; then
             k_is=
         fi
-        keep_checked companion "NVIDIA's second package" "${taken_companion:-$k_second}" "$k_is" "$k_want" "$1" "$k_second"
+        keep_checked companion "the Linux driver package" "${taken_companion:-$k_second}" "$k_is" "$k_want" "$1" "$k_second"
     fi
     if [ -n "$given_nvkms" ]; then
         k_want=$(gs_record_get "$record" driver_public_version)
@@ -1329,12 +1337,12 @@ EOF
         printf 'inputs: driver_file=%s companion_file=%s companion_source=%s nvkms_source=%s\n' \
             "${driver_file:-none}" "${companion_file:-none}" "${companion_source:-none}" "${nvkms_source:-none}"
         printf 'version classification: %s\n' "$plain_class"
-        printf '%s\n' '+ detect host, second-package and public-source versions from package metadata'
+        printf '%s\n' '+ detect host, Linux-driver-package and public-source versions from package metadata'
         printf '%s\n' '+ preflight every required byte patch; a failed anchor refuses with no installed-file change'
         if [ "$display" -eq 1 ]; then
             printf '%s\n' "+ gs_stage_tree '$src' '<companion kernel>' '<temporary directory>/tree' 1 '$host_cuda' '<H>' '<P>' '$nvkms_source'"
             printf '%s\n' "+ apply driver-patches/gpu-allow.patch and driver-patches/allocation-threshold.patch to the staged tree"
-            printf '%s\n' "+ when the second package is not of the host's version: apply driver-patches/client-accept.patch, so that nvidia.ko accepts that version"
+            printf '%s\n' "+ when the Linux driver package is not of the host's version: apply driver-patches/client-accept.patch, so that nvidia.ko accepts that version"
         else
             printf '%s\n' "+ gs_stage_tree '$src' '<companion kernel>' '<temporary directory>/tree' 0 1 '<H>' '<P>' none"
         fi
@@ -1574,8 +1582,8 @@ module_dest() {
     fi
 }
 
-# The version of the second package's programs that nvidia.ko has to accept besides its own: the second
-# package's, in a display build whose second package (the record names it) is not of the host's version.
+# The version of the Linux driver package's programs that nvidia.ko has to accept besides its own: the Linux driver
+# package's, in a display build whose Linux driver package (the record names it) is not of the host's version.
 wants_accept() {
     [ "$display" -eq 1 ] || return 0
     w_second=$(gs_record_get "$record" driver_second_version)
@@ -1620,11 +1628,25 @@ if [ -f "$record" ] && [ ! -L "$record" ]; then
     elif [ "$rec_placement" != "$ada_selected" ]; then
         printf 'geforce-sriov-driver: the installed nvidia.ko was built with ada_placement=%s and ada_placement=%s is asked for; the modules are built again\n' "${rec_placement:-absent}" "$ada_selected"
     elif [ "$(gs_record_get "$record" client_accept)" != "$(wants_accept)" ]; then
-        printf 'geforce-sriov-driver: the installed nvidia.ko does not accept the programs of the second package (client_accept=%s is recorded, %s is wanted); the modules are built again\n' \
+        printf 'geforce-sriov-driver: the installed nvidia.ko does not accept the programs of the Linux driver package (client_accept=%s is recorded, %s is wanted); the modules are built again\n' \
             "$(gs_record_get "$record" client_accept)" "$(wants_accept)"
     elif [ "$rec_intact" -eq 1 ] && [ "$rec_kernel" = "$kernel" ] && [ "$rec_hash" = "$(sha "$module")" ] &&
         [ "${rec_display:-0}" = "$display" ] && [ "${rec_cuda:-0}" = "$host_cuda" ] &&
         [ "$rec_set" = "$want_set" ]; then
+        # An earlier build for another kernel published its record over this running kernel's, which was
+        # then only kept under $records: the running kernel's is the published one again.
+        if [ "$record" != "$published" ] && [ "$kernel" = "$(uname -r)" ] && [ ! -L "$published" ]; then
+            archive_published "$kernel"
+            cp -p "$record" "$published.gs-tmp" && sync "$published.gs-tmp" && mv -f "$published.gs-tmp" "$published" ||
+                fail "could not write $published"
+            archived=
+            rm -f "$record"
+            sync_dir "$state"
+            [ ! -d "$records" ] || rmdir "$records" 2>/dev/null || :
+            record=$published
+            recovered=1
+            printf 'geforce-sriov-driver: the build record of %s is the published one again\n' "$kernel"
+        fi
         patched=0
         for dir in "$root/usr/lib/x86_64-linux-gnu" "$root/usr/lib64" "$root/usr/lib"; do
             candidate=$dir/$plugin_name.geforce-sriov
@@ -1714,6 +1736,7 @@ cleanup() {
         restore link "$link"
         restore copy "$copy"
         restore record "$published"
+        restore krecord "$records/$kernel"
         [ -z "$archived" ] || rm -f "$archived"
         rm -f "$journal" "$journal.gs-tmp" "$state/plugin-copy.gs-new"
         rm -rf "$state/txn"
@@ -1803,7 +1826,7 @@ if [ "$identity_failed" -ne 0 ]; then
     refuse "cannot determine the host driver version from $src_shown: ${reason:-no version definition}"
 fi
 use_kept_inputs
-# The second package and the public source as the user knows them, then this run's copies of them.
+# The Linux driver package and the public source as the user knows them, then this run's copies of them.
 second_shown=${companion_file:-$companion_source}
 nvkms_shown=$nvkms_source
 if [ "$kept_companion" -eq 0 ]; then
@@ -1816,11 +1839,11 @@ if [ "$kept_companion" -eq 0 ]; then
         [ "$(sha "$same_kept")" = "$(index_get companion_sha256)" ]; then
         companion_file=$same_kept
     elif [ -n "$companion_file" ]; then
-        take_file 'companion package' "$companion_file" companion
+        take_file 'Linux driver package' "$companion_file" companion
         companion_file=$taken
         taken_companion=$taken
     elif [ -n "$companion_source" ]; then
-        take_tree 'companion source' "$companion_source" companion
+        take_tree 'Linux driver package directory' "$companion_source" companion
         companion_source=$taken
         taken_companion=$taken
     fi
@@ -1835,9 +1858,9 @@ if [ "$display" -eq 1 ] && [ -n "$nvkms_source" ] && [ "$kept_nvkms" -eq 0 ]; th
     taken_nvkms=$taken
 fi
 if [ -n "$companion_file" ]; then
-    [ -f "$companion_file" ] || refuse "companion package missing: $second_shown"
+    [ -f "$companion_file" ] || refuse "Linux driver package missing: $second_shown"
     gs_package_check second "$companion_file" "$second_shown" ||
-        refuse "the second package $second_shown was not run; the line above says why"
+        refuse "the Linux driver package $second_shown was not run; the line above says why"
     mkdir "$work/companion" || fail 'cannot create the companion extraction directory'
     ( cd "$work/companion" && sh "$companion_file" --extract-only ) >"$work/companion.log" 2>&1 ||
         refuse "could not extract $second_shown with --extract-only"
@@ -1851,21 +1874,21 @@ if [ -n "$companion_file" ]; then
     companion_source=$found
 fi
 if [ -n "$companion_source" ]; then
-    [ -d "$companion_source" ] || refuse "companion source missing: $second_shown"
+    [ -d "$companion_source" ] || refuse "Linux driver package directory missing: $second_shown"
     companion_root=$companion_source
     if [ ! -d "$companion_root/nvidia-uvm" ] && [ -d "$companion_root/kernel/nvidia-uvm" ]; then
         companion_root=$companion_root/kernel
     fi
     companion=$companion_root
     if [ "$identity_failed" -eq 0 ]; then
-        second_identity=$(detect second "$companion_source") || refuse "cannot identify the second package: $second_shown"
+        second_identity=$(detect second "$companion_source") || refuse "cannot identify the Linux driver package: $second_shown"
         second_version=$(printf '%s\n' "$second_identity" | sed -n 's/^version=//p')
-        [ -n "$second_version" ] || refuse "the second package declares no version: $second_shown"
+        [ -n "$second_version" ] || refuse "the Linux driver package declares no version: $second_shown"
         if [ "$kept_companion" -eq 1 ] && [ "$second_version" != "$(index_get companion_version)" ]; then
-            refuse "NVIDIA's second package that an earlier install kept was changed since: $(index_get companion) declares version $second_version, and the one that was kept declared $(index_get companion_version). NVIDIA's files are as they were. Run \`geforce-sriov install\` in the source folder with --companion-file PATH (or --companion-source DIR); that keeps it again"
+            refuse "the Linux driver package that an earlier install kept was changed since: $(index_get companion) declares version $second_version, and the one that was kept declared $(index_get companion_version). NVIDIA's files are as they were. Run \`geforce-sriov install\` in the source folder with --companion-file PATH (or --companion-source DIR); that keeps it again"
         fi
     else
-        refuse "cannot identify the host source, so the second package cannot be classified: $src_shown"
+        refuse "cannot identify the host source, so the Linux driver package cannot be classified: $src_shown"
     fi
 fi
 if [ "$display" -eq 1 ]; then
@@ -1879,7 +1902,7 @@ if [ "$display" -eq 1 ]; then
     fi
 fi
 if [ "$display" -eq 1 ] || [ "$host_cuda" -eq 1 ]; then
-    [ -n "$companion_source" ] || refuse "--display and --host-cuda need NVIDIA's second package: pass --companion-file PATH or --companion-source DIR, or use --no-display and --no-host-cuda"
+    [ -n "$companion_source" ] || refuse "--display and --host-cuda need the Linux driver package: pass --companion-file PATH or --companion-source DIR, or use --no-display and --no-host-cuda"
 fi
 # A package file contributes its pinned digest; an extracted directory contributes none. The public
 # source digest was never pinned, so a display build records none and identifies P by version only.
@@ -2086,10 +2109,10 @@ if [ "$display" -eq 1 ] || [ "$host_cuda" -eq 1 ]; then
             refuse 'the DRM GPU-selection patch did not match uniquely; nothing was installed'
         gs_apply_source_patch "$work/tree" "$patch_dir/allocation-threshold.patch" ||
             refuse 'the allocation-threshold patch did not match uniquely; nothing was installed'
-        # The programs of the second package are of another version than this driver: nvidia.ko accepts that one version (NV_ESC_CHECK_VERSION_STR).
+        # The programs of the Linux driver package are of another version than this driver: nvidia.ko accepts that one version (NV_ESC_CHECK_VERSION_STR).
         case $second_version in
             none|"$host_version") ;;
-            ''|*[!0-9.]*) refuse "the second package's version is not usable: $second_version" ;;
+            ''|*[!0-9.]*) refuse "the Linux driver package's version is not usable: $second_version" ;;
             *)
                 [ -f "$patch_dir/client-accept.patch" ] ||
                     refuse "the source patches are not installed next to $0 (driver-patches/client-accept.patch)"
@@ -2442,6 +2465,7 @@ done
 save module "$module"
 save backup "$backup"
 save record "$published"
+save krecord "$records/$kernel"
 save copy "$copy"
 save link "$link"
 save config "$config"
@@ -2606,6 +2630,14 @@ record_tmp=$work/record
     printf 'journal_plugin_previous=%s\njournal_plugin_previous_sha256=%s\njournal_plugin_link_previous=%s\n' \
         "$plugin_previous" "$plugin_previous_sha" "$link_previous"
     printf 'journal_config=%s\njournal_config_previous=%s\n' "$config_action" "$config_previous"
+    # Where the record lands is decided here, with the kernel that is running now, so that finishing an
+    # interrupted commit after a reboot does the same.
+    land=published
+    if [ "$kernel" != "$(uname -r)" ] && [ -f "$published" ] && [ ! -L "$published" ] &&
+        [ "$(gs_record_get "$published" kernel)" = "$(uname -r)" ]; then
+        land=kept
+    fi
+    printf 'journal_land=%s\n' "$land"
     printf 'journal_retire=%s\n' "$(printf '%s' "$retiring" | sed 's/^ *//')"
     for name in $retiring; do
         eval "path=\$prev_path_$name"
@@ -2625,10 +2657,10 @@ sync_dir "$state"
 commit_files
 # The commit is complete: nothing after it undoes it. The record of this kernel is the published one now.
 committing=0
-record=$published
+record=$landed
 stage_cuda_built "$companion_source"
 stage_desktop_built "$companion_source"
-# The extraction of the second package is not needed any more; its room may be needed for what is kept.
+# The extraction of the Linux driver package is not needed any more; its room may be needed for what is kept.
 rm -rf "$work/companion"
 keep_inputs 1 || printf 'geforce-sriov-driver: warning: the build inputs could not be kept under %s\n' "$inputs" >&2
 printf 'geforce-sriov-driver: patched plugin copy installed: %s (sha256 %s)\n' "$copy" "$(printf '%s\n' "$copy_digest" | cut -c 1-16)"

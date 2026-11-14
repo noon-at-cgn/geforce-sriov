@@ -24,6 +24,10 @@ state=@STATE@
 failed=$state/kernel-hook-failed
 logs=$state/kernel-hook-logs
 
+# NVIDIA's own module of kernel $1 exists and was built for that kernel: the driver step compares the build string (vermagic) too.
+stock_module() {
+    [ "$(modinfo -k "$1" -F vermagic nvidia 2>/dev/null | awk '{print $1}')" = "$1" ]
+}
 case $kernel in ''|.*|*/*) exit 0 ;; esac
 
 # `--retry` is run by apt after dpkg (/etc/apt/apt.conf.d/99geforce-sriov): the headers of a kernel can be installed after its
@@ -42,9 +46,17 @@ if [ "$kernel" = --retry ]; then
         [ -f "/lib/modules/$k/build/Makefile" ] || continue
         # An image is in /boot (Debian, Fedora) or in the kernel's own directory (Fedora, Arch).
         [ -e "/boot/vmlinuz-$k" ] || [ -e "/lib/modules/$k/vmlinuz" ] || continue
-        [ "$k" != "$current" ] || continue
-        # A kernel that has its build is left alone, unless that build still carries the guest framebuffer cap of an earlier build.
-        if [ -e "$state/driver-builds/$k" ] && ! grep -q '^guest_fb=1$' "$state/driver-builds/$k" 2>/dev/null; then
+        # The published record names the kernel of the latest build (any kernel, not the running one): that is its build record, and
+        # every other kernel's is $state/driver-builds/KERNEL. A kernel that has its build is left alone while NVIDIA's module for it
+        # is still installed for that kernel (a headers reinstall or a removed module needs the build again), unless that build still
+        # carries the guest framebuffer cap of an earlier build.
+        own=
+        if [ "$k" = "$current" ]; then
+            own=$state/driver-build
+        elif [ -e "$state/driver-builds/$k" ]; then
+            own=$state/driver-builds/$k
+        fi
+        if [ -n "$own" ] && ! grep -q '^guest_fb=1$' "$own" 2>/dev/null && stock_module "$k"; then
             continue
         fi
         if [ -f "$failed/$k" ] && ! grep -q -e '^the headers of kernel ' -e "^NVIDIA's own module for kernel " "$failed/$k" 2>/dev/null; then
@@ -54,7 +66,7 @@ if [ "$kernel" = --retry ]; then
         # headers changed since (their ctime is later than the report: a reinstalled package keeps the mtimes of its files), so that no
         # apt run pays for a DKMS build that fails every time.
         if [ -f "$failed/$k" ] && grep -q "^NVIDIA's own module for kernel " "$failed/$k" 2>/dev/null; then
-            modinfo -k "$k" -n nvidia >/dev/null 2>&1 ||
+            stock_module "$k" ||
                 [ "$(stat -L -c %Z "/lib/modules/$k/build/Makefile" 2>/dev/null || echo 0)" -gt "$(stat -c %Z "$failed/$k" 2>/dev/null || echo 0)" ] || continue
         fi
         GS_HOOK_RETRY=1 sh "$0" "$k" || :
@@ -82,24 +94,25 @@ fi
 # NVIDIA's own module for the kernel is what the build starts from. DKMS builds it for a new kernel from its own headers hook,
 # which not every distribution runs (Proxmox's headers package does not), so ask DKMS here; when it is still missing the kernel
 # is reported as such, and the next apt run tries again.
-if ! modinfo -k "$kernel" -n nvidia >/dev/null 2>&1; then
+limit=
+if command -v timeout >/dev/null 2>&1; then
+    limit="timeout 3600"
+fi
+# The module counts only when it was built for this kernel: the driver step compares the build string (vermagic) too.
+if ! stock_module "$kernel"; then
     if command -v dkms >/dev/null 2>&1; then
         say "NVIDIA's own module for kernel $kernel is not built yet; asking DKMS to build it (dkms autoinstall -k $kernel)"
         mkdir -p "$logs" 2>/dev/null
-        dkms autoinstall -k "$kernel" >"$logs/$kernel.dkms.log" 2>&1 </dev/null || :
+        $limit dkms autoinstall -k "$kernel" >"$logs/$kernel.dkms.log" 2>&1 </dev/null || :
     fi
-    if ! modinfo -k "$kernel" -n nvidia >/dev/null 2>&1; then
+    if ! stock_module "$kernel"; then
         mkdir -p "$failed" 2>/dev/null
-        printf 'NVIDIA'\''s own module for kernel %s is not built yet; build it with `dkms install nvidia/VERSION -k %s`, then run the command below\n' "$kernel" "$kernel" >"$failed/$kernel" 2>/dev/null
+        printf 'NVIDIA'\''s own module for kernel %s is not built yet; build it with `dkms autoinstall -k %s`, then run the command below\n' "$kernel" "$kernel" >"$failed/$kernel" 2>/dev/null
         say "NVIDIA's own module for kernel $kernel is not built yet, so geforce-sriov's module is not built for it; build it with DKMS, then run: sudo geforce-sriov rebuild --kernel $kernel"
         exit 0
     fi
 fi
 say "building NVIDIA's module for kernel $kernel (geforce-sriov rebuild --kernel $kernel); log: $log"
-limit=
-if command -v timeout >/dev/null 2>&1; then
-    limit="timeout 3600"
-fi
 mkdir -p "$logs" 2>/dev/null
 # Exit 4 is another geforce-sriov process holding the lock (an activation after boot, an install): wait
 # for it, six tries ten seconds apart, before calling it a failure.

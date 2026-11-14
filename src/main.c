@@ -20,7 +20,7 @@ static void usage(FILE *f)
 		"           [--stop-display-manager]\n"
 		"  livepatch --boot [--load-driver] [--config FILE]\n"
 		"      Load the livepatch (the early boot unit): no removal, no rescan.\n"
-		"      --load-driver  after the livepatch is enabled, load nvidia too (the boot unit's mode)\n"
+		"      --load-driver  wait for udev, then load nvidia (the first step of the activate unit)\n"
 		"  setup [--device BDF]... [--vfs N] [--interactive | --no-prompt]\n"
 		"        [--allow-unsupported-driver] [feature and package options]\n"
 		"  install [--device BDF]... [--vfs N] [--prefix PATH] [--destdir PATH]\n"
@@ -184,7 +184,7 @@ static int parse_package_opt(int argc, char **argv, int *i, struct gs_install_op
 static int check_install_opts(const struct gs_install_opts *o)
 {
 	if (o->companion_file && o->companion_source)
-		return bad("--companion-file and --companion-source both name the companion package; give one");
+		return bad("--companion-file and --companion-source both name the Linux driver package; give one");
 	if (o->driver_file && o->nvidia_source)
 		return bad("--driver-file and --nvidia-source both name NVIDIA's kernel tree; give one");
 	if (o->driver_file && o->skip_driver)

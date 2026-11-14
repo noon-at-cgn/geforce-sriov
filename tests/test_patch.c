@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 #include "patch.h"
+#include "tmpdir.h"
 #include "safe_output.h"
 #include <elf.h>
 #include <stdint.h>
@@ -47,7 +48,7 @@ static void fixture(void)
 }
 int main(void)
 {
- struct gs_patch_info i;char err[512]={0},hash[65],dir[]="/tmp/gs-patch-test-XXXXXX",path[256];unsigned char original[4096];FILE *f;unsigned char check[4096]={0};
+ struct gs_patch_info i;char err[512]={0},hash[65],dir[256],path[512];unsigned char original[4096];FILE *f;unsigned char check[4096]={0};
  fixture();memcpy(original,buf,sizeof(buf));CHECK(gs_patch_structure(buf,sizeof(buf),"580.159.01",&i,err,sizeof(err))==0&&i.offset==552&&!i.patched,"stock fixture: %s",err);
  buf[552]=buf[553]=0x90;CHECK(!gs_patch_structure(buf,sizeof(buf),"580.159.01",&i,err,sizeof(err))&&i.patched,"patched fixture: %s",err);
  CHECK(!gs_patch_inspect(buf,sizeof(buf),&i,err,sizeof(err))&&!i.digest,"synthetic anchor is unconfirmed");
@@ -65,7 +66,7 @@ int main(void)
  for(size_t n=0;n<448;n++)CHECK(gs_patch_structure(buf,n,"580.159.01",&i,err,sizeof(err))<0,"truncated to %zu bytes",n);
  fixture();{Elf64_Shdr sh;memcpy(&sh,buf+64+sizeof(sh),sizeof(sh));sh.sh_offset=UINT64_MAX-4;memcpy(buf+64+sizeof(sh),&sh,sizeof(sh));}CHECK(gs_patch_structure(buf,sizeof(buf),"580.159.01",&i,err,sizeof(err))<0,"section offset overflow");
  gs_sha256((const unsigned char *)"abc",3,SIZE_MAX,hash);CHECK(!strcmp(hash,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),"sha256 abc");
- if(!mkdtemp(dir)){perror("mkdtemp");return 2;}
+ gs_test_template(dir,sizeof(dir),"gs-patch-test-XXXXXX");if(!mkdtemp(dir)){perror("mkdtemp");return 2;}
  snprintf(path,sizeof(path),"%s/output",dir);CHECK(gs_write_new_output(path,original,sizeof(original),err,sizeof(err))>=0,"new output: %s",err);CHECK(gs_write_new_output(path,buf,sizeof(buf),err,sizeof(err))<0,"existing output refused");
  f=fopen(path,"rb");CHECK(f!=NULL,"reopen output");
  if(f){CHECK(fread(check,1,sizeof(check),f)==sizeof(check),"read output");CHECK(!fclose(f),"close output");CHECK(!memcmp(check,original,sizeof(check)),"output kept first contents");}

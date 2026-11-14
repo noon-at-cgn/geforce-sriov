@@ -1,0 +1,17 @@
+=== 40-resmoke-install start (boot BOOT, kernel KERNEL, Ada=0000:03:00.0 Ampere=0000:04:00.0, dry=1, evidence DRYDIR/40-resmoke-install-BOOT)
+CHECK rc2 archive matches its SHA256SUMS :: (cd $RC2DIR && sha256sum -c SHA256SUMS)
+CHECK no VM running :: vms_stopped
+CHECK installed build is 0.4.0 (rc1) :: geforce-sriov --version | grep -q "geforce-sriov $EXPECT_VER"
++ snap rc1-before
++ make -C /root/rel040rc2/geforce-sriov-0.4.0 > DRYDIR/40-resmoke-install-BOOT/build.txt   (expect rc 0)
++ /root/rel040rc2/geforce-sriov-0.4.0/geforce-sriov --version > DRYDIR/40-resmoke-install-BOOT/rc2version.txt   (expect rc 0)
+CHECK rc2version prints /geforce-sriov 0.4.0/ :: grep -Eq -- 'geforce-sriov 0.4.0' DRYDIR/40-resmoke-install-BOOT/rc2version.txt
++ sh -c cd /root/rel040rc2/geforce-sriov-0.4.0 && ./geforce-sriov install --driver-file /root/geforce-sriov-win/v030-inputs/NVIDIA-Linux-x86_64-580.159.01-vgpu-kvm.run --companion-file /root/geforce-sriov-win/v030-inputs/NVIDIA-Linux-x86_64-580.159.03-grid.run --nvkms-source /root/geforce-sriov-win/v030-inputs/ogkm-580.159.03.tar.gz --accept-nvidia-license --device 0000:03:00.0 --device 0000:04:00.0 --host-desktop > DRYDIR/40-resmoke-install-BOOT/install.txt   (expect rc 0)
+CHECK install does not print /refused/ :: ! grep -Eq -- 'refused' DRYDIR/40-resmoke-install-BOOT/install.txt
+CHECK format stamp, record (top), selection (2 lines), units enabled :: [ "$(cat $STATE/format)" = "$EXPECT_VER" ] && [ "$(rec fb_placement)" = top ] && [ "$(grep -vc "^#" $STATE/selection)" = 2 ] && systemctl is-enabled --quiet geforce-sriov-activate && systemctl is-enabled --quiet geforce-sriov-livepatch
+CHECK installed geforce-sriov is byte-identical to the rc2 build :: cmp -s /usr/local/bin/geforce-sriov $RC2SRC/geforce-sriov
++ snap rc2-installed-not-booted
+dry
+CHECK stopcheck since TIME
+NEXT: cold power cycle (first boot of rc2 (run: 40-resmoke.sh boot)). Use the request-pve-reboot skill, then END THE TURN after QUEUED. After the boot run the next step of FINAL-PLAN.md.
+=== 40-resmoke-install: 0 failure(s)

@@ -2,17 +2,18 @@
 # geforce-sriov @VERSION@: load the SR-IOV livepatch before udev and before any
 # NVIDIA module, so the hidden SR-IOV, ARI and MSI-X capabilities are visible to
 # the kernel's first enumeration of each selected physical function.
-# It loads the livepatch and then NVIDIA's nvidia.ko, before udev can bind a
-# selected physical function: removing and rescanning cards, loading the rest of
-# NVIDIA's modules and enabling VFs belong to geforce-sriov-activate.service,
-# which runs the whole transaction once per boot.
+# It loads only the livepatch. NVIDIA's nvidia.ko is loaded later, at the start of
+# geforce-sriov-activate.service, after udev has processed the devices present at boot,
+# so a driver you gave another GPU (vfio-pci, a driver_override rule) is already in place.
+# Removing and rescanning cards, loading NVIDIA's modules and enabling VFs belong to
+# geforce-sriov-activate.service, which runs the whole transaction once per boot.
 # Runs before systemd-udevd starts (the kernel's uevents wait in
-# systemd-udevd-kernel.socket) and before any NVIDIA service, so no modalias
-# load can bind a selected physical function first. nvidia is loaded only after
-# the livepatch reads back enabled with its transition complete.
-# `geforce-sriov livepatch --boot --load-driver` refuses when the module has other
-# parameters, no GPU is selected, or the guard is from this boot or has an unknown
-# boot ID. A previous-boot guard remains set but does not block this early load.
+# systemd-udevd-kernel.socket) and before NVIDIA's services; of the geforce-sriov units only this
+# one is ordered before them. The package maps the NVIDIA
+# PCI aliases away, so no modalias load can bind a selected physical function.
+# `geforce-sriov livepatch --boot` refuses when the module has other parameters, no GPU is
+# selected, or the guard is from this boot or has an unknown boot ID. A previous-boot guard
+# remains set but does not block this early load.
 #
 # One-boot escape hatch: add `geforce_sriov.skip` to the kernel command line. Nothing here loads
 # a module then, and because the package maps the NVIDIA PCI aliases away, udev will not load
@@ -35,9 +36,9 @@ ConditionKernelCommandLine=!geforce_sriov.skip
 
 [Service]
 Type=oneshot
-ExecStart=@BINDIR@/geforce-sriov livepatch --boot --load-driver
+ExecStart=@BINDIR@/geforce-sriov livepatch --boot
 RemainAfterExit=yes
-# 300 s covers two bounded module loads (60 s each) and the 10 s livepatch wait, with room for a
+# 300 s covers one bounded module load (60 s) and the 10 s livepatch wait, with room for a
 # delayed root filesystem;
 # nothing here removes or rescans a card.
 TimeoutStartSec=300

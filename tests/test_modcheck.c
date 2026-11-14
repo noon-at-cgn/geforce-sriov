@@ -7,6 +7,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "modcheck.h"
+#include "tmpdir.h"
 #include <elf.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -254,12 +255,13 @@ static const struct spec mod_ok = {
 
 int main(void)
 {
-	char dir[] = "/tmp/gs-abi-XXXXXX", core[256], mod[256], mod2[256], sym[256];
+	char dir[200], core[256], mod[256], mod2[256], sym[256];
 	struct spec s;
 	char *out;
 	int rc;
 	FILE *f;
 
+	gs_test_template(dir, sizeof(dir), "gs-abi-XXXXXX");
 	CHECK(mkdtemp(dir) != NULL);
 	snprintf(core, sizeof(core), "%s/core.ko", dir);
 	snprintf(mod, sizeof(mod), "%s/mod.ko", dir);

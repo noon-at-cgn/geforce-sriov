@@ -31,7 +31,7 @@ state=/var/lib/geforce-sriov
 K=6.99.1-1.fc42.x86_64
 mkdir -p "$S/bin" "$state" /etc/kernel/install.d /usr/local/bin "/lib/modules/$K/build" /boot
 : >/var/log/gs-calls
-render() { sed -e "s|@BINDIR@|$S/bin|g" -e "s|@STATE@|$state|g" -e "s|@VERSION@|0.4.0|g" "$1" >"$2"; }
+render() { sed -e "s|@BINDIR@|$S/bin|g" -e "s|@STATE@|$state|g" -e "s|@VERSION@|0.4.1|g" "$1" >"$2"; }
 render /src/scripts/geforce-sriov-kernel-hook.sh "$S/bin/geforce-sriov-kernel-hook"
 chmod 755 "$S/bin/geforce-sriov-kernel-hook"
 cat >"$S/bin/geforce-sriov" <<'EOF'

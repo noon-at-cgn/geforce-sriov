@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.1] - 2026-11-13
+
+This release keeps NVIDIA's driver away from GPUs you gave to other drivers, releases GPUs that NVIDIA's driver cannot start, and shows the host console on every selected GPU.
+
+### Upgrading from 0.4.0
+
+Run `sudo geforce-sriov uninstall` from 0.4.0, power the machine off and on, then install 0.4.1. See [Upgrading](docs/installation.md#upgrading).
+
+### Breaking changes
+
+- NVIDIA's driver now loads after your own driver rules, so a service that needs it early should wait for `geforce-sriov-activate.service`.
+- A monitor on any selected GPU now shows the host console. Set `display=boot` to keep the 0.4.0 behaviour.
+
+### Added
+
+- A GPU that is not selected and that NVIDIA's driver cannot start is released by activation. See [A GPU that NVIDIA's driver cannot start](docs/installation.md#a-gpu-that-nvidias-driver-cannot-start).
+- `status` lists every NVIDIA GPU that is not selected, with its driver and what that means. See [NVIDIA GPUs that are not selected](docs/installation.md#nvidia-gpus-that-are-not-selected).
+- The config value `display=boot` gives the display modules to the boot display GPU only. See [Boot display GPU](docs/installation.md#boot-display-gpu).
+
+### Fixed
+
+- A build for a kernel that is not running no longer replaces the running kernel's published build record, and the next `install` or `rebuild` for the running kernel puts its record back.
+
 ## [0.4.0] - 2026-11-13
 
 This release gives Ada VMs a better way to get video memory and lets the GPU draw the host desktop. It also includes the fixes prepared as 0.3.1, which was not released.

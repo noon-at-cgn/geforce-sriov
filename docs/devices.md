@@ -64,12 +64,12 @@ Each uses its generation's target, and `activate` and `check` process every sele
 
 - One host module and one plugin serve all cards, so every revision any selected generation needs is
   made ([Which revisions to make](driver-patch.md#which-revisions-to-make)). Loading `nvidia` binds
-  every NVIDIA card on the host, so select every card you will use.
+  every NVIDIA card on the host that no other driver holds, so select every card you will use.
 - The rebuilt `nvidia.ko` applies to every card bound to it, selected or not: its VF-count and scheduler revisions are not per card.
   The VF-count revision forces 4 virtual functions on every card bound to it, whatever its row. Each virtual function (VF) serves one vGPU.
   `vfs` accepts values from 1 to the card's ceiling: 16 on Ampere and `28b0`, 4 on other Ada cards. NVIDIA's patched driver uses at most 4 VFs per card.
 - The selection, `bdfs`, limits what the kernel module presents for SR-IOV. It also limits the identity hook
-  and `activate`. A card outside it is bound by NVIDIA's driver but not activated.
+  and `activate`. A card outside it is bound by NVIDIA's driver but not activated. The exception is a card outside the device table that NVIDIA's driver cannot start. See [A GPU that NVIDIA's driver cannot start](installation.md#a-gpu-that-nvidias-driver-cannot-start).
 - `status` and `install --dry-run` print one `[WARN]` when a selection mixes Ada with another generation, and nothing refuses
   the selection itself.
 - `--type` is refused on a mixed selection with exit 3, because no single type is creatable on both

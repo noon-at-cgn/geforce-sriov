@@ -27,7 +27,7 @@ S=/opt/gs
 state=/var/lib/geforce-sriov
 mkdir -p "$S/bin" "$state" /etc/pacman.d/hooks /usr/local/bin /tmp/build
 : >/var/log/gs-calls
-render() { sed -e "s|@BINDIR@|$S/bin|g" -e "s|@STATE@|$state|g" -e "s|@VERSION@|0.4.0|g" "$1" >"$2"; }
+render() { sed -e "s|@BINDIR@|$S/bin|g" -e "s|@STATE@|$state|g" -e "s|@VERSION@|0.4.1|g" "$1" >"$2"; }
 render /src/scripts/geforce-sriov-kernel-hook.sh "$S/bin/geforce-sriov-kernel-hook"
 chmod 755 "$S/bin/geforce-sriov-kernel-hook"
 render /src/scripts/geforce-sriov-pacman.hook /etc/pacman.d/hooks/90-geforce-sriov.hook
